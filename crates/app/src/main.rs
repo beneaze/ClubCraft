@@ -8,6 +8,7 @@ mod jobs;
 mod library_view;
 mod live;
 mod pipeline;
+mod studio;
 mod theme;
 mod waveform;
 mod widgets;

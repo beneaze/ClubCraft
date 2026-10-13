@@ -10,11 +10,13 @@ pub mod mix;
 pub mod paths;
 pub mod planner;
 pub mod stems;
+pub mod timeline;
 
 pub use analysis::*;
 pub use key::Key;
 pub use library::{Library, Track, TrackId};
 pub use mix::*;
+pub use timeline::{ActiveTrack, MixTimeline, TimelineTrack, TimelineTransition};
 pub use stems::{StemTrack, STEM_CHANNELS, STEM_CHUNK_FRAMES};
 
 /// Internal processing sample rate (also the rate the Demucs models are trained on).

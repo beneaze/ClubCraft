@@ -22,6 +22,8 @@ pub struct Shared {
     pub playlist_tracks: HashMap<i64, Vec<TrackId>>,
     pub job_status: HashMap<Option<TrackId>, JobStatus>,
     pub cue_counts: HashMap<TrackId, usize>,
+    pub waveforms: HashMap<TrackId, std::sync::Arc<clubcraft_core::Waveform>>,
+    pub user_cues: HashMap<TrackId, Vec<clubcraft_core::Cue>>,
     pub deck_count: usize,
 }
 
@@ -36,12 +38,37 @@ impl Shared {
         self.analyses = lib.all_analyses().unwrap_or_default();
         self.playlists = lib.playlists().unwrap_or_default();
         self.playlist_tracks = self.playlists.iter().map(|(id, _)| (*id, lib.playlist_tracks(*id).unwrap_or_default())).collect();
+        let ids: Vec<TrackId> = self.tracks.iter().map(|t| t.id).collect();
+        for id in ids {
+            self.load_side_data(lib, id);
+        }
+    }
+
+    fn load_side_data(&mut self, lib: &Library, id: TrackId) {
+        if let Some(t) = self.track(id) {
+            let hash = t.hash.clone();
+            if self.analyses.contains_key(&id) {
+                if let Some(wf) = clubcraft_core::Waveform::load(&hash) {
+                    self.waveforms.insert(id, std::sync::Arc::new(wf));
+                }
+            }
+        }
+        let cues = lib.cues(id).unwrap_or_default();
+        self.cue_counts.insert(id, cues.len());
+        self.user_cues.insert(id, cues);
+    }
+
+    /// Auto cues merged with the user's own and imported cues.
+    pub fn effective_cues(&self, id: TrackId) -> Vec<clubcraft_core::Cue> {
+        let auto = self.analyses.get(&id).map(|a| a.cues.clone()).unwrap_or_default();
+        clubcraft_core::effective_cues(&auto, self.user_cues.get(&id).map(|v| v.as_slice()).unwrap_or(&[]))
     }
 
     pub fn reload_track(&mut self, lib: &Library, id: TrackId) {
         if let Ok(Some(a)) = lib.analysis(id) {
             self.analyses.insert(id, a);
         }
+        self.load_side_data(lib, id);
     }
 }
 
@@ -57,6 +84,8 @@ pub struct App {
     pub decks: Vec<crate::live::model::DeckUi>,
     pub mixer: crate::live::model::MixerUi,
     pub browser: LibraryView,
+    pub studio: crate::studio::StudioView,
+    pub mixes: Vec<(i64, String, i64)>,
 }
 
 impl App {
@@ -82,7 +111,13 @@ impl App {
                 _ => {}
             }
         }
-        App { lib, sh, jobs, view, library: LibraryView::default(), status: String::new(), devctl: crate::devctl::DevCtl::from_env(), live: Default::default(), decks: vec![Default::default(); 2], mixer: Default::default(), browser: LibraryView::default() }
+        let mut app = App { lib, sh, jobs, view, library: LibraryView::default(), status: String::new(), devctl: crate::devctl::DevCtl::from_env(), live: Default::default(), decks: vec![Default::default(); 2], mixer: Default::default(), browser: LibraryView::default(), studio: Default::default(), mixes: Vec::new() };
+        app.mixes = app.lib.mixes().unwrap_or_default();
+        let last_mix = cc.storage.and_then(|s| eframe::get_value::<i64>(s, "mix"));
+        if let Some(m) = last_mix.and_then(|id| app.lib.mix(id).ok().flatten()) {
+            app.studio.set_mix(m);
+        }
+        app
     }
 
     fn handle_events(&mut self, ctx: &egui::Context) {
@@ -90,7 +125,10 @@ impl App {
         let mut reload_all = false;
         for e in events {
             match e {
-                Event::LibraryChanged => reload_all = true,
+                Event::LibraryChanged => {
+                    reload_all = true;
+                    self.mixes = self.lib.mixes().unwrap_or_default();
+                }
                 Event::TrackUpdated(id) => self.sh.reload_track(&self.lib, id),
                 Event::Error { message, .. } => self.status = message,
                 _ => {}
@@ -129,9 +167,66 @@ impl App {
                         let _ = std::process::Command::new("open").arg("-R").arg(&t.path).spawn();
                     }
                 }
-                LibraryAction::LoadDeck(..) | LibraryAction::AddToMix(..) => {}
+                LibraryAction::AddToMix(ids) => {
+                    self.studio.add_tracks(&self.sh, &ids);
+                    self.view = View::Studio;
+                }
+                LibraryAction::LoadDeck(..) => {}
             }
         }
+    }
+
+    pub fn save_mix(&mut self) {
+        if self.studio.dirty && !self.studio.mix.tracks.is_empty() {
+            match self.lib.save_mix(&mut self.studio.mix) {
+                Ok(_) => self.studio.dirty = false,
+                Err(e) => self.status = format!("save mix: {e}"),
+            }
+            self.mixes = self.lib.mixes().unwrap_or_default();
+        }
+    }
+
+    fn handle_studio_actions(&mut self, actions: Vec<crate::studio::StudioAction>) {
+        use crate::studio::StudioAction as A;
+        for a in actions {
+            match a {
+                A::SaveMix => self.save_mix(),
+                A::ImportDjStudio => {
+                    let tx = self.jobs.sender();
+                    std::thread::spawn(move || {
+                        let r = clubcraft_core::Library::open_default().and_then(|lib| crate::interop::djstudio::import_all(&lib, &crate::interop::djstudio::default_root()));
+                        let msg = match r {
+                            Ok(r) => format!("DJ.Studio: imported {} tracks, {} cues, {} mixes ({} files not found)", r.tracks_imported, r.cues_imported, r.mixes.len(), r.missing_files.len()),
+                            Err(e) => format!("DJ.Studio import failed: {e:#}"),
+                        };
+                        let _ = tx.send(crate::jobs::Event::Error { track: None, message: msg });
+                        let _ = tx.send(crate::jobs::Event::LibraryChanged);
+                    });
+                    self.status = "Importing from DJ.Studio…".into();
+                }
+                A::ExportVirtualDj => self.export_virtualdj(),
+                other => self.studio_transport(other),
+            }
+        }
+    }
+
+    fn export_virtualdj(&mut self) {
+        let Some(path) = rfd::FileDialog::new().set_title("VirtualDJ database.xml (VirtualDJ must be closed)").set_file_name("database.xml").save_file() else { return };
+        let songs: Vec<crate::interop::virtualdj::VdjSong> = self
+            .sh
+            .tracks
+            .iter()
+            .filter(|t| self.sh.analyses.get(&t.id).is_some_and(|a| a.version > 0))
+            .map(|t| crate::interop::virtualdj::VdjSong { track: t, analysis: self.sh.analyses.get(&t.id), cues: self.sh.effective_cues(t.id) })
+            .collect();
+        self.status = match crate::interop::virtualdj::export(&path, &songs) {
+            Ok((u, a)) => format!("VirtualDJ: updated {u}, added {a} songs in {}", path.display()),
+            Err(e) => format!("VirtualDJ export failed: {e:#}"),
+        };
+    }
+
+    fn studio_transport(&mut self, a: crate::studio::StudioAction) {
+        log::debug!("studio transport {a:?}");
     }
 
     fn handle_live_actions(&mut self, actions: Vec<crate::live::model::LiveAction>) {
@@ -142,6 +237,31 @@ impl App {
 
     fn dev_command(&mut self, cmd: &str) {
         log::info!("devctl: {cmd}");
+        let (c, arg) = cmd.split_once(' ').unwrap_or((cmd, ""));
+        match c {
+            "djs-import" => self.handle_studio_actions(vec![crate::studio::StudioAction::ImportDjStudio]),
+            "mix" => {
+                if let Some((id, _, _)) = self.mixes.iter().find(|m| m.1.to_lowercase().contains(&arg.to_lowercase())) {
+                    if let Ok(Some(m)) = self.lib.mix(*id) {
+                        self.studio.set_mix(m);
+                        self.view = View::Studio;
+                    }
+                }
+            }
+            "select" => {
+                self.studio.selection = match arg.split_once(' ') {
+                    Some(("track", n)) => crate::studio::Selection::Track(n.parse().unwrap_or(0)),
+                    Some(("transition", n)) => crate::studio::Selection::Transition(n.parse().unwrap_or(0)),
+                    _ => crate::studio::Selection::None,
+                }
+            }
+            "process-all" => {
+                for t in &self.sh.tracks {
+                    self.jobs.process(t.id, false);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
@@ -214,7 +334,21 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ui, |ui| match self.view {
             View::Library => self.library.ui(ui, &self.sh, false, &mut actions),
             View::Studio => {
-                ui.label("Studio");
+                let mut sa = Vec::new();
+                let (mut load, mut new) = (None, false);
+                let mixes = self.mixes.clone();
+                self.studio.ui(ui, &self.sh, &mixes, &mut sa, &mut load, &mut new);
+                if new {
+                    self.save_mix();
+                    self.studio.set_mix(clubcraft_core::Mix::default());
+                }
+                if let Some(id) = load {
+                    self.save_mix();
+                    if let Ok(Some(m)) = self.lib.mix(id) {
+                        self.studio.set_mix(m);
+                    }
+                }
+                self.handle_studio_actions(sa);
             }
             View::Live => {
                 let mut live_actions = Vec::new();
@@ -228,5 +362,9 @@ impl eframe::App for App {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, "view", &self.view);
+        self.save_mix();
+        if self.studio.mix.id > 0 {
+            eframe::set_value(storage, "mix", &self.studio.mix.id);
+        }
     }
 }
