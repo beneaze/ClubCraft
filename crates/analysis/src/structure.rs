@@ -91,8 +91,11 @@ pub(crate) fn bar_features(prep: &crate::Prepared, grid: &BeatGrid) -> BarFeatur
     if n == 0 {
         return BarFeatures::default();
     }
-    let starts: Vec<f64> = (0..n).map(|i| grid.time_of_bar((first_bar + i as i32) as f64)).collect();
-    let span = |i: usize| -> (f64, f64) { (starts[i].max(0.0), (starts[i] + grid.bar_len()).min(dur)) };
+    let starts: Vec<f64> = (0..n)
+        .map(|i| grid.time_of_bar((first_bar + i as i32) as f64))
+        .collect();
+    let span =
+        |i: usize| -> (f64, f64) { (starts[i].max(0.0), (starts[i] + grid.bar_len()).min(dur)) };
 
     // Mix level.
     let level: Vec<f32> = (0..n)
@@ -107,7 +110,12 @@ pub(crate) fn bar_features(prep: &crate::Prepared, grid: &BeatGrid) -> BarFeatur
         })
         .collect();
     // Band energies from the mel front end.
-    let band_ranges = [spec.bands(0.0, 150.0), spec.bands(150.0, 600.0), spec.bands(600.0, 4000.0), spec.bands(4000.0, 20000.0)];
+    let band_ranges = [
+        spec.bands(0.0, 150.0),
+        spec.bands(150.0, 600.0),
+        spec.bands(600.0, 4000.0),
+        spec.bands(4000.0, 20000.0),
+    ];
     let frame_range = |a: f64, b: f64| -> (usize, usize) {
         let fa = ((a * fps).round() as usize).min(spec.n_frames);
         let fb = ((b * fps).round() as usize).min(spec.n_frames);
@@ -131,10 +139,12 @@ pub(crate) fn bar_features(prep: &crate::Prepared, grid: &BeatGrid) -> BarFeatur
         }
         o
     };
-    let bands: Vec<[f32; 4]> = (0..n).map(|i| {
-        let (a, b) = span(i);
-        band_e(a, b)
-    }).collect();
+    let bands: Vec<[f32; 4]> = (0..n)
+        .map(|i| {
+            let (a, b) = span(i);
+            band_e(a, b)
+        })
+        .collect();
     // Coarse timbre (8 groups of 5 mel bands).
     let mut timbre: Vec<[f32; 8]> = (0..n)
         .map(|i| {
@@ -168,7 +178,11 @@ pub(crate) fn bar_features(prep: &crate::Prepared, grid: &BeatGrid) -> BarFeatur
         .map(|i| {
             let (a, b) = span(i);
             let (fa, fb) = frame_range(a, b);
-            if fb <= fa { 0.0 } else { dsp::mean(&onset[fa..fb]) }
+            if fb <= fa {
+                0.0
+            } else {
+                dsp::mean(&onset[fa..fb])
+            }
         })
         .collect();
 
@@ -228,7 +242,13 @@ pub(crate) fn bar_features(prep: &crate::Prepared, grid: &BeatGrid) -> BarFeatur
     let bref: Vec<f32> = (0..4).map(|k| refp(&|i| bands[i][k])).collect();
     let sref: Vec<f32> = (0..4).map(|k| refp(&|i| stems_db[i][k])).collect();
     let dref = dsp::percentile(&dens, 90.0).max(1e-6);
-    let mut out = BarFeatures { first_bar, start: starts.clone(), has_stems, timbre, ..Default::default() };
+    let mut out = BarFeatures {
+        first_bar,
+        start: starts.clone(),
+        has_stems,
+        timbre,
+        ..Default::default()
+    };
     out.phrase_origin = (0..n)
         .find(|&i| starts[i] >= -0.03 && level[i] - lref > -40.0)
         .map(|i| first_bar + i as i32)
@@ -244,8 +264,10 @@ pub(crate) fn bar_features(prep: &crate::Prepared, grid: &BeatGrid) -> BarFeatur
         out.density.push((dens[i] / dref).min(1.5));
         let mut act = [0.0f32; 4];
         // (lo, hi): dB below the stem's own loud level (p95) mapped to activity 0 and 1.
-        const STEM_RANGE: [(f32, f32); 4] = [(-18.0, -6.0), (-18.0, -6.0), (-16.0, -5.0), (-20.0, -8.0)];
-        const MIX_RANGE: [(f32, f32); 4] = [(-12.0, -3.0), (-14.0, -5.0), (-10.0, -2.0), (-20.0, -8.0)];
+        const STEM_RANGE: [(f32, f32); 4] =
+            [(-18.0, -6.0), (-18.0, -6.0), (-16.0, -5.0), (-20.0, -8.0)];
+        const MIX_RANGE: [(f32, f32); 4] =
+            [(-12.0, -3.0), (-14.0, -5.0), (-10.0, -2.0), (-20.0, -8.0)];
         for k in 0..4 {
             if !has_stems && k == 3 {
                 continue;
@@ -262,7 +284,9 @@ pub(crate) fn bar_features(prep: &crate::Prepared, grid: &BeatGrid) -> BarFeatur
             };
         }
         out.stems.push(act);
-        let e = 0.5 * ((lv + 15.0) / 15.0).clamp(0.0, 1.0) + 0.125 * (act[0] + act[1]) + 0.25 * (dens[i] / dref).min(1.0);
+        let e = 0.5 * ((lv + 15.0) / 15.0).clamp(0.0, 1.0)
+            + 0.125 * (act[0] + act[1])
+            + 0.25 * (dens[i] / dref).min(1.0);
         out.energy.push(e.clamp(0.0, 1.0));
     }
     out
@@ -387,18 +411,33 @@ impl Seg {
             lv += b.level_db[i] / m;
             de += b.density[i] / m;
         }
-        Seg { a, e, stems: st, energy: en, level: lv, density: de }
+        Seg {
+            a,
+            e,
+            stems: st,
+            energy: en,
+            level: lv,
+            density: de,
+        }
     }
 }
 
 /// Bar features of a track for a given grid (public entry for [`segment`] / cue generation).
-pub fn bar_features_for(audio: &clubcraft_audio::AudioBuffer, stems: Option<crate::StemsRef>, grid: &BeatGrid) -> BarFeatures {
+pub fn bar_features_for(
+    audio: &clubcraft_audio::AudioBuffer,
+    stems: Option<crate::StemsRef>,
+    grid: &BeatGrid,
+) -> BarFeatures {
     let prep = crate::Prepared::new(audio, stems);
     bar_features(&prep, grid)
 }
 
 /// Public entry: sections of a track given its grid.
-pub fn sections(audio: &clubcraft_audio::AudioBuffer, stems: Option<crate::StemsRef>, grid: &BeatGrid) -> Vec<Section> {
+pub fn sections(
+    audio: &clubcraft_audio::AudioBuffer,
+    stems: Option<crate::StemsRef>,
+    grid: &BeatGrid,
+) -> Vec<Section> {
     let prep = crate::Prepared::new(audio, stems);
     let bars = bar_features(&prep, grid);
     segment(&bars, grid, audio.duration())
@@ -422,7 +461,12 @@ pub fn segment(b: &BarFeatures, grid: &BeatGrid, duration: f64) -> Vec<Section> 
         bounds.remove(m - 2);
     }
     let mut segs: Vec<Seg> = bounds.windows(2).map(|w| Seg::new(b, w[0], w[1])).collect();
-    let emax = segs.iter().filter(|s| s.e - s.a >= 2).map(|s| s.energy).fold(0.0f32, f32::max).max(1e-6);
+    let emax = segs
+        .iter()
+        .filter(|s| s.e - s.a >= 2)
+        .map(|s| s.energy)
+        .fold(0.0f32, f32::max)
+        .max(1e-6);
     let kinds = label(&mut segs, emax, b);
     let mut out: Vec<Section> = Vec::new();
     for (s, k) in segs.iter().zip(kinds) {
@@ -443,7 +487,12 @@ pub fn segment(b: &BarFeatures, grid: &BeatGrid, duration: f64) -> Vec<Section> 
         // Merge adjacent intro / build / outro parts (drops, breaks and verses keep their
         // phrase boundaries).
         if let Some(last) = out.last_mut() {
-            if last.kind == sec.kind && matches!(sec.kind, SectionKind::Intro | SectionKind::Outro | SectionKind::Buildup) {
+            if last.kind == sec.kind
+                && matches!(
+                    sec.kind,
+                    SectionKind::Intro | SectionKind::Outro | SectionKind::Buildup
+                )
+            {
                 let (l1, l2) = (last.bars as f32, sec.bars as f32);
                 let t = (l1 + l2).max(1.0);
                 last.energy = (last.energy * l1 + sec.energy * l2) / t;
@@ -508,7 +557,10 @@ fn label(segs: &mut Vec<Seg>, emax: f32, b: &BarFeatures) -> Vec<SectionKind> {
     // Outro: trailing sections after the last drop with less energy or without bass.
     if let Some(ld) = last_drop {
         for i in (ld + 1)..n {
-            if rel(&segs[i]) < rel(&segs[ld]) - 0.03 || bass(&segs[i]) < 0.5 || drums(&segs[i]) < 0.5 {
+            if rel(&segs[i]) < rel(&segs[ld]) - 0.03
+                || bass(&segs[i]) < 0.5
+                || drums(&segs[i]) < 0.5
+            {
                 kinds[i] = Outro;
             }
         }
@@ -563,7 +615,11 @@ fn label(segs: &mut Vec<Seg>, emax: f32, b: &BarFeatures) -> Vec<SectionKind> {
             let tail = (snapped.max(region_start as i64) as usize).min(drop_bar);
             let len = drop_bar - tail;
             let drumless = (region_start..tail).filter(|&t| drum(t) < 0.3).count();
-            let bass_tail = if len > 0 { (tail..drop_bar).map(|t| b.stems[t][1]).sum::<f32>() / len as f32 } else { 1.0 };
+            let bass_tail = if len > 0 {
+                (tail..drop_bar).map(|t| b.stems[t][1]).sum::<f32>() / len as f32
+            } else {
+                1.0
+            };
             let in_intro = bar_kind[tail..drop_bar].iter().all(|k| *k == Intro);
             let intro_ok = !in_intro || (drop_bar - region_start >= 16 && len <= 8);
             let mut build: Option<usize> = None;
@@ -576,7 +632,10 @@ fn label(segs: &mut Vec<Seg>, emax: f32, b: &BarFeatures) -> Vec<SectionKind> {
                 let tl = if rl >= 24 { 8 } else { 4 };
                 let cut = drop_bar - tl;
                 let act = |a: usize, e: usize| {
-                    (a..e).map(|q| b.density[q] + 0.03 * b.bands_db[q][3] + 0.5 * b.stems[q][0]).sum::<f32>() / (e - a) as f32
+                    (a..e)
+                        .map(|q| b.density[q] + 0.03 * b.bands_db[q][3] + 0.5 * b.stems[q][0])
+                        .sum::<f32>()
+                        / (e - a) as f32
                 };
                 if act(cut, drop_bar) > act(region_start, cut) + 0.12 {
                     build = Some(cut);

@@ -23,7 +23,14 @@ pub fn load_stems(dir: &Path, mix: &AudioBuffer) -> anyhow::Result<OwnedStems> {
     // Find the lag (stems later than mix by `lag` samples) on a 30 s excerpt.
     let a = (n / 3).min(n.saturating_sub(1));
     let len = (30 * mix.sample_rate as usize).min(n - a);
-    let sum: Vec<f32> = (0..stems[0].0.len()).map(|i| stems.iter().map(|s| s.0.get(i).copied().unwrap_or(0.0)).sum()).collect();
+    let sum: Vec<f32> = (0..stems[0].0.len())
+        .map(|i| {
+            stems
+                .iter()
+                .map(|s| s.0.get(i).copied().unwrap_or(0.0))
+                .sum()
+        })
+        .collect();
     let mut best = (0isize, f64::MIN);
     for lag in -3000isize..=3000 {
         let mut acc = 0.0f64;

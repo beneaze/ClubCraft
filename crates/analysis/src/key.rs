@@ -46,23 +46,40 @@ impl Profile {
                 let (a, b) = Profile::Shaath.templates();
                 let (c, d) = Profile::Edma.templates();
                 let (a, b, c, d) = (z(a), z(b), z(c), z(d));
-                (std::array::from_fn(|i| 0.5 * (a[i] + c[i])), std::array::from_fn(|i| 0.5 * (b[i] + d[i])))
+                (
+                    std::array::from_fn(|i| 0.5 * (a[i] + c[i])),
+                    std::array::from_fn(|i| 0.5 * (b[i] + d[i])),
+                )
             }
             Profile::Edma => (
-                [0.1652, 0.0475, 0.0829, 0.0669, 0.0999, 0.0927, 0.0529, 0.1316, 0.0522, 0.0744, 0.0694, 0.0643],
-                [0.1724, 0.0400, 0.0761, 0.1205, 0.0504, 0.0886, 0.0415, 0.1353, 0.0730, 0.0513, 0.0916, 0.0509],
+                [
+                    0.1652, 0.0475, 0.0829, 0.0669, 0.0999, 0.0927, 0.0529, 0.1316, 0.0522, 0.0744,
+                    0.0694, 0.0643,
+                ],
+                [
+                    0.1724, 0.0400, 0.0761, 0.1205, 0.0504, 0.0886, 0.0415, 0.1353, 0.0730, 0.0513,
+                    0.0916, 0.0509,
+                ],
             ),
             Profile::Temperley => (
                 [5.0, 2.0, 3.5, 2.0, 4.5, 4.0, 2.0, 4.5, 2.0, 3.5, 1.5, 4.0],
                 [5.0, 2.0, 3.5, 4.5, 2.0, 4.0, 2.0, 4.5, 3.5, 2.0, 1.5, 4.0],
             ),
             Profile::Shaath => (
-                [7.24, 3.50, 3.58, 2.85, 5.82, 4.56, 2.45, 6.99, 3.39, 4.56, 4.07, 4.46],
-                [7.00, 3.143, 4.36, 5.40, 3.67, 4.09, 3.91, 6.20, 3.63, 3.15, 3.81, 2.69],
+                [
+                    7.24, 3.50, 3.58, 2.85, 5.82, 4.56, 2.45, 6.99, 3.39, 4.56, 4.07, 4.46,
+                ],
+                [
+                    7.00, 3.143, 4.36, 5.40, 3.67, 4.09, 3.91, 6.20, 3.63, 3.15, 3.81, 2.69,
+                ],
             ),
             Profile::Krumhansl => (
-                [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88],
-                [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17],
+                [
+                    6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88,
+                ],
+                [
+                    6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17,
+                ],
             ),
         }
     }
@@ -77,7 +94,10 @@ pub struct KeyOptions {
 
 impl Default for KeyOptions {
     fn default() -> Self {
-        KeyOptions { profile: Profile::EdmBlend, bass_weight: 0.0 }
+        KeyOptions {
+            profile: Profile::EdmBlend,
+            bass_weight: 0.0,
+        }
     }
 }
 
@@ -111,7 +131,11 @@ fn harmonic_signal(mono: &[f32], stems: Option<StemsRef>) -> Vec<f32> {
     }
 }
 
-pub fn estimate(audio: &clubcraft_audio::AudioBuffer, stems: Option<StemsRef>, opts: &KeyOptions) -> Option<KeyEstimate> {
+pub fn estimate(
+    audio: &clubcraft_audio::AudioBuffer,
+    stems: Option<StemsRef>,
+    opts: &KeyOptions,
+) -> Option<KeyEstimate> {
     let mono = audio.mono();
     let sig = harmonic_signal(&mono, stems);
     estimate_signal(&sig, audio.sample_rate as f64, stems.is_none(), opts)
@@ -133,7 +157,9 @@ fn spectrogram(x: &[f32], sr: f64) -> Spec {
     let hop = n_fft / 4;
     let bin_hz = sr / n_fft as f64;
     let nb = ((FMAX * 1.03) / bin_hz).ceil() as usize + 2;
-    let frames = dsp::stft_map(x, n_fft, hop, |_, s| s[..nb].iter().map(|c| c.norm()).collect::<Vec<f32>>());
+    let frames = dsp::stft_map(x, n_fft, hop, |_, s| {
+        s[..nb].iter().map(|c| c.norm()).collect::<Vec<f32>>()
+    });
     Spec { bin_hz, nb, frames }
 }
 
@@ -186,7 +212,11 @@ fn estimate_tuning(frames: &[Vec<f32>], bin_hz: f64) -> f32 {
 }
 
 /// Per-frame (bass, treble) chroma.
-fn chroma_frames(frames: &[Vec<f32>], bin_hz: f64, tuning_cents: f32) -> Vec<([f32; 12], [f32; 12], f32)> {
+fn chroma_frames(
+    frames: &[Vec<f32>],
+    bin_hz: f64,
+    tuning_cents: f32,
+) -> Vec<([f32; 12], [f32; 12], f32)> {
     let nb = frames.first().map(|f| f.len()).unwrap_or(0);
     // Precompute bin -> (pitch, weight) mapping.
     let mut map: Vec<(usize, usize, f32, bool)> = Vec::new(); // (bin, pitch class, weight, bass)
@@ -269,11 +299,18 @@ pub fn key_from_chroma(c: &[f32; 12], profile: Profile) -> (Key, f32, f32) {
 
 /// Diagnostics: (tuning cents, treble chroma, bass chroma) accumulated over the track.
 #[doc(hidden)]
-pub fn debug_chroma(audio: &clubcraft_audio::AudioBuffer, stems: Option<StemsRef>) -> Option<(f32, [f32; 12], [f32; 12])> {
+pub fn debug_chroma(
+    audio: &clubcraft_audio::AudioBuffer,
+    stems: Option<StemsRef>,
+) -> Option<(f32, [f32; 12], [f32; 12])> {
     let mono = audio.mono();
     let sig = harmonic_signal(&mono, stems);
     let spec = spectrogram(&sig, audio.sample_rate as f64);
-    let frames = if stems.is_none() { harmonic_median(&spec, 4) } else { spec.frames.clone() };
+    let frames = if stems.is_none() {
+        harmonic_median(&spec, 4)
+    } else {
+        spec.frames.clone()
+    };
     let tuning = estimate_tuning(&frames, spec.bin_hz);
     let ch = chroma_frames(&frames, spec.bin_hz, tuning);
     let emax = ch.iter().map(|c| c.2).fold(0.0f32, f32::max);
@@ -298,12 +335,21 @@ pub fn debug_chroma(audio: &clubcraft_audio::AudioBuffer, stems: Option<StemsRef
     Some((tuning, tb, bb))
 }
 
-pub(crate) fn estimate_signal(x: &[f32], sr: f64, hpss: bool, opts: &KeyOptions) -> Option<KeyEstimate> {
+pub(crate) fn estimate_signal(
+    x: &[f32],
+    sr: f64,
+    hpss: bool,
+    opts: &KeyOptions,
+) -> Option<KeyEstimate> {
     let spec = spectrogram(x, sr);
     if spec.frames.len() < 8 {
         return None;
     }
-    let frames = if hpss { harmonic_median(&spec, 4) } else { spec.frames.clone() };
+    let frames = if hpss {
+        harmonic_median(&spec, 4)
+    } else {
+        spec.frames.clone()
+    };
     let tuning = estimate_tuning(&frames, spec.bin_hz);
     let ch = chroma_frames(&frames, spec.bin_hz, tuning);
     let emax = ch.iter().map(|c| c.2).fold(0.0f32, f32::max);
@@ -330,5 +376,11 @@ pub(crate) fn estimate_signal(x: &[f32], sr: f64, hpss: bool, opts: &KeyOptions)
         *v /= s;
     }
     let (key, score, margin) = key_from_chroma(&acc, opts.profile);
-    Some(KeyEstimate { key, score, margin, tuning_cents: tuning, chroma: acc })
+    Some(KeyEstimate {
+        key,
+        score,
+        margin,
+        tuning_cents: tuning,
+        chroma: acc,
+    })
 }

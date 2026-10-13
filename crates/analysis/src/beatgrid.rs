@@ -56,7 +56,15 @@ pub struct BeatOptions {
 
 impl Default for BeatOptions {
     fn default() -> Self {
-        BeatOptions { min_bpm: 70.0, max_bpm: 180.0, fold_min: 85.0, fold_max: 175.0, prior_bpm: 124.0, prior_octaves: 0.6, snap: true }
+        BeatOptions {
+            min_bpm: 70.0,
+            max_bpm: 180.0,
+            fold_min: 85.0,
+            fold_max: 175.0,
+            prior_bpm: 124.0,
+            prior_octaves: 0.6,
+            snap: true,
+        }
     }
 }
 
@@ -64,7 +72,14 @@ impl BeatOptions {
     /// Options for a known BPM range (e.g. from tags or the user): searches and folds into it.
     pub fn with_range(min_bpm: f64, max_bpm: f64) -> Self {
         let c = (min_bpm * max_bpm).sqrt();
-        BeatOptions { min_bpm, max_bpm, fold_min: min_bpm, fold_max: max_bpm, prior_bpm: c, ..Default::default() }
+        BeatOptions {
+            min_bpm,
+            max_bpm,
+            fold_min: min_bpm,
+            fold_max: max_bpm,
+            prior_bpm: c,
+            ..Default::default()
+        }
     }
 }
 
@@ -80,12 +95,20 @@ pub struct GridEstimate {
 
 /// Detect the beat grid of a track (mix only, or with stems for a more robust result).
 /// `None` when no periodic beat is found (silence, beatless ambient tracks).
-pub fn detect(audio: &clubcraft_audio::AudioBuffer, stems: Option<crate::StemsRef>, opts: &BeatOptions) -> Option<BeatGrid> {
+pub fn detect(
+    audio: &clubcraft_audio::AudioBuffer,
+    stems: Option<crate::StemsRef>,
+    opts: &BeatOptions,
+) -> Option<BeatGrid> {
     detect_detailed(audio, stems, opts).map(|e| e.grid)
 }
 
 /// Like [`detect`], also returning the grid confidence and bar-phase scores.
-pub fn detect_detailed(audio: &clubcraft_audio::AudioBuffer, stems: Option<crate::StemsRef>, opts: &BeatOptions) -> Option<GridEstimate> {
+pub fn detect_detailed(
+    audio: &clubcraft_audio::AudioBuffer,
+    stems: Option<crate::StemsRef>,
+    opts: &BeatOptions,
+) -> Option<GridEstimate> {
     let prep = crate::Prepared::new(audio, stems);
     estimate(&prep, opts)
 }
@@ -110,7 +133,10 @@ pub(crate) fn estimate(prep: &crate::Prepared, opts: &BeatOptions) -> Option<Gri
     let cands = tempo_candidates(&env, fps, opts);
     let bpm0 = *cands.first()?;
     let (mut period, mut phase, mut conf) = refine(&env, fps, 60.0 * fps / bpm0);
-    log::debug!("tempo: ac {bpm0:.3} -> refined {:.4} (conf {conf:.2})", 60.0 * fps / period);
+    log::debug!(
+        "tempo: ac {bpm0:.3} -> refined {:.4} (conf {conf:.2})",
+        60.0 * fps / period
+    );
     // Weak periodicity: also refine the runner-up tempo hypotheses and keep the sharpest grid.
     if conf < 2.0 {
         let prior = |b: f64| {
@@ -163,21 +189,40 @@ pub(crate) fn estimate(prep: &crate::Prepared, opts: &BeatOptions) -> Option<Gri
     let first = phase.rem_euclid(period);
     let beat_s = period / fps;
     let first_s = first / fps + BEAT_OFFSET_S;
-    let first_s = if first_s < 0.0 { first_s + beat_s } else if first_s >= beat_s { first_s - beat_s } else { first_s };
+    let first_s = if first_s < 0.0 {
+        first_s + beat_s
+    } else if first_s >= beat_s {
+        first_s - beat_s
+    } else {
+        first_s
+    };
     let (bar_off, bar_scores) = bar_phase(prep, &env, fps, first_s, beat_s);
     let grid = BeatGrid::new(bpm, first_s + bar_off as f64 * beat_s);
-    Some(GridEstimate { grid, confidence: conf, bar_scores })
+    Some(GridEstimate {
+        grid,
+        confidence: conf,
+        bar_scores,
+    })
 }
 
 /// log(on-beat / half-beat) folded onset strength: + kick/clap bands, - hats band.
 fn onbeat_score(spec: &Spectral, logmel: &[f32], period: f64, phase: f64) -> f64 {
-    let bands = [(spec.bands(150.0, 600.0), 1.0), (spec.bands(600.0, 4000.0), 1.0), (spec.bands(4000.0, 20000.0), -1.0)];
+    let bands = [
+        (spec.bands(150.0, 600.0), 1.0),
+        (spec.bands(600.0, 4000.0), 1.0),
+        (spec.bands(4000.0, 20000.0), -1.0),
+    ];
     let mut score = 0.0;
     for (b, w) in bands {
         let env = spec.onset(logmel, b);
         let mut prof = [0.0; FOLD_BINS];
         fold(&env, period, phase, 0..env.len(), &mut prof);
-        let at = |c: usize| (0..5).map(|d| prof[(c + FOLD_BINS + d - 2) % FOLD_BINS]).fold(0.0, f64::max).max(1e-9);
+        let at = |c: usize| {
+            (0..5)
+                .map(|d| prof[(c + FOLD_BINS + d - 2) % FOLD_BINS])
+                .fold(0.0, f64::max)
+                .max(1e-9)
+        };
         score += w * (at(0) / at(FOLD_BINS / 2)).ln();
     }
     score
@@ -187,7 +232,11 @@ fn onbeat_score(spec: &Spectral, logmel: &[f32], period: f64, phase: f64) -> f64
 /// autocorrelation comb (1, 2, 4 and 8 beats) weighted by a log-Gaussian prior.
 fn tempo_candidates(env: &[f32], fps: f64, opts: &BeatOptions) -> Vec<f64> {
     let avg = dsp::moving_average(env, (fps * 1.0) as usize);
-    let e: Vec<f32> = env.iter().zip(&avg).map(|(a, m)| (a - m).max(0.0)).collect();
+    let e: Vec<f32> = env
+        .iter()
+        .zip(&avg)
+        .map(|(a, m)| (a - m).max(0.0))
+        .collect();
     let max_lag = (60.0 * fps / opts.min_bpm * 8.0) as usize + 4;
     let ac = dsp::autocorr(&e, max_lag);
     let score = |bpm: f64| -> f64 {
@@ -199,11 +248,14 @@ fn tempo_candidates(env: &[f32], fps: f64, opts: &BeatOptions) -> Vec<f64> {
     };
     let step = 0.02;
     let n = ((opts.max_bpm - opts.min_bpm) / step) as usize + 1;
-    let scores: Vec<f64> = (0..n).map(|i| score(opts.min_bpm + i as f64 * step)).collect();
+    let scores: Vec<f64> = (0..n)
+        .map(|i| score(opts.min_bpm + i as f64 * step))
+        .collect();
     let mut peaks: Vec<(f64, f64)> = Vec::new();
     for i in 1..n.saturating_sub(1) {
         if scores[i] > scores[i - 1] && scores[i] >= scores[i + 1] && scores[i] > 0.0 {
-            let bpm = opts.min_bpm + (i as f64 + dsp::parabolic(scores[i - 1], scores[i], scores[i + 1])) * step;
+            let bpm = opts.min_bpm
+                + (i as f64 + dsp::parabolic(scores[i - 1], scores[i], scores[i + 1])) * step;
             peaks.push((bpm, scores[i]));
         }
     }
@@ -229,7 +281,13 @@ fn tempo_candidates(env: &[f32], fps: f64, opts: &BeatOptions) -> Vec<f64> {
 const FOLD_BINS: usize = 96;
 
 /// Folded (beat-synchronous) mean profile of `env` over `range` for a grid (period, phase).
-fn fold(env: &[f32], period: f64, phase: f64, range: std::ops::Range<usize>, out: &mut [f64; FOLD_BINS]) {
+fn fold(
+    env: &[f32],
+    period: f64,
+    phase: f64,
+    range: std::ops::Range<usize>,
+    out: &mut [f64; FOLD_BINS],
+) {
     let mut sum = [0.0f64; FOLD_BINS];
     let mut cnt = [0.0f64; FOLD_BINS];
     let nb = FOLD_BINS as f64;
@@ -258,12 +316,20 @@ fn profile_peak(p: &[f64; FOLD_BINS]) -> (f64, f32) {
         let b = p[(i + 1) % FOLD_BINS];
         s[i] = 0.25 * a + 0.5 * p[i] + 0.25 * b;
     }
-    let (im, &mx) = s.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap();
+    let (im, &mx) = s
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.total_cmp(b.1))
+        .unwrap();
     let mean = s.iter().sum::<f64>() / FOLD_BINS as f64;
     if mean <= 1e-9 {
         return (0.0, 0.0);
     }
-    let off = dsp::parabolic(s[(im + FOLD_BINS - 1) % FOLD_BINS], mx, s[(im + 1) % FOLD_BINS]);
+    let off = dsp::parabolic(
+        s[(im + FOLD_BINS - 1) % FOLD_BINS],
+        mx,
+        s[(im + 1) % FOLD_BINS],
+    );
     let mut th = (im as f64 + off) / FOLD_BINS as f64;
     if th >= 0.5 {
         th -= 1.0;
@@ -297,14 +363,25 @@ fn near_phase(env: &[f32], period: f64, phase: f64) -> (f64, f32) {
         }
     }
     let i = best.0;
-    let off = dsp::parabolic(prof[(i + FOLD_BINS - 1) % FOLD_BINS], prof[i], prof[(i + 1) % FOLD_BINS]);
+    let off = dsp::parabolic(
+        prof[(i + FOLD_BINS - 1) % FOLD_BINS],
+        prof[i],
+        prof[(i + 1) % FOLD_BINS],
+    );
     let mut th = (i as f64 + off) / FOLD_BINS as f64;
     if th >= 0.5 {
         th -= 1.0;
     }
     let mean = prof.iter().sum::<f64>() / FOLD_BINS as f64;
     let mx = prof.iter().cloned().fold(f64::MIN, f64::max);
-    (phase + th * period, if mean > 0.0 { ((mx - mean) / mean) as f32 } else { 0.0 })
+    (
+        phase + th * period,
+        if mean > 0.0 {
+            ((mx - mean) / mean) as f32
+        } else {
+            0.0
+        },
+    )
 }
 
 /// Iterative segment-phase regression. Returns (period, phase, confidence) in frames.
@@ -324,7 +401,11 @@ fn refine(env: &[f32], _fps: f64, period0: f64) -> (f64, f64, f32) {
             let (th, sal) = profile_peak(&prof);
             let c = ((start + end) as f64 * 0.5 - phase) / period;
             if sal > 0.3 {
-                pts.push((c, th, (sal as f64).powi(2) * (end - start) as f64 / seg_len as f64));
+                pts.push((
+                    c,
+                    th,
+                    (sal as f64).powi(2) * (end - start) as f64 / seg_len as f64,
+                ));
             }
             start = end;
         }
@@ -377,7 +458,11 @@ fn refine(env: &[f32], _fps: f64, period0: f64) -> (f64, f64, f32) {
                 break;
             }
             let den = sw * sxx - sx * sx;
-            let slope = if den.abs() > 1e-12 { (sw * sxy - sx * sy) / den } else { 0.0 };
+            let slope = if den.abs() > 1e-12 {
+                (sw * sxy - sx * sy) / den
+            } else {
+                0.0
+            };
             let icpt = (sy - slope * sx) / sw;
             fit = (icpt, slope);
             let mut changed = false;
@@ -394,7 +479,10 @@ fn refine(env: &[f32], _fps: f64, period0: f64) -> (f64, f64, f32) {
             }
         }
         let (icpt, slope) = fit;
-        log::trace!("refine iter {iter}: {} segs, icpt {icpt:.4} slope {slope:.6}", pts.len());
+        log::trace!(
+            "refine iter {iter}: {} segs, icpt {icpt:.4} slope {slope:.6}",
+            pts.len()
+        );
         phase += icpt * period;
         period *= 1.0 + slope;
     }
@@ -418,7 +506,13 @@ pub(crate) const N_PHASE_FEATS: usize = 12;
 
 /// Evidence for each of the 4 candidate bar phases (beat offset of the downbeat from the first
 /// beat at/after 0). Each feature row is normalised to sum 1 over the candidates.
-pub(crate) fn phase_features(prep: &crate::Prepared, env: &[f32], fps: f64, first_s: f64, beat_s: f64) -> Vec<[f32; 4]> {
+pub(crate) fn phase_features(
+    prep: &crate::Prepared,
+    env: &[f32],
+    fps: f64,
+    first_s: f64,
+    beat_s: f64,
+) -> Vec<[f32; 4]> {
     let spec = &prep.mix;
     let logmel = &prep.mix_log;
     let dur = spec.n_frames as f64 / fps;
@@ -453,7 +547,9 @@ pub(crate) fn phase_features(prep: &crate::Prepared, env: &[f32], fps: f64, firs
     // Onset strength of a band near each beat.
     let near = |e: &[f32], k: usize| -> f32 {
         let c = frame_of(first_s + k as f64 * beat_s) as isize;
-        (-2..=2).filter_map(|d| e.get((c + d).max(0) as usize).copied()).fold(0.0f32, f32::max)
+        (-2..=2)
+            .filter_map(|d| e.get((c + d).max(0) as usize).copied())
+            .fold(0.0f32, f32::max)
     };
     let hi_env = spec.onset(logmel, spec.bands(4000.0, 20000.0));
     let lo_env = spec.onset(logmel, spec.bands(0.0, 150.0));
@@ -482,7 +578,11 @@ pub(crate) fn phase_features(prep: &crate::Prepared, env: &[f32], fps: f64, firs
             .map(|k| {
                 let lo = k.saturating_sub(r);
                 let hi = (k + r + 1).min(nbeats);
-                if d[k] > 0.0 && d[lo..hi].iter().all(|x| *x <= d[k]) { d[k] } else { 0.0 }
+                if d[k] > 0.0 && d[lo..hi].iter().all(|x| *x <= d[k]) {
+                    d[k]
+                } else {
+                    0.0
+                }
             })
             .collect()
     };
@@ -556,10 +656,17 @@ pub(crate) fn phase_features(prep: &crate::Prepared, env: &[f32], fps: f64, firs
 }
 
 /// Weights of the phase features (log-odds style linear combination).
-const PHASE_WEIGHTS: [f32; N_PHASE_FEATS] = [0.0, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.01];
+const PHASE_WEIGHTS: [f32; N_PHASE_FEATS] =
+    [0.0, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.01];
 
 /// Choose which of the 4 beats starting at `first_s` is beat 1 of the bar.
-fn bar_phase(prep: &crate::Prepared, env: &[f32], fps: f64, first_s: f64, beat_s: f64) -> (usize, [f32; 4]) {
+fn bar_phase(
+    prep: &crate::Prepared,
+    env: &[f32],
+    fps: f64,
+    first_s: f64,
+    beat_s: f64,
+) -> (usize, [f32; 4]) {
     let f = phase_features(prep, env, fps, first_s, beat_s);
     let mut scores = [0.0f32; 4];
     for (row, w) in f.iter().zip(PHASE_WEIGHTS) {
@@ -567,20 +674,28 @@ fn bar_phase(prep: &crate::Prepared, env: &[f32], fps: f64, first_s: f64, beat_s
             scores[p] += w * row[p];
         }
     }
-    let best = (0..4).max_by(|a, b| scores[*a].total_cmp(&scores[*b])).unwrap();
+    let best = (0..4)
+        .max_by(|a, b| scores[*a].total_cmp(&scores[*b]))
+        .unwrap();
     (best, scores)
 }
 
 /// Diagnostics: (first beat time, beat length, phase feature matrix) for a track.
 #[doc(hidden)]
-pub fn debug_phase_features(audio: &clubcraft_audio::AudioBuffer) -> Option<(f64, f64, Vec<[f32; 4]>)> {
+pub fn debug_phase_features(
+    audio: &clubcraft_audio::AudioBuffer,
+) -> Option<(f64, f64, Vec<[f32; 4]>)> {
     let prep = crate::Prepared::new(audio, None);
     let est = estimate(&prep, &BeatOptions::default())?;
     let g = est.grid;
     let beat_s = g.beat_len();
     let first_s = g.downbeat.rem_euclid(beat_s);
     let env = beat_envelope(&prep.mix, &prep.mix_log);
-    Some((first_s, beat_s, phase_features(&prep, &env, prep.mix.fps, first_s, beat_s)))
+    Some((
+        first_s,
+        beat_s,
+        phase_features(&prep, &env, prep.mix.fps, first_s, beat_s),
+    ))
 }
 
 /// Diagnostics: folded onset strength of 5 bands (all, <150 Hz, 150-600, 600-4k, >4k) at the
@@ -590,7 +705,13 @@ pub fn debug_pulse_profile(audio: &clubcraft_audio::AudioBuffer, grid: &BeatGrid
     let prep = crate::Prepared::new(audio, None);
     let spec = &prep.mix;
     let fps = spec.fps;
-    let bands = [0..N_MELS, spec.bands(0.0, 150.0), spec.bands(150.0, 600.0), spec.bands(600.0, 4000.0), spec.bands(4000.0, 20000.0)];
+    let bands = [
+        0..N_MELS,
+        spec.bands(0.0, 150.0),
+        spec.bands(150.0, 600.0),
+        spec.bands(600.0, 4000.0),
+        spec.bands(4000.0, 20000.0),
+    ];
     let period = grid.beat_len() * fps;
     let phase = (grid.downbeat - BEAT_OFFSET_S) * fps;
     bands
@@ -600,7 +721,12 @@ pub fn debug_pulse_profile(audio: &clubcraft_audio::AudioBuffer, grid: &BeatGrid
             let mut prof = [0.0; FOLD_BINS];
             fold(&env, period, phase, 0..env.len(), &mut prof);
             let mean = prof.iter().sum::<f64>() / FOLD_BINS as f64;
-            let at = |c: usize| (0..5).map(|d| prof[(c + FOLD_BINS + d - 2) % FOLD_BINS]).fold(0.0, f64::max) / mean.max(1e-9);
+            let at = |c: usize| {
+                (0..5)
+                    .map(|d| prof[(c + FOLD_BINS + d - 2) % FOLD_BINS])
+                    .fold(0.0, f64::max)
+                    / mean.max(1e-9)
+            };
             [at(0) as f32, at(FOLD_BINS / 2) as f32]
         })
         .collect()

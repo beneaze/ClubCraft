@@ -164,7 +164,7 @@ impl Roformer {
     }
 
     /// Model input for one `[2][C]` chunk: (spectrum planes per channel, gathered `[T][D]`).
-    fn prepare(&self, chunk: [&[f32]; 2]) -> ([Vec<f32>; 4], Vec<f32>) {
+    pub fn prepare(&self, chunk: [&[f32]; 2]) -> ([Vec<f32>; 4], Vec<f32>) {
         let t = self.man.frames;
         let nb = self.stft.bins();
         let mut planes: [Vec<f32>; 4] = std::array::from_fn(|_| vec![0f32; nb * t]);
@@ -190,7 +190,7 @@ impl Roformer {
     }
 
     /// Apply the predicted masks and invert: returns the vocals of the chunk, `[2][C]`.
-    fn finish(&self, planes: &[Vec<f32>; 4], mask: &[f32]) -> [Vec<f32>; 2] {
+    pub fn finish(&self, planes: &[Vec<f32>; 4], mask: &[f32]) -> [Vec<f32>; 2] {
         let t = self.man.frames;
         let d = self.man.dim();
         let nb = self.stft.bins();

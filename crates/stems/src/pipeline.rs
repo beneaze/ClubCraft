@@ -126,21 +126,51 @@ impl ChunkedStems {
         self.chunks[c].get_or_insert_with(|| vec![0f32; 8 * n])
     }
 
-    /// Apply `x * scale + offset` to chunk `c` and return it interleaved (8 channels).
-    fn finish_interleaved(&mut self, c: usize, scale: f32, offset: f32) -> Vec<f32> {
+    /// Take chunk `c`, apply `x * scale + offset` and the optional finaliser (planar).
+    fn take_final(&mut self, c: usize, scale: f32, offset: f32, fin: Option<&Finalize<'_>>) -> Vec<f32> {
         let n = self.chunk_frames(c);
-        let planar = self.chunks[c].take().unwrap_or_else(|| vec![0f32; 8 * n]);
+        let mut planar = self.chunks[c].take().unwrap_or_else(|| vec![0f32; 8 * n]);
+        planar.iter_mut().for_each(|v| *v = *v * scale + offset);
+        if let Some(f) = fin {
+            f(c * STEM_CHUNK_FRAMES, n, &mut planar);
+        }
+        planar
+    }
+
+    /// Finished chunk `c`, interleaved (8 channels).
+    fn finish_interleaved(&mut self, c: usize, scale: f32, offset: f32, fin: Option<&Finalize<'_>>) -> Vec<f32> {
+        let n = self.chunk_frames(c);
+        let planar = self.take_final(c, scale, offset, fin);
         let mut out = vec![0f32; n * STEM_CHANNELS];
         for ch in 0..8 {
-            let src = &planar[ch * n..(ch + 1) * n];
-            for (f, v) in src.iter().enumerate() {
-                out[f * STEM_CHANNELS + ch] = v * scale + offset;
+            for (f, v) in planar[ch * n..(ch + 1) * n].iter().enumerate() {
+                out[f * STEM_CHANNELS + ch] = *v;
+            }
+        }
+        out
+    }
+
+    /// Assemble planar stems (applying `x * scale + offset` and the finaliser), freeing chunks
+    /// as it goes.
+    pub fn into_planar_with(mut self, scale: f32, offset: f32, fin: Option<&Finalize<'_>>) -> [(Vec<f32>, Vec<f32>); 4] {
+        let mut out: [(Vec<f32>, Vec<f32>); 4] = Default::default();
+        for (l, r) in out.iter_mut() {
+            l.reserve_exact(self.len);
+            r.reserve_exact(self.len);
+        }
+        for c in 0..self.chunks.len() {
+            let n = self.chunk_frames(c);
+            let planar = self.take_final(c, scale, offset, fin);
+            for (s, (l, r)) in out.iter_mut().enumerate() {
+                l.extend_from_slice(&planar[(2 * s) * n..(2 * s + 1) * n]);
+                r.extend_from_slice(&planar[(2 * s + 1) * n..(2 * s + 2) * n]);
             }
         }
         out
     }
 
     /// Assemble planar stems (applying `x * scale + offset`), freeing chunks as it goes.
+    #[allow(dead_code)]
     pub fn into_planar(mut self, scale: f32, offset: f32) -> [(Vec<f32>, Vec<f32>); 4] {
         let mut out: [(Vec<f32>, Vec<f32>); 4] = Default::default();
         for (l, r) in out.iter_mut() {
@@ -159,6 +189,10 @@ impl ChunkedStems {
     }
 }
 
+/// Completes a finished planar chunk (`[4 stems][2 ch][n]`, starting at track frame `start`)
+/// after un-normalisation, e.g. to fill stems computed outside the Demucs pass.
+pub(crate) type Finalize<'f> = dyn Fn(usize, usize, &mut [f32]) + Sync + 'f;
+
 pub(crate) struct Job<'a> {
     pub man: &'a Manifest,
     pub backend: &'a dyn Backend,
@@ -171,6 +205,10 @@ pub(crate) struct Job<'a> {
     pub scale: f32,
     pub offset: f32,
     pub target: Option<&'a StemTrack>,
+    /// Only compute these model sources (`None` = all with non-zero weight). Models without any
+    /// wanted source are skipped.
+    pub wanted: Option<&'a [usize]>,
+    pub finalize: Option<&'a Finalize<'a>>,
 }
 
 struct Prepared {
@@ -186,13 +224,21 @@ struct Inferred {
 }
 
 impl Job<'_> {
+    fn used_sources(&self, model: usize) -> Vec<usize> {
+        let all = self.man.used_sources(model);
+        match self.wanted {
+            Some(w) => all.into_iter().filter(|s| w.contains(s)).collect(),
+            None => all,
+        }
+    }
+
     /// Run all windows; `progress(fraction)` returning false cancels. Returns `None` on cancel.
     pub fn run(&self, progress: &mut dyn FnMut(f32) -> bool) -> Result<Option<ChunkedStems>> {
         let man = self.man;
         let plan = self.plan;
         let l = man.segment_samples;
-        let nmodels = man.models.len();
-        let used: Vec<Vec<usize>> = (0..nmodels).map(|i| man.used_sources(i)).collect();
+        let used: Vec<Vec<usize>> = (0..man.models.len()).map(|i| self.used_sources(i)).collect();
+        let nmodels = used.iter().filter(|u| !u.is_empty()).count();
         let total_steps = (self.order.len() * nmodels).max(1) as f32;
 
         // Chunk completion bookkeeping: number of windows still to come per stem chunk.
@@ -248,6 +294,9 @@ impl Job<'_> {
             let mut failure: Option<anyhow::Error> = None;
             'outer: for p in prep_rx.iter() {
                 for (i, srcs) in used.iter().enumerate() {
+                    if srcs.is_empty() {
+                        continue;
+                    }
                     let mut outs = outs_rx.try_recv().unwrap_or_default();
                     outs.resize_with(srcs.len(), SourceOut::default);
                     outs.truncate(srcs.len());
@@ -301,7 +350,7 @@ impl Job<'_> {
 
         for msg in rx.iter() {
             let w = plan.windows[msg.win];
-            let srcs = man.used_sources(msg.model);
+            let srcs = self.used_sources(msg.model);
             // Full waveform per (source, channel): ispec(spec_out) + wave_out.
             let jobs = srcs.len() * 2;
             ys.resize_with(jobs, Vec::new);
@@ -362,7 +411,7 @@ impl Job<'_> {
                     pending[c] -= 1;
                     if pending[c] == 0 {
                         if let Some(target) = self.target {
-                            let data = acc.finish_interleaved(c, self.scale, self.offset);
+                            let data = acc.finish_interleaved(c, self.scale, self.offset, self.finalize);
                             target.set_chunk(c, data);
                         }
                     }

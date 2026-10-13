@@ -64,6 +64,10 @@ pub enum Quality {
     High,
     /// `htdemucs_ft`, 2 shifts, overlap 0.5 (~12x).
     Ultra,
+    /// Best vocals: Mel-Band RoFormer (Kimberley Jensen, MIT) for vocals, `htdemucs_ft` drums and
+    /// bass on the instrumental (`mix − vocals`), other = `instrumental − drums − bass`, so the
+    /// four stems sum to the mix exactly (~9x). Model name `melroformer+htdemucs_ft`.
+    Best,
 }
 
 impl Quality {
@@ -72,6 +76,13 @@ impl Quality {
             Quality::Fast => Options { model: "htdemucs".into(), shifts: 1, overlap: 0.25, ..Default::default() },
             Quality::High => Options { model: "htdemucs_ft".into(), shifts: 1, overlap: 0.25, ..Default::default() },
             Quality::Ultra => Options { model: "htdemucs_ft".into(), shifts: 2, overlap: 0.5, ..Default::default() },
+            Quality::Best => Options {
+                model: "htdemucs_ft".into(),
+                shifts: 1,
+                overlap: 0.25,
+                vocals_model: Some("melroformer".into()),
+                ..Default::default()
+            },
         }
     }
 
@@ -80,6 +91,7 @@ impl Quality {
             "fast" => Some(Quality::Fast),
             "high" => Some(Quality::High),
             "ultra" => Some(Quality::Ultra),
+            "best" => Some(Quality::Best),
             _ => None,
         }
     }
@@ -100,11 +112,37 @@ pub struct Options {
     /// Explicit shift amounts in samples (overrides `shifts`; for tests / reproducing Demucs runs).
     /// Demucs' random `offset` corresponds to a shift of `22050 - offset`.
     pub shift_samples: Option<Vec<usize>>,
+    /// Dedicated vocal model (`melroformer`): vocals come from it, Demucs only provides drums and
+    /// bass, and "other" is the remainder so the stems sum to the mix.
+    pub vocals_model: Option<String>,
+    /// Chunk overlap of the vocal model (`None` = the checkpoint's reference value, 2).
+    pub vocals_overlap: Option<usize>,
+    /// What Demucs separates when a vocal model is used.
+    pub demucs_input: DemucsInput,
+}
+
+/// Input of the Demucs pass in [`Quality::Best`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DemucsInput {
+    /// The instrumental `mix − vocals` (measured best).
+    #[default]
+    Instrumental,
+    /// The original mix.
+    Mix,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { model: "htdemucs_ft".into(), shifts: 1, overlap: 0.25, backend: BackendKind::Auto, shift_samples: None }
+        Options {
+            model: "htdemucs_ft".into(),
+            shifts: 1,
+            overlap: 0.25,
+            backend: BackendKind::Auto,
+            shift_samples: None,
+            vocals_model: None,
+            vocals_overlap: None,
+            demucs_input: DemucsInput::Instrumental,
+        }
     }
 }
 
@@ -185,6 +223,8 @@ pub struct Separator {
     opts: Options,
     backend: Box<dyn Backend>,
     spectro: stft::Spectro,
+    roformer: Option<roformer::Roformer>,
+    name: String,
 }
 
 impl Separator {
@@ -201,8 +241,22 @@ impl Separator {
         let man = Manifest::load(dir, &opts.model)?;
         let backend = backend::load(opts.backend, &man)?;
         let spectro = stft::Spectro::new(man.nfft, man.hop_length);
-        log::info!("stem separator: {} on {}", man.name, backend.name());
-        Ok(Separator { man, opts, backend, spectro })
+        let roformer = match &opts.vocals_model {
+            Some(v) => {
+                let mut rf = roformer::Roformer::load(dir, v, opts.backend)?;
+                if let Some(o) = opts.vocals_overlap {
+                    rf.man.num_overlap = o.max(1);
+                }
+                Some(rf)
+            }
+            None => None,
+        };
+        let name = match &roformer {
+            Some(rf) => format!("{}+{}", rf.man.name, man.name),
+            None => man.name.clone(),
+        };
+        log::info!("stem separator: {name} on {}", backend.name());
+        Ok(Separator { man, opts, backend, spectro, roformer, name })
     }
 
     /// `"coreml-gpu"` or `"onnxruntime-cpu"`.
@@ -210,9 +264,10 @@ impl Separator {
         self.backend.name()
     }
 
-    /// Model name (e.g. `"htdemucs_ft"`), stored in [`StemTrack::model`].
+    /// Model name stored in [`StemTrack::model`] and the cache file: `htdemucs`, `htdemucs_ft`,
+    /// `htdemucs_6s` or `melroformer+htdemucs_ft` ([`Quality::Best`]).
     pub fn model_name(&self) -> &str {
-        &self.man.name
+        &self.name
     }
 
     pub fn options(&self) -> &Options {
@@ -226,7 +281,8 @@ impl Separator {
     /// Number of model invocations needed for `frames` samples (for time estimates).
     pub fn segments_for(&self, frames: usize) -> usize {
         let plan = Plan::new(frames, self.man.segment_samples, self.opts.overlap, &self.opts.shift_list(self.man.samplerate));
-        plan.windows.len() * self.man.models.len()
+        let demucs_models = if self.roformer.is_some() { 2 } else { self.man.models.len() };
+        plan.windows.len() * demucs_models + self.roformer.as_ref().map_or(0, |r| r.chunks_for(frames))
     }
 
     /// Separate a whole track. `progress(fraction)` is called after every model invocation;
@@ -246,9 +302,8 @@ impl Separator {
             st.sample_rate = audio.sample_rate;
             return Ok(st);
         }
-        let acc = self.run(audio, None, 0, progress)?;
-        let (mean, std) = norm_stats(audio);
-        Ok(Stems { sample_rate: audio.sample_rate, stems: acc.into_planar(std, mean) })
+        let stems = self.run(audio, None, 0, progress)?.unwrap_or_default();
+        Ok(Stems { sample_rate: audio.sample_rate, stems })
     }
 
     /// Progressive separation for live decks: processes the segments around `start_frame` first,
@@ -279,21 +334,64 @@ impl Separator {
         Ok(())
     }
 
+    /// Shared implementation: returns the planar stems when `target` is `None`.
     fn run(
         &self,
         audio: &AudioBuffer,
         target: Option<&StemTrack>,
         start_frame: usize,
         progress: &mut dyn FnMut(f32) -> bool,
-    ) -> Result<pipeline::ChunkedStems> {
+    ) -> Result<Option<[(Vec<f32>, Vec<f32>); 4]>> {
         let len = audio.frames();
         if len == 0 {
-            return Ok(pipeline::ChunkedStems { len: 0, chunks: Vec::new() });
+            return Ok(Some(Default::default()));
         }
-        let (mean, std) = norm_stats(audio);
-        let x: [Vec<f32>; 2] =
-            [&audio.left, &audio.right].map(|c| c.iter().map(|v| (v - mean) / std).collect::<Vec<f32>>());
         let plan = Plan::new(len, self.man.segment_samples, self.opts.overlap, &self.opts.shift_list(self.man.samplerate));
+
+        // Best: vocals from the dedicated model first, Demucs then only does drums and bass.
+        let mut demucs_frac = 1.0f32;
+        let mut extra: Option<([Vec<f32>; 2], [Vec<f32>; 2])> = None; // (vocals, instrumental)
+        let mut wanted: Option<Vec<usize>> = None;
+        if let Some(rf) = &self.roformer {
+            let n_rf = rf.chunks_for(len) as f32;
+            let n_dm = (plan.windows.len() * 2) as f32;
+            // Relative cost of a RoFormer chunk vs a Demucs segment (measured on CoreML, M1 Pro).
+            let rf_frac = 5.0 * n_rf / (5.0 * n_rf + n_dm);
+            demucs_frac = 1.0 - rf_frac;
+            let vocals = match rf.separate(&audio.left, &audio.right, &mut |d, n| progress(rf_frac * d as f32 / n as f32))? {
+                Some(v) => v,
+                None => return Err(Cancelled.into()),
+            };
+            let instr: [Vec<f32>; 2] = [
+                audio.left.iter().zip(&vocals[0]).map(|(m, v)| m - v).collect(),
+                audio.right.iter().zip(&vocals[1]).map(|(m, v)| m - v).collect(),
+            ];
+            let w: Vec<usize> = (0..self.man.sources.len())
+                .filter(|&s| matches!(self.man.sources[s].as_str(), "drums" | "bass"))
+                .collect();
+            wanted = Some(w);
+            extra = Some((vocals, instr));
+        }
+        let (src_l, src_r): (&[f32], &[f32]) = match (&extra, self.opts.demucs_input) {
+            (Some((_, instr)), DemucsInput::Instrumental) => (&instr[0], &instr[1]),
+            _ => (&audio.left, &audio.right),
+        };
+        let (mean, std) = norm_stats(src_l, src_r);
+        let x: [Vec<f32>; 2] = [src_l, src_r].map(|c| c.iter().map(|v| (v - mean) / std).collect::<Vec<f32>>());
+        let fin_fn = |start: usize, n: usize, planar: &mut [f32]| {
+            if let Some((vocals, instr)) = &extra {
+                for ch in 0..2 {
+                    for i in 0..n {
+                        let t = start + i;
+                        let d = planar[ch * n + i];
+                        let b = planar[(2 + ch) * n + i];
+                        planar[(4 + ch) * n + i] = instr[ch][t] - d - b;
+                        planar[(6 + ch) * n + i] = vocals[ch][t];
+                    }
+                }
+            }
+        };
+        let finalize: Option<&pipeline::Finalize<'_>> = if extra.is_some() { Some(&fin_fn) } else { None };
         let job = Job {
             man: &self.man,
             backend: &*self.backend,
@@ -304,21 +402,28 @@ impl Separator {
             scale: std,
             offset: mean,
             target,
+            wanted: wanted.as_deref(),
+            finalize,
         };
-        match job.run(progress)? {
-            Some(acc) => Ok(acc),
-            None => Err(Cancelled.into()),
+        let base = 1.0 - demucs_frac;
+        let acc = match job.run(&mut |p| progress(base + demucs_frac * p))? {
+            Some(acc) => acc,
+            None => return Err(Cancelled.into()),
+        };
+        if target.is_some() {
+            return Ok(None);
         }
+        Ok(Some(acc.into_planar_with(std, mean, finalize)))
     }
 }
 
 /// Demucs `separate.py` normalisation: mean and (unbiased) std of the mono mix.
-fn norm_stats(audio: &AudioBuffer) -> (f32, f32) {
-    let n = audio.frames();
+fn norm_stats(left: &[f32], right: &[f32]) -> (f32, f32) {
+    let n = left.len();
     if n < 2 {
         return (0.0, 1.0);
     }
-    let mono = |i: usize| (audio.left[i] as f64 + audio.right[i] as f64) * 0.5;
+    let mono = |i: usize| (left[i] as f64 + right[i] as f64) * 0.5;
     let mean = (0..n).map(mono).sum::<f64>() / n as f64;
     let var = (0..n).map(|i| (mono(i) - mean).powi(2)).sum::<f64>() / (n - 1) as f64;
     let std = var.sqrt();

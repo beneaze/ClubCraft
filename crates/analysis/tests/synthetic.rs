@@ -1,6 +1,8 @@
 //! End-to-end tests on synthetic house-style signals.
 
-use clubcraft_analysis::{analyze, beatgrid, key, waveform, AnalyzeOptions, AudioBuffer, OwnedStems};
+use clubcraft_analysis::{
+    analyze, beatgrid, key, waveform, AnalyzeOptions, AudioBuffer, OwnedStems,
+};
 use clubcraft_core::{CueKind, Key, StemTrack};
 
 const SR: u32 = 44_100;
@@ -63,7 +65,10 @@ fn groove(bpm: f64, t0: f64, bars: usize, pad: bool) -> Vec<f32> {
         let s0 = (t0 * SR as f64) as usize;
         for (i, v) in x.iter_mut().enumerate().skip(s0) {
             let t = i as f32 / SR as f32;
-            *v += notes.iter().map(|f| 0.06 * (2.0 * std::f32::consts::PI * f * t).sin()).sum::<f32>();
+            *v += notes
+                .iter()
+                .map(|f| 0.06 * (2.0 * std::f32::consts::PI * f * t).sin())
+                .sum::<f32>();
         }
     }
     x
@@ -82,7 +87,13 @@ fn beat_grid_constant_tempo() {
         assert!(err < 0.005, "phase error {err} s (bpm {bpm})");
         // Bar phase: the first kick is the downbeat.
         let beats = ((g.downbeat - t0) / g.beat_len()).round() as i64;
-        assert_eq!(beats.rem_euclid(4), 0, "downbeat {} vs first kick {}", g.downbeat, t0);
+        assert_eq!(
+            beats.rem_euclid(4),
+            0,
+            "downbeat {} vs first kick {}",
+            g.downbeat,
+            t0
+        );
     }
 }
 
@@ -92,7 +103,11 @@ fn key_a_minor() {
     let audio = AudioBuffer::new(SR, x.clone(), x);
     let k = key::detect(&audio, None).expect("key");
     // A minor or its relative C major.
-    assert!(k == Key::new(9, true) || k == Key::new(0, false), "{}", k.name());
+    assert!(
+        k == Key::new(9, true) || k == Key::new(0, false),
+        "{}",
+        k.name()
+    );
 }
 
 #[test]
@@ -111,13 +126,19 @@ fn full_analysis_and_cues() {
     for kind in [CueKind::MixIn, CueKind::MixOut] {
         let c = a.cue(kind).expect("mix cue");
         let b = g.beat_at(c.pos);
-        assert!((b / 32.0 - (b / 32.0).round()).abs() < 1e-6, "{kind:?} at beat {b}");
+        assert!(
+            (b / 32.0 - (b / 32.0).round()).abs() < 1e-6,
+            "{kind:?} at beat {b}"
+        );
     }
     // Slots are unique and every cue is beat-snapped.
     let mut slots: Vec<u8> = a.cues.iter().filter_map(|c| c.slot).collect();
     slots.sort();
     slots.dedup();
-    assert_eq!(slots.len(), a.cues.iter().filter(|c| c.slot.is_some()).count());
+    assert_eq!(
+        slots.len(),
+        a.cues.iter().filter(|c| c.slot.is_some()).count()
+    );
     for c in &a.cues {
         let b = g.beat_at(c.pos);
         assert!((b - b.round()).abs() < 1e-6 || c.pos == 0.0);
@@ -142,7 +163,12 @@ fn stems_path_and_waveform() {
     };
     let drums: Vec<f32> = x.iter().zip(&pad).map(|(a, p)| a - p).collect();
     let zero = vec![0.0f32; n];
-    let planar = [(drums.clone(), drums), (zero.clone(), zero.clone()), (pad.clone(), pad), (zero.clone(), zero)];
+    let planar = [
+        (drums.clone(), drums),
+        (zero.clone(), zero.clone()),
+        (pad.clone(), pad),
+        (zero.clone(), zero),
+    ];
     let track = StemTrack::from_planar("test", &planar);
     let owned = OwnedStems::from_stem_track(&track).expect("complete");
     assert_eq!(owned.stems[2].0, planar[2].0);

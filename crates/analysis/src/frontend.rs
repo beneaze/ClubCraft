@@ -17,7 +17,9 @@ pub struct Spectral {
 
 impl Spectral {
     pub fn compute(x: &[f32], sr: f64) -> Spectral {
-        let n_fft = ((N_FFT as f64 * sr / 44100.0).round() as usize).next_power_of_two().max(256);
+        let n_fft = ((N_FFT as f64 * sr / 44100.0).round() as usize)
+            .next_power_of_two()
+            .max(256);
         let hop = HOP * n_fft / N_FFT;
         let bank = MelBank::new(n_fft, sr, N_MELS, 30.0, 16000.0);
         let frames: Vec<[f32; N_MELS]> = dsp::stft_map(x, n_fft, hop, |_, spec| {
@@ -30,7 +32,12 @@ impl Spectral {
         for f in &frames {
             mel.extend_from_slice(f);
         }
-        Spectral { fps: sr / hop as f64, n_frames, mel, centers: bank.centers.clone() }
+        Spectral {
+            fps: sr / hop as f64,
+            n_frames,
+            mel,
+            centers: bank.centers.clone(),
+        }
     }
 
     #[inline]

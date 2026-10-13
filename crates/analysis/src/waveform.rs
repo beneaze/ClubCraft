@@ -89,11 +89,27 @@ pub fn waveform(audio: &AudioBuffer, stems: Option<StemsRef>) -> Waveform {
     let mid = band_peaks(&mono, sr, 1, bins);
     let high = band_peaks(&mono, sr, 2, bins);
     let stems = stems.map(|s| {
-        let v: Vec<Vec<u8>> = s.stems.par_iter().map(|(l, r)| stereo_peaks(l, r, bins)).collect();
+        let v: Vec<Vec<u8>> = s
+            .stems
+            .par_iter()
+            .map(|(l, r)| stereo_peaks(l, r, bins))
+            .collect();
         let mut it = v.into_iter();
-        [it.next().unwrap(), it.next().unwrap(), it.next().unwrap(), it.next().unwrap()]
+        [
+            it.next().unwrap(),
+            it.next().unwrap(),
+            it.next().unwrap(),
+            it.next().unwrap(),
+        ]
     });
-    Waveform { rate: sr / BIN as f64, peak, low, mid, high, stems }
+    Waveform {
+        rate: sr / BIN as f64,
+        peak,
+        low,
+        mid,
+        high,
+        stems,
+    }
 }
 
 #[cfg(test)]
@@ -103,7 +119,11 @@ mod tests {
     fn bands_split() {
         let sr = 44100;
         let n = sr as usize * 3;
-        let tone = |f: f32| -> Vec<f32> { (0..n).map(|i| 0.5 * (2.0 * std::f32::consts::PI * f * i as f32 / sr as f32).sin()).collect() };
+        let tone = |f: f32| -> Vec<f32> {
+            (0..n)
+                .map(|i| 0.5 * (2.0 * std::f32::consts::PI * f * i as f32 / sr as f32).sin())
+                .collect()
+        };
         let lo = AudioBuffer::new(sr, tone(60.0), tone(60.0));
         let w = waveform(&lo, None);
         assert!((w.rate - 172.265625).abs() < 1e-6);

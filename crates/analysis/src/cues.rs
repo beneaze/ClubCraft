@@ -28,20 +28,34 @@ const PHRASE_BEATS: f64 = 32.0;
 
 /// Generate cues from a grid and sections, optionally refined with bar features (music start,
 /// drum and vocal entry). See the module docs for the slot layout.
-pub fn generate(grid: &BeatGrid, sections: &[Section], bars: Option<&BarFeatures>, duration: f64) -> Vec<Cue> {
+pub fn generate(
+    grid: &BeatGrid,
+    sections: &[Section],
+    bars: Option<&BarFeatures>,
+    duration: f64,
+) -> Vec<Cue> {
     match bars {
         Some(b) => generate_from(grid, sections, b, duration),
         None => generate_from(grid, sections, &BarFeatures::default(), duration),
     }
 }
 
-pub(crate) fn generate_from(grid: &BeatGrid, sections: &[Section], bars: &BarFeatures, duration: f64) -> Vec<Cue> {
+pub(crate) fn generate_from(
+    grid: &BeatGrid,
+    sections: &[Section],
+    bars: &BarFeatures,
+    duration: f64,
+) -> Vec<Cue> {
     let bpb = grid.beats_per_bar as f64;
     let total_beats = grid.beat_at(duration).floor();
     let at_beat = |b: f64| grid.time_of_beat(b);
     let snap_beat = |t: f64| grid.beat_at(t).round();
     // Phrase arithmetic is relative to the phrase origin (first bar with music).
-    let ob = if bars.is_empty() { 0.0 } else { bars.phrase_origin as f64 * bpb };
+    let ob = if bars.is_empty() {
+        0.0
+    } else {
+        bars.phrase_origin as f64 * bpb
+    };
     let pfloor = |b: f64, q: f64| ob + ((b - ob) / q).floor() * q;
     let pround = |b: f64, q: f64| ob + ((b - ob) / q).round() * q;
     let mut cues: Vec<Cue> = Vec::new();
@@ -56,7 +70,8 @@ pub(crate) fn generate_from(grid: &BeatGrid, sections: &[Section], bars: &BarFea
     let mut first_bar_beat = 0.0;
     if !bars.is_empty() {
         let thr = -40.0;
-        if let Some(i) = (0..bars.len()).find(|&i| bars.start[i] >= -0.03 && bars.level_db[i] > thr) {
+        if let Some(i) = (0..bars.len()).find(|&i| bars.start[i] >= -0.03 && bars.level_db[i] > thr)
+        {
             first_bar_beat = bars.bar_index(i) as f64 * bpb;
         }
     }
@@ -65,11 +80,22 @@ pub(crate) fn generate_from(grid: &BeatGrid, sections: &[Section], bars: &BarFea
     // --- slot 1: mix-in. The phrase line where the drums are established, provided that
     // leaves at least 16 bars before the first drop for the blend; otherwise the first beat
     // (a long beatless intro is mixed in from its start).
-    let first_drop_beat = sections.iter().find(|s| s.kind == SectionKind::Drop).map(|s| snap_beat(s.start));
+    let first_drop_beat = sections
+        .iter()
+        .find(|s| s.kind == SectionKind::Drop)
+        .map(|s| snap_beat(s.start));
     let phrase_floor = |b: f64| pfloor(b, PHRASE_BEATS);
     let start_phrase = pround(first_bar_beat, PHRASE_BEATS);
-    let mixin_fallback = if duration > 180.0 { ob + PHRASE_BEATS } else { ob };
-    let mut mix_in = if bars.is_empty() { mixin_fallback } else { start_phrase.max(ob) };
+    let mixin_fallback = if duration > 180.0 {
+        ob + PHRASE_BEATS
+    } else {
+        ob
+    };
+    let mut mix_in = if bars.is_empty() {
+        mixin_fallback
+    } else {
+        start_phrase.max(ob)
+    };
     if !bars.is_empty() {
         let drums_at = (0..bars.len().saturating_sub(1)).find(|&i| {
             bars.start[i] >= -0.03 && bars.stems[i][0] > 0.5 && bars.stems[i + 1][0] > 0.5
@@ -77,7 +103,11 @@ pub(crate) fn generate_from(grid: &BeatGrid, sections: &[Section], bars: &BarFea
         if let Some(i) = drums_at {
             let beat = bars.bar_index(i) as f64 * bpb;
             // Drums entering within 2 bars after a phrase line count from that line.
-            let cand = if beat - phrase_floor(beat) <= 2.0 * bpb { phrase_floor(beat) } else { phrase_floor(beat) + PHRASE_BEATS };
+            let cand = if beat - phrase_floor(beat) <= 2.0 * bpb {
+                phrase_floor(beat)
+            } else {
+                phrase_floor(beat) + PHRASE_BEATS
+            };
             let room = first_drop_beat.map(|d| d - cand).unwrap_or(f64::INFINITY);
             if cand > mix_in && room >= 16.0 * bpb && at_beat(cand) < duration * 0.4 {
                 mix_in = cand;
@@ -90,7 +120,9 @@ pub(crate) fn generate_from(grid: &BeatGrid, sections: &[Section], bars: &BarFea
     if bars.has_stems && !bars.is_empty() {
         let n = bars.len();
         let v = |i: usize| bars.stems[i][3];
-        if let Some(mut i) = (0..n.saturating_sub(1)).find(|&i| bars.start[i] >= -0.03 && v(i) > 0.5 && v(i + 1) > 0.4) {
+        if let Some(mut i) = (0..n.saturating_sub(1))
+            .find(|&i| bars.start[i] >= -0.03 && v(i) > 0.5 && v(i + 1) > 0.4)
+        {
             // Snap to the 4-bar phrase grid when within a bar: a vocal starting in the last bar
             // of a group is a pickup into the next phrase; one starting a bar late (after a
             // vocal chop / reverb tail) belongs to the phrase line before it.
@@ -113,7 +145,11 @@ pub(crate) fn generate_from(grid: &BeatGrid, sections: &[Section], bars: &BarFea
     for s in sections {
         match runs.last_mut() {
             Some(r) if r.kind == s.kind => r.bars += s.bars,
-            _ => runs.push(Run { kind: s.kind, beat: snap_beat(s.start), bars: s.bars }),
+            _ => runs.push(Run {
+                kind: s.kind,
+                beat: snap_beat(s.start),
+                bars: s.bars,
+            }),
         }
     }
     let mut used = vec![false; runs.len()];
@@ -138,8 +174,12 @@ pub(crate) fn generate_from(grid: &BeatGrid, sections: &[Section], bars: &BarFea
     }
     // Main breakdown: the longest breakdown after the first drop (or anywhere without a drop).
     let after = first_drop.map(|i| i + 1).unwrap_or(0);
-    let main_break = (after..runs.len()).filter(|&i| runs[i].kind == SectionKind::Breakdown && !used[i]).max_by_key(|&i| (runs[i].bars, usize::MAX - i));
-    let next_drop = |from: usize, used: &[bool]| (from..runs.len()).find(|&i| runs[i].kind == SectionKind::Drop && !used[i]);
+    let main_break = (after..runs.len())
+        .filter(|&i| runs[i].kind == SectionKind::Breakdown && !used[i])
+        .max_by_key(|&i| (runs[i].bars, usize::MAX - i));
+    let next_drop = |from: usize, used: &[bool]| {
+        (from..runs.len()).find(|&i| runs[i].kind == SectionKind::Drop && !used[i])
+    };
     let mut second_drop = None;
     if let Some(mb) = main_break {
         push(Some(5), CueKind::Breakdown, runs[mb].beat);
@@ -149,7 +189,9 @@ pub(crate) fn generate_from(grid: &BeatGrid, sections: &[Section], bars: &BarFea
     if second_drop.is_none() {
         second_drop = first_drop.and_then(|fd| next_drop(fd + 1, &used));
     }
-    let outro = runs.iter().position(|r| r.kind == SectionKind::Outro && at_beat(r.beat) > duration * 0.5);
+    let outro = runs
+        .iter()
+        .position(|r| r.kind == SectionKind::Outro && at_beat(r.beat) > duration * 0.5);
     match second_drop {
         Some(sd) => {
             push(Some(6), CueKind::Drop, runs[sd].beat);
@@ -164,10 +206,18 @@ pub(crate) fn generate_from(grid: &BeatGrid, sections: &[Section], bars: &BarFea
     }
 
     // --- slot 7: mix-out.
-    let fallback_out = if duration > 180.0 { pfloor(total_beats - PHRASE_BEATS, PHRASE_BEATS) } else { pfloor(total_beats - 16.0, 16.0) };
+    let fallback_out = if duration > 180.0 {
+        pfloor(total_beats - PHRASE_BEATS, PHRASE_BEATS)
+    } else {
+        pfloor(total_beats - 16.0, 16.0)
+    };
     let phrase_round = |b: f64| {
         let m32 = pround(b, PHRASE_BEATS);
-        if (m32 - b).abs() <= 8.0 { m32 } else { pround(b, 16.0) }
+        if (m32 - b).abs() <= 8.0 {
+            m32
+        } else {
+            pround(b, 16.0)
+        }
     };
     let mut mix_out = fallback_out;
     if let Some(o) = outro {
@@ -202,7 +252,11 @@ pub(crate) fn generate_from(grid: &BeatGrid, sections: &[Section], bars: &BarFea
     }
     cues.sort_by(|a, b| a.pos.total_cmp(&b.pos));
     // Remove slot-less duplicates at the position of a slotted cue.
-    let slotted: Vec<f64> = cues.iter().filter(|c| c.slot.is_some()).map(|c| c.pos).collect();
+    let slotted: Vec<f64> = cues
+        .iter()
+        .filter(|c| c.slot.is_some())
+        .map(|c| c.pos)
+        .collect();
     cues.retain(|c| c.slot.is_some() || !slotted.iter().any(|p| (p - c.pos).abs() < 0.05));
     cues
 }

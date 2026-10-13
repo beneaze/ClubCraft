@@ -91,7 +91,11 @@ impl<'a> StemsRef<'a> {
     }
 
     pub fn frames(&self) -> usize {
-        self.stems.iter().map(|(l, r)| l.len().min(r.len())).min().unwrap_or(0)
+        self.stems
+            .iter()
+            .map(|(l, r)| l.len().min(r.len()))
+            .min()
+            .unwrap_or(0)
     }
 
     /// Mono downmix of one stem.
@@ -142,7 +146,9 @@ impl OwnedStems {
             *s = (vec![0.0; n], vec![0.0; n]);
         }
         for c in 0..track.num_chunks() {
-            let Some(chunk) = track.chunk(c) else { continue };
+            let Some(chunk) = track.chunk(c) else {
+                continue;
+            };
             let start = c * clubcraft_core::STEM_CHUNK_FRAMES;
             for (j, fr) in chunk.data.as_chunks::<STEM_CHANNELS>().0.iter().enumerate() {
                 let f = start + j;
@@ -188,7 +194,12 @@ pub struct AnalyzeOptions {
 
 impl Default for AnalyzeOptions {
     fn default() -> Self {
-        AnalyzeOptions { beat: BeatOptions::default(), target_lufs: -10.0, max_gain_db: 12.0, stems_model: None }
+        AnalyzeOptions {
+            beat: BeatOptions::default(),
+            target_lufs: -10.0,
+            max_gain_db: 12.0,
+            stems_model: None,
+        }
     }
 }
 
@@ -223,7 +234,15 @@ impl<'a> Prepared<'a> {
                 })
             },
         );
-        Prepared { audio, sr, mono, mix, mix_log, drums, stems }
+        Prepared {
+            audio,
+            sr,
+            mono,
+            mix,
+            mix_log,
+            drums,
+            stems,
+        }
     }
 
     pub fn duration(&self) -> f64 {
@@ -237,7 +256,11 @@ impl<'a> Prepared<'a> {
 pub fn analyze(audio: &AudioBuffer, stems: Option<&StemsRef>, opts: &AnalyzeOptions) -> Analysis {
     let stems = stems.copied();
     let duration = audio.duration();
-    let mut out = Analysis { version: Analysis::CURRENT_VERSION, duration, ..Default::default() };
+    let mut out = Analysis {
+        version: Analysis::CURRENT_VERSION,
+        duration,
+        ..Default::default()
+    };
     if audio.frames() < audio.sample_rate as usize {
         return out;
     }
@@ -274,7 +297,11 @@ pub fn analyze(audio: &AudioBuffer, stems: Option<&StemsRef>, opts: &AnalyzeOpti
         out.sections = structure::segment(&bars, &grid, duration);
         out.cues = cues::generate_from(&grid, &out.sections, &bars, duration);
         out.energy = Some(energy::rating_from(lufs, &bars, &out.sections, grid.bpm));
-        log::debug!("analysis: front end {t1:.0?}, grid/key/loudness {:.0?}, structure+cues {:.0?}", t2 - t1, t0.elapsed() - t2);
+        log::debug!(
+            "analysis: front end {t1:.0?}, grid/key/loudness {:.0?}, structure+cues {:.0?}",
+            t2 - t1,
+            t0.elapsed() - t2
+        );
     } else {
         out.energy = lufs.map(energy::rating_simple);
     }
@@ -285,7 +312,11 @@ pub fn analyze(audio: &AudioBuffer, stems: Option<&StemsRef>, opts: &AnalyzeOpti
 }
 
 /// Convenience: analyse with stems taken from a [`StemTrack`] (used only if complete).
-pub fn analyze_with_stem_track(audio: &AudioBuffer, stems: Option<&StemTrack>, opts: &AnalyzeOptions) -> Analysis {
+pub fn analyze_with_stem_track(
+    audio: &AudioBuffer,
+    stems: Option<&StemTrack>,
+    opts: &AnalyzeOptions,
+) -> Analysis {
     let owned = stems.and_then(OwnedStems::from_stem_track);
     let mut o = opts.clone();
     if o.stems_model.is_none() {

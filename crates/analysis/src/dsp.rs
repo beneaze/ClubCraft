@@ -6,7 +6,9 @@ use realfft::RealFftPlanner;
 
 /// Periodic Hann window.
 pub fn hann(n: usize) -> Vec<f32> {
-    (0..n).map(|i| (0.5 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / n as f64).cos()) as f32).collect()
+    (0..n)
+        .map(|i| (0.5 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / n as f64).cos()) as f32)
+        .collect()
 }
 
 /// Number of centred STFT frames for `len` samples (frame `i` is centred on sample `i * hop`).
@@ -35,7 +37,13 @@ where
     (0..frames)
         .into_par_iter()
         .map_init(
-            || (plan.make_input_vec(), plan.make_output_vec(), plan.make_scratch_vec()),
+            || {
+                (
+                    plan.make_input_vec(),
+                    plan.make_output_vec(),
+                    plan.make_scratch_vec(),
+                )
+            },
             |(inp, out, scratch), i| {
                 let start = (i * hop) as isize - half;
                 if start >= 0 && start as usize + n_fft <= x.len() {
@@ -46,7 +54,11 @@ where
                 } else {
                     for (j, o) in inp.iter_mut().enumerate() {
                         let idx = start + j as isize;
-                        *o = if idx >= 0 && (idx as usize) < x.len() { x[idx as usize] * win[j] } else { 0.0 };
+                        *o = if idx >= 0 && (idx as usize) < x.len() {
+                            x[idx as usize] * win[j]
+                        } else {
+                            0.0
+                        };
                     }
                 }
                 plan.process_with_scratch(inp, out, scratch).expect("fft");
@@ -74,7 +86,9 @@ impl MelBank {
         let bins = n_fft / 2 + 1;
         let bin_hz = sr / n_fft as f64;
         let (m0, m1) = (hz_to_mel(fmin), hz_to_mel(fmax.min(sr / 2.0)));
-        let pts: Vec<f64> = (0..n_mels + 2).map(|i| mel_to_hz(m0 + (m1 - m0) * i as f64 / (n_mels + 1) as f64)).collect();
+        let pts: Vec<f64> = (0..n_mels + 2)
+            .map(|i| mel_to_hz(m0 + (m1 - m0) * i as f64 / (n_mels + 1) as f64))
+            .collect();
         let mut filters = Vec::with_capacity(n_mels);
         let mut centers = Vec::with_capacity(n_mels);
         for m in 0..n_mels {
@@ -85,7 +99,11 @@ impl MelBank {
             let mut w = Vec::new();
             for b in lo_b..=hi_b {
                 let f = b as f64 * bin_hz;
-                let v = if f <= c { (f - lo) / (c - lo) } else { (hi - f) / (hi - c) };
+                let v = if f <= c {
+                    (f - lo) / (c - lo)
+                } else {
+                    (hi - f) / (hi - c)
+                };
                 w.push(v.clamp(0.0, 1.0) as f32);
             }
             if w.iter().all(|v| *v == 0.0) {
@@ -129,27 +147,63 @@ pub struct Biquad {
 
 impl Biquad {
     fn from(b0: f64, b1: f64, b2: f64, a0: f64, a1: f64, a2: f64) -> Biquad {
-        Biquad { b0: b0 / a0, b1: b1 / a0, b2: b2 / a0, a1: a1 / a0, a2: a2 / a0, x1: 0.0, x2: 0.0, y1: 0.0, y2: 0.0 }
+        Biquad {
+            b0: b0 / a0,
+            b1: b1 / a0,
+            b2: b2 / a0,
+            a1: a1 / a0,
+            a2: a2 / a0,
+            x1: 0.0,
+            x2: 0.0,
+            y1: 0.0,
+            y2: 0.0,
+        }
     }
     pub fn lowpass(fc: f64, q: f64, sr: f64) -> Biquad {
         let w = 2.0 * std::f64::consts::PI * fc / sr;
         let (s, c) = w.sin_cos();
         let a = s / (2.0 * q);
-        Biquad::from((1.0 - c) / 2.0, 1.0 - c, (1.0 - c) / 2.0, 1.0 + a, -2.0 * c, 1.0 - a)
+        Biquad::from(
+            (1.0 - c) / 2.0,
+            1.0 - c,
+            (1.0 - c) / 2.0,
+            1.0 + a,
+            -2.0 * c,
+            1.0 - a,
+        )
     }
     pub fn highpass(fc: f64, q: f64, sr: f64) -> Biquad {
         let w = 2.0 * std::f64::consts::PI * fc / sr;
         let (s, c) = w.sin_cos();
         let a = s / (2.0 * q);
-        Biquad::from((1.0 + c) / 2.0, -(1.0 + c), (1.0 + c) / 2.0, 1.0 + a, -2.0 * c, 1.0 - a)
+        Biquad::from(
+            (1.0 + c) / 2.0,
+            -(1.0 + c),
+            (1.0 + c) / 2.0,
+            1.0 + a,
+            -2.0 * c,
+            1.0 - a,
+        )
     }
     /// Raw coefficients (b0, b1, b2, a1, a2) with a0 = 1.
     pub fn raw(b0: f64, b1: f64, b2: f64, a1: f64, a2: f64) -> Biquad {
-        Biquad { b0, b1, b2, a1, a2, x1: 0.0, x2: 0.0, y1: 0.0, y2: 0.0 }
+        Biquad {
+            b0,
+            b1,
+            b2,
+            a1,
+            a2,
+            x1: 0.0,
+            x2: 0.0,
+            y1: 0.0,
+            y2: 0.0,
+        }
     }
     #[inline]
     pub fn tick(&mut self, x: f64) -> f64 {
-        let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2 - self.a1 * self.y1 - self.a2 * self.y2;
+        let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2
+            - self.a1 * self.y1
+            - self.a2 * self.y2;
         self.x2 = self.x1;
         self.x1 = x;
         self.y2 = self.y1;
@@ -161,7 +215,13 @@ impl Biquad {
 /// 4th-order Linkwitz-Riley style filter (two cascaded Butterworth biquads).
 pub fn lr4(x: &[f32], fc: f64, sr: f64, high: bool) -> Vec<f32> {
     let q = std::f64::consts::FRAC_1_SQRT_2;
-    let mk = || if high { Biquad::highpass(fc, q, sr) } else { Biquad::lowpass(fc, q, sr) };
+    let mk = || {
+        if high {
+            Biquad::highpass(fc, q, sr)
+        } else {
+            Biquad::lowpass(fc, q, sr)
+        }
+    };
     let (mut a, mut b) = (mk(), mk());
     x.iter().map(|v| b.tick(a.tick(*v as f64)) as f32).collect()
 }

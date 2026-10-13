@@ -69,7 +69,9 @@ fn index_audio(roots: &[PathBuf]) -> HashMap<String, PathBuf> {
     let mut out = HashMap::new();
     let mut stack: Vec<PathBuf> = roots.to_vec();
     while let Some(d) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
         for e in rd.flatten() {
             let p = e.path();
             let name = e.file_name().to_string_lossy().to_string();
@@ -77,13 +79,20 @@ fn index_audio(roots: &[PathBuf]) -> HashMap<String, PathBuf> {
                 continue;
             }
             if p.is_dir() {
-                if name == "DJ.Studio" || name == "ClubCraft" || name.ends_with(".app") || name == "PioneerDJ" {
+                if name == "DJ.Studio"
+                    || name == "ClubCraft"
+                    || name.ends_with(".app")
+                    || name == "PioneerDJ"
+                {
                     continue;
                 }
                 stack.push(p);
             } else {
                 let lower = name.to_lowercase();
-                if [".mp3", ".wav", ".flac", ".m4a", ".aiff", ".aif"].iter().any(|x| lower.ends_with(x)) {
+                if [".mp3", ".wav", ".flac", ".m4a", ".aiff", ".aif"]
+                    .iter()
+                    .any(|x| lower.ends_with(x))
+                {
                     out.entry(name).or_insert(p);
                 }
             }
@@ -112,18 +121,24 @@ fn load_truth(db: &Path, index: &HashMap<String, PathBuf>) -> Vec<Truth> {
     let mut structures: HashMap<String, Value> = HashMap::new();
     if let Ok(rd) = std::fs::read_dir(db.join("track-structures-table")) {
         for b in rd.flatten() {
-            let Ok(rd2) = std::fs::read_dir(b.path()) else { continue };
+            let Ok(rd2) = std::fs::read_dir(b.path()) else {
+                continue;
+            };
             for f in rd2.flatten() {
                 let p = f.path();
                 if p.is_file() {
-                    if let Ok(Ok(v)) = std::fs::read(&p).map(|b| serde_json::from_slice::<Value>(&b)) {
+                    if let Ok(Ok(v)) =
+                        std::fs::read(&p).map(|b| serde_json::from_slice::<Value>(&b))
+                    {
                         if let Some(k) = v["key"].as_str() {
                             structures.insert(k.to_string(), v);
                         }
                     }
                 } else if p.is_dir() {
                     let q = p.join("fixed");
-                    if let Ok(Ok(v)) = std::fs::read(&q).map(|b| serde_json::from_slice::<Value>(&b)) {
+                    if let Ok(Ok(v)) =
+                        std::fs::read(&q).map(|b| serde_json::from_slice::<Value>(&b))
+                    {
                         if let Some(k) = v["key"].as_str() {
                             structures.insert(k.to_string(), v);
                         }
@@ -135,7 +150,9 @@ fn load_truth(db: &Path, index: &HashMap<String, PathBuf>) -> Vec<Truth> {
     let mut out = Vec::new();
     let mut seen_paths = HashSet::new();
     let mut seen_hash = HashSet::new();
-    let Ok(rd) = std::fs::read_dir(db.join("audio-library-table")) else { return out };
+    let Ok(rd) = std::fs::read_dir(db.join("audio-library-table")) else {
+        return out;
+    };
     let mut files: Vec<PathBuf> = Vec::new();
     for b in rd.flatten() {
         if let Ok(rd2) = std::fs::read_dir(b.path()) {
@@ -144,12 +161,20 @@ fn load_truth(db: &Path, index: &HashMap<String, PathBuf>) -> Vec<Truth> {
     }
     files.sort();
     for f in files {
-        let Ok(Ok(rec)) = std::fs::read(&f).map(|b| serde_json::from_slice::<Value>(&b)) else { continue };
+        let Ok(Ok(rec)) = std::fs::read(&f).map(|b| serde_json::from_slice::<Value>(&b)) else {
+            continue;
+        };
         let name = rec["name"].as_str().unwrap_or("").to_string();
-        let loc = rec["externalRec"]["fileLocationPath"].as_str().unwrap_or("").to_string();
+        let loc = rec["externalRec"]["fileLocationPath"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
         let mut path = PathBuf::from(&loc);
         if !path.is_file() {
-            let base = Path::new(&loc).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            let base = Path::new(&loc)
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
             match index.get(&base).or_else(|| index.get(&name)) {
                 Some(p) => path = p.clone(),
                 None => continue,
@@ -160,13 +185,26 @@ fn load_truth(db: &Path, index: &HashMap<String, PathBuf>) -> Vec<Truth> {
             continue;
         }
         let skey = rec["structureKey"].as_str().unwrap_or("").to_string();
-        let st = structures.get(&skey).or_else(|| structures.get(&format!("{skey}/fixed")));
+        let st = structures
+            .get(&skey)
+            .or_else(|| structures.get(&format!("{skey}/fixed")));
         let Some(st) = st else { continue };
-        let Some(bd) = st["beatData"].as_array() else { continue };
-        let pts: Vec<(f64, f64)> =
-            bd.iter().filter_map(|b| Some((b["nr"].as_f64()?, b["time"].as_f64()?))).collect();
-        let Some((beat0, spb)) = fit_line(&pts) else { continue };
-        let resid = (pts.iter().map(|(n, t)| (t - (beat0 + spb * n)).powi(2)).sum::<f64>() / pts.len() as f64).sqrt();
+        let Some(bd) = st["beatData"].as_array() else {
+            continue;
+        };
+        let pts: Vec<(f64, f64)> = bd
+            .iter()
+            .filter_map(|b| Some((b["nr"].as_f64()?, b["time"].as_f64()?)))
+            .collect();
+        let Some((beat0, spb)) = fit_line(&pts) else {
+            continue;
+        };
+        let resid = (pts
+            .iter()
+            .map(|(n, t)| (t - (beat0 + spb * n)).powi(2))
+            .sum::<f64>()
+            / pts.len() as f64)
+            .sqrt();
         if spb <= 0.0 {
             continue;
         }
@@ -197,7 +235,10 @@ fn load_truth(db: &Path, index: &HashMap<String, PathBuf>) -> Vec<Truth> {
             .and_then(|s| s["energyLevelData"].as_array())
             .map(|a| a.iter().filter_map(|e| e["startBeatNr"].as_i64()).collect())
             .unwrap_or_default();
-        let mik_energy = rec["mikEnergy"].as_i64().filter(|e| *e > 0).map(|e| e as u8);
+        let mik_energy = rec["mikEnergy"]
+            .as_i64()
+            .filter(|e| *e > 0)
+            .map(|e| e as u8);
         out.push(Truth {
             name: path.file_name().unwrap().to_string_lossy().to_string(),
             path,
@@ -267,7 +308,14 @@ fn key_relation(a: Key, b: Key) -> &'static str {
 }
 
 fn evaluate(t: &Truth, a: &Analysis, stems: bool, secs: f64, verbose: bool) -> Res {
-    let mut r = Res { name: t.name.clone(), stems, secs, bpm_gt: t.bpm, gt_variable: t.variable, ..Default::default() };
+    let mut r = Res {
+        name: t.name.clone(),
+        stems,
+        secs,
+        bpm_gt: t.bpm,
+        gt_variable: t.variable,
+        ..Default::default()
+    };
     let gt_spb = 60.0 / t.bpm;
     if let Some(g) = a.grid {
         r.bpm = g.bpm;
@@ -284,13 +332,21 @@ fn evaluate(t: &Truth, a: &Analysis, stems: bool, secs: f64, verbose: bool) -> R
         offs.sort_by(|x, y| x.total_cmp(y));
         r.phase_ms = offs[4] * 1000.0;
         let beats = (g.downbeat - t.beat0) / gt_spb;
-        r.bar_off = if (beats - beats.round()).abs() < 0.25 { (beats.round() as i64).rem_euclid(4) } else { -1 };
+        r.bar_off = if (beats - beats.round()).abs() < 0.25 {
+            (beats.round() as i64).rem_euclid(4)
+        } else {
+            -1
+        };
         if r.bar_off >= 0 {
             let mut votes = [0usize; 4];
             for b in &t.mik_cues {
                 votes[(*b).rem_euclid(4) as usize] += 1;
             }
-            let shift = if t.mik_cues.is_empty() { 0 } else { (0..4).max_by_key(|i| votes[*i]).unwrap() as i64 };
+            let shift = if t.mik_cues.is_empty() {
+                0
+            } else {
+                (0..4).max_by_key(|i| votes[*i]).unwrap() as i64
+            };
             r.bar_ref_ok = Some((r.bar_off - shift).rem_euclid(4) == 0);
         }
         if !t.mik_cues.is_empty() {
@@ -332,11 +388,19 @@ fn evaluate(t: &Truth, a: &Analysis, stems: bool, secs: f64, verbose: bool) -> R
                 r.seg_recall = Some(hit as f64 / segs.len() as f64);
             }
             let last = t.mik_segments.iter().copied().max().unwrap_or(0) as f64;
-            let ours: Vec<f64> = bounds.iter().copied().filter(|o| (o - t.beat0) / gt_spb <= last + 4.0).collect();
+            let ours: Vec<f64> = bounds
+                .iter()
+                .copied()
+                .filter(|o| (o - t.beat0) / gt_spb <= last + 4.0)
+                .collect();
             if !ours.is_empty() {
                 let ph = ours
                     .iter()
-                    .filter(|o| segs.iter().any(|&b| (t.beat0 + b as f64 * gt_spb - **o).abs() < 4.0 * gt_spb * 1.01))
+                    .filter(|o| {
+                        segs.iter().any(|&b| {
+                            (t.beat0 + b as f64 * gt_spb - **o).abs() < 4.0 * gt_spb * 1.01
+                        })
+                    })
                     .count();
                 r.seg_precision = Some(ph as f64 / ours.len() as f64);
             }
@@ -350,7 +414,11 @@ fn evaluate(t: &Truth, a: &Analysis, stems: bool, secs: f64, verbose: bool) -> R
         if verbose {
             let mut d = String::new();
             for c in &a.cues {
-                d += &format!(" {}@{:.0}", c.name.replace(' ', ""), g.beat_at(c.pos) + (g.downbeat - t.beat0) / gt_spb);
+                d += &format!(
+                    " {}@{:.0}",
+                    c.name.replace(' ', ""),
+                    g.beat_at(c.pos) + (g.downbeat - t.beat0) / gt_spb
+                );
             }
             d += " | MIK:";
             for b in &t.mik_cues {
@@ -358,7 +426,11 @@ fn evaluate(t: &Truth, a: &Analysis, stems: bool, secs: f64, verbose: bool) -> R
             }
             d += " | segs:";
             for s in &a.sections {
-                d += &format!(" {}@{}", s.kind.label(), (g.beat_at(s.start) + (g.downbeat - t.beat0) / gt_spb).round());
+                d += &format!(
+                    " {}@{}",
+                    s.kind.label(),
+                    (g.beat_at(s.start) + (g.downbeat - t.beat0) / gt_spb).round()
+                );
             }
             d += " | MIKseg:";
             for b in &t.mik_segments {
@@ -397,13 +469,32 @@ fn summarize(label: &str, all: &[Res]) {
     let rs = &grid_rs[..];
     let n = rs.len();
     let bpm_ok = rs.iter().filter(|r| r.bpm_ok).count();
-    let octave = rs.iter().filter(|r| !r.bpm_ok && r.bpm > 0.0 && ((r.bpm * 2.0 - r.bpm_gt).abs() < 0.1 || (r.bpm / 2.0 - r.bpm_gt).abs() < 0.1)).count();
-    println!("BPM within 0.05:         {}   (octave errors: {octave})", pct(bpm_ok, n));
+    let octave = rs
+        .iter()
+        .filter(|r| {
+            !r.bpm_ok
+                && r.bpm > 0.0
+                && ((r.bpm * 2.0 - r.bpm_gt).abs() < 0.1 || (r.bpm / 2.0 - r.bpm_gt).abs() < 0.1)
+        })
+        .count();
+    println!(
+        "BPM within 0.05:         {}   (octave errors: {octave})",
+        pct(bpm_ok, n)
+    );
     let ok: Vec<&Res> = rs.iter().filter(|r| r.bpm_ok).collect();
     let ph15 = ok.iter().filter(|r| r.phase_ms.abs() < 15.0).count();
     let ph5 = ok.iter().filter(|r| r.phase_ms.abs() < 5.0).count();
-    println!("beat phase within 15 ms: {}   (5 ms: {})  [of all: {}]", pct(ph15, ok.len()), pct(ph5, ok.len()), pct(ph15, n));
-    let mut offs: Vec<f64> = ok.iter().filter(|r| r.phase_ms.abs() < 40.0).map(|r| r.phase_ms).collect();
+    println!(
+        "beat phase within 15 ms: {}   (5 ms: {})  [of all: {}]",
+        pct(ph15, ok.len()),
+        pct(ph5, ok.len()),
+        pct(ph15, n)
+    );
+    let mut offs: Vec<f64> = ok
+        .iter()
+        .filter(|r| r.phase_ms.abs() < 40.0)
+        .map(|r| r.phase_ms)
+        .collect();
     offs.sort_by(|a, b| a.total_cmp(b));
     if !offs.is_empty() {
         println!(
@@ -421,13 +512,24 @@ fn summarize(label: &str, all: &[Res]) {
             bar_hist[r.bar_off as usize] += 1;
         }
     }
-    println!("bar phase == DJ.Studio:  {}   offsets(beats) {:?}", pct(bar_ok, beat_ok.len()), bar_hist);
+    println!(
+        "bar phase == DJ.Studio:  {}   offsets(beats) {:?}",
+        pct(bar_ok, beat_ok.len()),
+        bar_hist
+    );
     let refs: Vec<bool> = beat_ok.iter().filter_map(|r| r.bar_ref_ok).collect();
-    println!("bar phase vs reference:  {}   (MIK cues where available, else DJ.Studio)", pct(refs.iter().filter(|x| **x).count(), refs.len()));
+    println!(
+        "bar phase vs reference:  {}   (MIK cues where available, else DJ.Studio)",
+        pct(refs.iter().filter(|x| **x).count(), refs.len())
+    );
     let mb: Vec<f64> = beat_ok.iter().filter_map(|r| r.mik_bar).collect();
     if !mb.is_empty() {
         let good = mb.iter().filter(|x| **x >= 0.5).count();
-        println!("bar phase vs MIK cues:   {}   (mean cue-on-bar-line {:.2})", pct(good, mb.len()), mb.iter().sum::<f64>() / mb.len() as f64);
+        println!(
+            "bar phase vs MIK cues:   {}   (mean cue-on-bar-line {:.2})",
+            pct(good, mb.len()),
+            mb.iter().sum::<f64>() / mb.len() as f64
+        );
     }
     let kn = all.iter().filter(|r| r.key_rel != "none").count();
     let count = |s: &str| all.iter().filter(|r| r.key_rel == s).count();
@@ -442,7 +544,11 @@ fn summarize(label: &str, all: &[Res]) {
     );
     let rec: Vec<f64> = all.iter().filter_map(|r| r.mik_recall).collect();
     if !rec.is_empty() {
-        println!("MIK cue recall (±1 bar):     {:.2} over {} tracks", rec.iter().sum::<f64>() / rec.len() as f64, rec.len());
+        println!(
+            "MIK cue recall (±1 bar):     {:.2} over {} tracks",
+            rec.iter().sum::<f64>() / rec.len() as f64,
+            rec.len()
+        );
     }
     let sr: Vec<f64> = all.iter().filter_map(|r| r.seg_recall).collect();
     if !sr.is_empty() {
@@ -454,15 +560,25 @@ fn summarize(label: &str, all: &[Res]) {
             sr.len()
         );
     }
-    let en: Vec<(f64, f64)> = all.iter().filter_map(|r| r.mik_energy.map(|m| (r.energy as f64, m as f64))).collect();
+    let en: Vec<(f64, f64)> = all
+        .iter()
+        .filter_map(|r| r.mik_energy.map(|m| (r.energy as f64, m as f64)))
+        .collect();
     if !en.is_empty() {
         let mae = en.iter().map(|(a, b)| (a - b).abs()).sum::<f64>() / en.len() as f64;
         println!("energy vs MIK: MAE {:.2} over {} tracks", mae, en.len());
     }
-    let mut tg: Vec<f64> = all.iter().filter_map(|r| r.dj_target).filter(|x| x.is_finite()).collect();
+    let mut tg: Vec<f64> = all
+        .iter()
+        .filter_map(|r| r.dj_target)
+        .filter(|x| x.is_finite())
+        .collect();
     tg.sort_by(|a, b| a.total_cmp(b));
     if !tg.is_empty() {
-        println!("implied DJ.Studio loudness target: median {:.2} LUFS", tg[tg.len() / 2]);
+        println!(
+            "implied DJ.Studio loudness target: median {:.2} LUFS",
+            tg[tg.len() / 2]
+        );
     }
     let mi: Vec<f64> = all.iter().filter_map(|r| r.mix_in_bars).collect();
     let mo: Vec<f64> = all.iter().filter_map(|r| r.mix_out_bars).collect();
@@ -479,7 +595,11 @@ fn summarize(label: &str, all: &[Res]) {
     let mut ts: Vec<f64> = all.iter().map(|r| r.secs).collect();
     ts.sort_by(|a, b| a.total_cmp(b));
     if !ts.is_empty() {
-        println!("analysis time: median {:.2} s, max {:.2} s", ts[ts.len() / 2], ts[ts.len() - 1]);
+        println!(
+            "analysis time: median {:.2} s, max {:.2} s",
+            ts[ts.len() / 2],
+            ts[ts.len() - 1]
+        );
     }
 }
 
@@ -511,7 +631,11 @@ fn main() -> anyhow::Result<()> {
             _ => anyhow::bail!("unknown argument {a}"),
         }
     }
-    let index = index_audio(&[home().join("Music"), home().join("Downloads"), home().join("Desktop/New_Selected_mix")]);
+    let index = index_audio(&[
+        home().join("Music"),
+        home().join("Downloads"),
+        home().join("Desktop/New_Selected_mix"),
+    ]);
     let mut truth = load_truth(&db, &index);
     if let Some(f) = &filter {
         truth.retain(|t| t.name.contains(f.as_str()));
@@ -543,13 +667,31 @@ fn main() -> anyhow::Result<()> {
             let a = analyze(&audio, None, &opts);
             let r = evaluate(t, &a, false, t0.elapsed().as_secs_f64(), verbose);
             if dump_chroma {
-                if let (Some((tun, tb, bb)), Some(k)) = (clubcraft_analysis::key::debug_chroma(&audio, None), t.mik_key.or(t.key)) {
-                    let f = |c: &[f32; 12]| c.iter().map(|v| format!("{v:.4}")).collect::<Vec<_>>().join(",");
-                    println!("CHROMA {} {} {} {tun:.1} {} {} |{}", k.tonic, k.minor as u8, if t.mik_key.is_some() { "mik" } else { "dj" }, f(&tb), f(&bb), t.name);
+                if let (Some((tun, tb, bb)), Some(k)) = (
+                    clubcraft_analysis::key::debug_chroma(&audio, None),
+                    t.mik_key.or(t.key),
+                ) {
+                    let f = |c: &[f32; 12]| {
+                        c.iter()
+                            .map(|v| format!("{v:.4}"))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    };
+                    println!(
+                        "CHROMA {} {} {} {tun:.1} {} {} |{}",
+                        k.tonic,
+                        k.minor as u8,
+                        if t.mik_key.is_some() { "mik" } else { "dj" },
+                        f(&tb),
+                        f(&bb),
+                        t.name
+                    );
                 }
             }
             if dump_phase {
-                if let Some((first, beat, f)) = clubcraft_analysis::beatgrid::debug_phase_features(&audio) {
+                if let Some((first, beat, f)) =
+                    clubcraft_analysis::beatgrid::debug_phase_features(&audio)
+                {
                     let spb = 60.0 / t.bpm;
                     // Reference downbeat: MIK cues (majority bar line) if present, else DJ.Studio beat 0.
                     let mut votes = [0usize; 4];
@@ -558,7 +700,12 @@ fn main() -> anyhow::Result<()> {
                     }
                     let mik_shift = (0..4).max_by_key(|i| votes[*i]).unwrap_or(0) as f64;
                     let src = if t.mik_cues.is_empty() { "dj " } else { "mik" };
-                    let gt_db = t.beat0 + if t.mik_cues.is_empty() { 0.0 } else { mik_shift * spb };
+                    let gt_db = t.beat0
+                        + if t.mik_cues.is_empty() {
+                            0.0
+                        } else {
+                            mik_shift * spb
+                        };
                     let k = (gt_db - first) / beat;
                     if (k - k.round()).abs() < 0.2 && (t.bpm - 60.0 / beat).abs() < 0.05 {
                         let p = (k.round() as i64).rem_euclid(4);
@@ -566,14 +713,23 @@ fn main() -> anyhow::Result<()> {
                             .map(|k| {
                                 let a = ((first + k as f64 * beat) * 44100.0) as usize;
                                 let b = (a + (beat * 44100.0) as usize).min(audio.left.len());
-                                let ms = audio.left[a.min(b)..b].iter().map(|v| v * v).sum::<f32>() / (b - a).max(1) as f32;
+                                let ms = audio.left[a.min(b)..b].iter().map(|v| v * v).sum::<f32>()
+                                    / (b - a).max(1) as f32;
                                 format!("{:.0}", 10.0 * ms.max(1e-12).log10())
                             })
                             .collect();
-                        eprintln!("FIRST {src} p={p} first={first:.3} beat0={:.3} lv={} |{}", t.beat0, lv.join(","), t.name);
+                        eprintln!(
+                            "FIRST {src} p={p} first={first:.3} beat0={:.3} lv={} |{}",
+                            t.beat0,
+                            lv.join(","),
+                            t.name
+                        );
                         let mut line = format!("PHASE {src} {p} {:.3}", (first - t.beat0) / spb);
                         for row in &f {
-                            line += &format!(" {:.3},{:.3},{:.3},{:.3}", row[0], row[1], row[2], row[3]);
+                            line += &format!(
+                                " {:.3},{:.3},{:.3},{:.3}",
+                                row[0], row[1], row[2], row[3]
+                            );
                         }
                         println!("{line} |{}", t.name);
                     }
@@ -584,18 +740,29 @@ fn main() -> anyhow::Result<()> {
                     let p = clubcraft_analysis::beatgrid::debug_pulse_profile(&audio, &g);
                     let half = (r.phase_ms.abs() - 30000.0 / r.bpm_gt).abs() < 25.0;
                     let ok = r.phase_ms.abs() < 25.0;
-                    let mut line = format!("ONOFF {} ", if ok { "on " } else if half { "off" } else { "?? " });
+                    let mut line = format!(
+                        "ONOFF {} ",
+                        if ok {
+                            "on "
+                        } else if half {
+                            "off"
+                        } else {
+                            "?? "
+                        }
+                    );
                     for v in &p {
                         line += &format!(" {:.2}/{:.2}", v[0], v[1]);
                     }
                     println!("{line}  {}", t.name);
                 }
             }
-            let rs = stem_dir(t).and_then(|d| common::load_stems(&d, &audio).ok()).map(|st| {
-                let t0 = Instant::now();
-                let a = analyze(&audio, Some(&st.as_ref()), &opts);
-                evaluate(t, &a, true, t0.elapsed().as_secs_f64(), verbose)
-            });
+            let rs = stem_dir(t)
+                .and_then(|d| common::load_stems(&d, &audio).ok())
+                .map(|st| {
+                    let t0 = Instant::now();
+                    let a = analyze(&audio, Some(&st.as_ref()), &opts);
+                    evaluate(t, &a, true, t0.elapsed().as_secs_f64(), verbose)
+                });
             Some((r, rs))
         })
         .collect();
@@ -619,14 +786,25 @@ fn main() -> anyhow::Result<()> {
             r.mik_bar.map(|x| format!("{x:.2}")).unwrap_or_default(),
             r.mik_recall.map(|x| format!("{x:.2}")).unwrap_or_default(),
             r.seg_recall.map(|x| format!("{x:.2}")).unwrap_or_default(),
-            format!("{}/{}", r.energy, r.mik_energy.map(|m| m.to_string()).unwrap_or("-".into())),
-            if r.detail.is_empty() { String::new() } else { format!("\n    {}", r.detail) }
+            format!(
+                "{}/{}",
+                r.energy,
+                r.mik_energy.map(|m| m.to_string()).unwrap_or("-".into())
+            ),
+            if r.detail.is_empty() {
+                String::new()
+            } else {
+                format!("\n    {}", r.detail)
+            }
         );
     };
     for r in &plain {
         print(r);
     }
-    let stemmed: Vec<(Res, Res)> = results.iter().filter_map(|r| r.1.clone().map(|s| (r.0.clone(), s))).collect();
+    let stemmed: Vec<(Res, Res)> = results
+        .iter()
+        .filter_map(|r| r.1.clone().map(|s| (r.0.clone(), s)))
+        .collect();
     if !stemmed.is_empty() {
         println!("\n--- with stems ---");
         for (_, s) in &stemmed {

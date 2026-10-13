@@ -25,7 +25,13 @@ fn k_weighting(sr: f64) -> (Biquad, Biquad) {
     let (f0, q) = (38.13547087602444, 0.5003270373238773);
     let k = (PI * f0 / sr).tan();
     let a0 = 1.0 + k / q + k * k;
-    let hp = Biquad::raw(1.0, -2.0, 1.0, 2.0 * (k * k - 1.0) / a0, (1.0 - k / q + k * k) / a0);
+    let hp = Biquad::raw(
+        1.0,
+        -2.0,
+        1.0,
+        2.0 * (k * k - 1.0) / a0,
+        (1.0 - k / q + k * k) / a0,
+    );
     (shelf, hp)
 }
 
@@ -48,15 +54,24 @@ fn step_energies(x: &[f32], sr: f64, step: usize) -> Vec<f64> {
 pub fn integrated_lufs(left: &[f32], right: &[f32], sample_rate: u32) -> Option<f32> {
     let sr = sample_rate as f64;
     let step = (sr * 0.1).round() as usize;
-    let chans: Vec<Vec<f64>> = [left, right].par_iter().map(|c| step_energies(c, sr, step)).collect();
+    let chans: Vec<Vec<f64>> = [left, right]
+        .par_iter()
+        .map(|c| step_energies(c, sr, step))
+        .collect();
     let n = chans[0].len().min(chans[1].len());
     if n < 4 {
         return None;
     }
     let block_len = (4 * step) as f64;
     // Mean square (summed over channels, weights 1.0 for L/R) of each 400 ms block.
-    let blocks: Vec<f64> =
-        (0..=n - 4).map(|i| (0..4).map(|j| chans[0][i + j] + chans[1][i + j]).sum::<f64>() / block_len).collect();
+    let blocks: Vec<f64> = (0..=n - 4)
+        .map(|i| {
+            (0..4)
+                .map(|j| chans[0][i + j] + chans[1][i + j])
+                .sum::<f64>()
+                / block_len
+        })
+        .collect();
     let lk = |z: f64| -0.691 + 10.0 * z.max(1e-20).log10();
     let abs: Vec<f64> = blocks.iter().copied().filter(|z| lk(*z) > -70.0).collect();
     if abs.is_empty() {
@@ -79,7 +94,9 @@ mod tests {
         // -3 dB sine RMS, ~0 dB K-weighting at 1 kHz) => about -20.0.
         let sr = 48000;
         let a = 10f32.powf(-20.0 / 20.0);
-        let x: Vec<f32> = (0..sr * 5).map(|i| a * (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / sr as f32).sin()).collect();
+        let x: Vec<f32> = (0..sr * 5)
+            .map(|i| a * (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / sr as f32).sin())
+            .collect();
         let l = integrated_lufs(&x, &x, sr as u32).unwrap();
         assert!((l + 20.0).abs() < 0.2, "{l}");
     }
