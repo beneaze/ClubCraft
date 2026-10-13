@@ -51,3 +51,38 @@ pub fn load(kind: BackendKind, man: &Manifest) -> Result<Box<dyn Backend>> {
         }
     }
 }
+
+/// A model with one f32 input and one f32 output of fixed shapes (used for Mel-Band RoFormer).
+pub trait SingleBackend: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn run(&self, input: &[f32], out: &mut Vec<f32>) -> Result<()>;
+}
+
+/// Load `<base>.mlmodelc` (CoreML) or `<base>.onnx` (ORT) according to `kind`.
+pub fn load_single(
+    kind: BackendKind,
+    base: &std::path::Path,
+    input: (&str, &[usize]),
+    output: (&str, &[usize]),
+) -> Result<Box<dyn SingleBackend>> {
+    let with_ext = |e: &str| {
+        let mut p = base.as_os_str().to_owned();
+        p.push(e);
+        std::path::PathBuf::from(p)
+    };
+    match kind {
+        #[cfg(target_os = "macos")]
+        BackendKind::CoreMl => Ok(Box::new(coreml::CoreMlSingle::load(&with_ext(".mlmodelc"), input, output)?)),
+        #[cfg(not(target_os = "macos"))]
+        BackendKind::CoreMl => anyhow::bail!("CoreML is only available on macOS"),
+        BackendKind::Ort => Ok(Box::new(onnx::OrtSingle::load(&with_ext(".onnx"), input, output)?)),
+        BackendKind::Auto => {
+            #[cfg(target_os = "macos")]
+            match coreml::CoreMlSingle::load(&with_ext(".mlmodelc"), input, output) {
+                Ok(b) => return Ok(Box::new(b)),
+                Err(e) => log::warn!("CoreML unavailable for {} ({e:#}); using ONNX Runtime", base.display()),
+            }
+            Ok(Box::new(onnx::OrtSingle::load(&with_ext(".onnx"), input, output)?))
+        }
+    }
+}

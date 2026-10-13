@@ -1,19 +1,26 @@
 //! Structure analysis: bar-level features, phrase-aligned segmentation and section labelling.
 //!
 //! * **Bar features** (one row per bar of the grid): mix loudness, four band energies
-//!   (low/low-mid/mid/high), onset density and four *stem activities* in 0..1. With stems the
-//!   activities are the per-stem RMS relative to the stem's own loud level; without stems they
-//!   are estimated: drums from percussive onset strength, bass from low-band energy *between*
-//!   the kicks (the off-beat bass of house), melody from the mid band; vocals are unknown.
-//! * **Segmentation**: dynamic programming over bars minimising within-section squared error
-//!   plus a per-section cost; boundaries on 8-bar phrase lines (relative to the downbeat) are
-//!   free, 4-bar lines cost a little and other bars a lot, so sections follow the 8/16/32-bar
-//!   phrasing of dance music.
-//! * **Labelling** from section activities and relative energy: Intro (leading sections before
-//!   the first full-energy part), Drop (drums + bass + high energy, after a breakdown/build or
-//!   the first full section), Breakdown (drums or bass mostly absent), Buildup (the last bars
-//!   before a drop when energy/onset density rises), Verse (vocals or mid energy), Outro
-//!   (trailing sections after the last drop with reduced energy).
+//!   (low/low-mid/mid/high), 8-band coarse timbre, onset density and four *stem activities*
+//!   in 0..1. With stems the activities are the per-stem RMS relative to the stem's own loud
+//!   level (and gated by its level relative to the mix, against separation bleed); without
+//!   stems they are estimated: drums from percussive onset strength (kick + hats bands), bass
+//!   from low-band energy *between* the kicks (the off-beat bass of house), melody from the
+//!   mid band; vocals are unknown (0).
+//! * **Segmentation**: dynamic programming over bars minimising the within-section squared
+//!   error plus a per-section cost ([`SEG_LAMBDA`]). Boundaries on 8-bar phrase lines (counted
+//!   from the first bar with music) are free, 4-bar lines cost a little and other bars a lot,
+//!   so sections follow the 8/16/32-bar phrasing of dance music.
+//! * **Labelling** from section activities and relative energy:
+//!   *Drop* = drums + bass + ≥85 % of the loudest section; *Breakdown* = drums or bass mostly
+//!   absent; *Intro* = everything before the first drop up to where the drums drop out again
+//!   (the opening section is always the intro); *Outro* = trailing sections after the last
+//!   drop with less energy or without bass/drums; *Buildup* = bars right before a drop where
+//!   the drums are back but the bass is not yet (tolerating the 1-2 bar drop-out before the
+//!   drop), or the last 4/8 bars of a drumless breakdown when they get denser (snare roll /
+//!   riser); everything else (grooves without the full drop energy, vocal parts) is *Verse*.
+//!   Consecutive drop / breakdown / verse phrases are kept as separate sections (one per
+//!   phrase group); consecutive intro / build / outro parts are merged.
 
 use crate::dsp;
 use crate::frontend::N_MELS;
@@ -169,14 +176,15 @@ pub(crate) fn bar_features(prep: &crate::Prepared, grid: &BeatGrid) -> BarFeatur
     let mut stems_db: Vec<[f32; 4]> = vec![[-120.0; 4]; n];
     let has_stems = prep.stems.is_some();
     if let Some(st) = prep.stems {
-        for (i, row) in stems_db.iter_mut().enumerate() {
+        use rayon::prelude::*;
+        stems_db.par_iter_mut().enumerate().for_each(|(i, row)| {
             let (a, b) = span(i);
             let (a, b) = ((a * sr) as usize, (b * sr) as usize);
             for k in StemKind::ALL {
                 let (l, r) = st.get(k);
                 row[k.index()] = db(ms_stereo(l, r, a, b));
             }
-        }
+        });
     } else {
         // Estimated activities. Drums: percussive onset strength in the high band and kick band.
         let hi_on = spec.onset(&prep.mix_log, spec.bands(2000.0, 20000.0));
@@ -260,6 +268,12 @@ pub(crate) fn bar_features(prep: &crate::Prepared, grid: &BeatGrid) -> BarFeatur
     out
 }
 
+/// Per-section cost of the segmentation DP (in squared feature units). Tuned against Mixed In
+/// Key's energy segments (recall 0.53 / precision 0.58 within one bar).
+pub const SEG_LAMBDA: f32 = 3.0;
+/// Weight of the coarse timbre features in the segmentation vector.
+const TIMBRE_WEIGHT: f32 = 0.5;
+
 /// Feature vector of a bar for segmentation.
 fn seg_vector(b: &BarFeatures, i: usize) -> Vec<f32> {
     let mut v = Vec::with_capacity(10);
@@ -272,9 +286,8 @@ fn seg_vector(b: &BarFeatures, i: usize) -> Vec<f32> {
         v.push((b.bands_db[i][k] / 12.0).max(-3.0));
     }
     v.push(b.density[i].min(1.2));
-    let w: f32 = std::env::var("CC_TIMBRE_W").ok().and_then(|v| v.parse().ok()).unwrap_or(0.5);
     for g in 0..8 {
-        v.push(w * b.timbre[i][g]);
+        v.push(TIMBRE_WEIGHT * b.timbre[i][g]);
     }
     v
 }
@@ -380,13 +393,13 @@ impl Seg {
 
 /// Bar features of a track for a given grid (public entry for [`segment`] / cue generation).
 pub fn bar_features_for(audio: &clubcraft_audio::AudioBuffer, stems: Option<crate::StemsRef>, grid: &BeatGrid) -> BarFeatures {
-    let prep = crate::Prepared::new(audio, stems, false);
+    let prep = crate::Prepared::new(audio, stems);
     bar_features(&prep, grid)
 }
 
 /// Public entry: sections of a track given its grid.
 pub fn sections(audio: &clubcraft_audio::AudioBuffer, stems: Option<crate::StemsRef>, grid: &BeatGrid) -> Vec<Section> {
-    let prep = crate::Prepared::new(audio, stems, false);
+    let prep = crate::Prepared::new(audio, stems);
     let bars = bar_features(&prep, grid);
     segment(&bars, grid, audio.duration())
 }
@@ -398,8 +411,7 @@ pub fn segment(b: &BarFeatures, grid: &BeatGrid, duration: f64) -> Vec<Section> 
         return vec![];
     }
     let _ = grid;
-    let lam: f32 = std::env::var("CC_SEG_LAMBDA").ok().and_then(|v| v.parse().ok()).unwrap_or(2.0);
-    let mut bounds = boundaries(b, lam);
+    let mut bounds = boundaries(b, SEG_LAMBDA);
     // A partial lead-in bar (before the first downbeat) belongs to the first section.
     if bounds.len() > 2 && bounds[1] == 1 && b.start[0] < 0.0 {
         bounds.remove(1);
@@ -538,7 +550,8 @@ fn label(segs: &mut Vec<Seg>, emax: f32, b: &BarFeatures) -> Vec<SectionKind> {
             for t in (region_start..end).rev() {
                 let e = (t + 4).min(end);
                 let m = (t..e).map(drum).sum::<f32>() / (e - t) as f32;
-                if m >= 0.4 {
+                let mb = (t..e).map(|q| b.stems[q][1]).sum::<f32>() / (e - t) as f32;
+                if m >= 0.4 && mb < 0.5 {
                     tail = t;
                 } else {
                     break;
@@ -589,6 +602,5 @@ fn label(segs: &mut Vec<Seg>, emax: f32, b: &BarFeatures) -> Vec<SectionKind> {
         }
     }
     *segs = new_segs;
-    let kinds = new_kinds;
-    kinds
+    new_kinds
 }

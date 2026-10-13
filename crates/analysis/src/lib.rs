@@ -9,11 +9,13 @@
 //!
 //! # Entry points
 //!
-//! * [`analyze`] — full analysis (≈0.3–0.6 s for a 5-minute track in release builds).
+//! * [`analyze`] — full analysis (≈0.2–0.4 s for a 5-minute track in release builds, without
+//!   decoding; with stems somewhat more).
+//! * [`analyze_with_stem_track`] — same, taking the stems as a [`StemTrack`].
 //! * [`waveform()`] — multi-band (+ per-stem) waveform summary for the waveform views.
 //! * Individually usable pieces: [`beatgrid::detect`], [`key::detect`],
-//!   [`loudness::integrated_lufs`], [`structure::sections`], [`cues::generate`],
-//!   [`energy::rating`].
+//!   [`loudness::integrated_lufs`], [`structure::sections`] (+ [`structure::bar_features_for`]),
+//!   [`cues::generate`], [`energy::rating`].
 //!
 //! All inputs are 44.1 kHz stereo (other rates work, stems must match the mix rate); positions
 //! are seconds in the original track timeline.
@@ -24,12 +26,38 @@
 //! let a = analyze(&audio, None, &AnalyzeOptions::default());
 //! println!("{:?} {:?} {} cues", a.grid, a.key.map(|k| k.camelot()), a.cues.len());
 //! ```
+//!
+//! # Pipeline
+//!
+//! One shared front end ([`frontend`]: 1024-point / 256-hop STFT → 40 mel bands, 172 frames/s)
+//! feeds the beat tracker, bar features and structure; key uses its own 16k-point STFT on the
+//! harmonic signal; loudness runs on the raw stereo. Beat grid, key and loudness run in
+//! parallel (rayon). See each module for the algorithm details:
+//!
+//! * [`beatgrid`]: SuperFlux onset envelope (drums stem when available) → autocorrelation comb
+//!   tempo with a 124 BPM log-Gaussian prior → folded-phase segment regression (global constant
+//!   grid fit, ~1 ms) → on-beat/off-beat decision from band-wise folded onsets → integer/half
+//!   BPM snapping → bar phase = first beat with music.
+//! * [`key`]: HPSS-style median filtering (or bass+other+vocals stems), tuning estimation,
+//!   tuned chroma, EDM key profiles.
+//! * [`structure`]: per-bar stem activities (real stems, or estimates from the mix), phrase-aware
+//!   dynamic-programming segmentation, rule-based labelling.
+//! * [`cues`]: 8 stable hot-cue slots + markers, mix-in / mix-out phrase-aligned.
+//! * [`energy`], [`loudness`], [`mod@waveform`].
+//!
+//! # Evaluation
+//!
+//! `cargo run --release -p clubcraft-analysis --example eval` compares against DJ.Studio's and
+//! Mixed In Key's analysis of the user's library; `--example analyze -- <file> [--stems <dir>]
+//! [--bars]` prints one track's analysis.
+
+#![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
 
 pub mod beatgrid;
 pub mod cues;
 mod dsp;
 pub mod energy;
-mod frontend;
+pub mod frontend;
 pub mod key;
 pub mod loudness;
 pub mod structure;
@@ -116,7 +144,7 @@ impl OwnedStems {
         for c in 0..track.num_chunks() {
             let Some(chunk) = track.chunk(c) else { continue };
             let start = c * clubcraft_core::STEM_CHUNK_FRAMES;
-            for (j, fr) in chunk.data.chunks_exact(STEM_CHANNELS).enumerate() {
+            for (j, fr) in chunk.data.as_chunks::<STEM_CHANNELS>().0.iter().enumerate() {
                 let f = start + j;
                 if f >= n {
                     break;
@@ -177,7 +205,7 @@ pub(crate) struct Prepared<'a> {
 }
 
 impl<'a> Prepared<'a> {
-    pub fn new(audio: &'a AudioBuffer, stems: Option<StemsRef<'a>>, _full: bool) -> Prepared<'a> {
+    pub fn new(audio: &'a AudioBuffer, stems: Option<StemsRef<'a>>) -> Prepared<'a> {
         let sr = audio.sample_rate as f64;
         let mono = audio.mono();
         let ((mix, mix_log), drums) = rayon::join(
@@ -213,11 +241,29 @@ pub fn analyze(audio: &AudioBuffer, stems: Option<&StemsRef>, opts: &AnalyzeOpti
     if audio.frames() < audio.sample_rate as usize {
         return out;
     }
-    let prep = Prepared::new(audio, stems, true);
+    let t0 = std::time::Instant::now();
+    let prep = Prepared::new(audio, stems);
+    let t1 = t0.elapsed();
     let ((est, key), lufs) = rayon::join(
-        || rayon::join(|| beatgrid::estimate(&prep, &opts.beat), || key::detect_prepared(&prep)),
+        || {
+            rayon::join(
+                || {
+                    let t = std::time::Instant::now();
+                    let r = beatgrid::estimate(&prep, &opts.beat);
+                    log::debug!("beat grid {:.0?}", t.elapsed());
+                    r
+                },
+                || {
+                    let t = std::time::Instant::now();
+                    let r = key::detect_prepared(&prep);
+                    log::debug!("key {:.0?}", t.elapsed());
+                    r
+                },
+            )
+        },
         || loudness::integrated_lufs(&audio.left, &audio.right, audio.sample_rate),
     );
+    let t2 = t0.elapsed();
     out.key = key;
     out.loudness_lufs = lufs;
     out.gain_db = lufs.map(|l| (opts.target_lufs - l).clamp(-opts.max_gain_db, opts.max_gain_db));
@@ -228,8 +274,9 @@ pub fn analyze(audio: &AudioBuffer, stems: Option<&StemsRef>, opts: &AnalyzeOpti
         out.sections = structure::segment(&bars, &grid, duration);
         out.cues = cues::generate_from(&grid, &out.sections, &bars, duration);
         out.energy = Some(energy::rating_from(lufs, &bars, &out.sections, grid.bpm));
+        log::debug!("analysis: front end {t1:.0?}, grid/key/loudness {:.0?}, structure+cues {:.0?}", t2 - t1, t0.elapsed() - t2);
     } else {
-        out.energy = lufs.map(|l| energy::rating_simple(l));
+        out.energy = lufs.map(energy::rating_simple);
     }
     if stems.is_some() {
         out.stems_model = opts.stems_model.clone();

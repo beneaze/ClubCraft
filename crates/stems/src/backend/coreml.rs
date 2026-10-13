@@ -177,21 +177,134 @@ fn f16_to_f32(h: u16) -> f32 {
     f32::from_bits(bits)
 }
 
+fn load_mlmodel(path: &std::path::Path) -> Result<Retained<MLModel>> {
+    if !path.exists() {
+        bail!("missing {}", path.display());
+    }
+    autoreleasepool(|_| unsafe {
+        let url = NSURL::fileURLWithPath_isDirectory(&NSString::from_str(&path.to_string_lossy()), true);
+        let cfg = MLModelConfiguration::new();
+        cfg.setComputeUnits(MLComputeUnits::CPUAndGPU);
+        MLModel::modelWithContentsOfURL_configuration_error(&url, &cfg).map_err(ns_err)
+    })
+}
+
+/// A CoreML model with one f32 input and one f32 output of fixed shapes.
+pub struct CoreMlSingle {
+    model: Model,
+    input: (String, Vec<usize>),
+    output: (String, Vec<usize>),
+}
+
+impl CoreMlSingle {
+    pub fn load(path: &std::path::Path, input: (&str, &[usize]), output: (&str, &[usize])) -> Result<Self> {
+        Ok(CoreMlSingle {
+            model: Model(load_mlmodel(path)?),
+            input: (input.0.to_string(), input.1.to_vec()),
+            output: (output.0.to_string(), output.1.to_vec()),
+        })
+    }
+}
+
+impl super::SingleBackend for CoreMlSingle {
+    fn name(&self) -> &'static str {
+        "coreml-gpu"
+    }
+
+    fn run(&self, input: &[f32], out: &mut Vec<f32>) -> Result<()> {
+        let n: usize = self.input.1.iter().product();
+        if input.len() != n {
+            bail!("bad input size {} (want {n})", input.len());
+        }
+        autoreleasepool(|_| unsafe {
+            let arr = wrap(input, &self.input.1)?;
+            let val: Retained<AnyObject> =
+                Retained::into_super(Retained::into_super(MLFeatureValue::featureValueWithMultiArray(&arr)));
+            let key = NSString::from_str(&self.input.0);
+            let dict: Retained<NSDictionary<NSString, AnyObject>> = NSDictionary::from_slices(&[&*key], &[&*val]);
+            let provider = MLDictionaryFeatureProvider::initWithDictionary_error(MLDictionaryFeatureProvider::alloc(), &dict)
+                .map_err(ns_err)?;
+            let result = self.model.0.predictionFromFeatures_error(ProtocolObject::from_ref(&*provider)).map_err(ns_err)?;
+            let o = result
+                .featureValueForName(&NSString::from_str(&self.output.0))
+                .and_then(|v| v.multiArrayValue())
+                .ok_or_else(|| anyhow!("CoreML output {} missing", self.output.0))?;
+            // Treat [d0, d1, ...] as [1, d0, rest] so the strided reader can be reused.
+            let shape = &self.output.1;
+            let mut d = [out];
+            read_sources_shaped(&o, shape, &mut d)?;
+            drop(arr);
+            Ok(())
+        })
+    }
+}
+
+/// Read a whole MLMultiArray of exactly `shape` into a contiguous buffer.
+unsafe fn read_sources_shaped(arr: &MLMultiArray, shape: &[usize], dst: &mut [&mut Vec<f32>; 1]) -> Result<()> {
+    let got = numbers(&arr.shape());
+    if got != shape {
+        bail!("unexpected CoreML output shape {got:?} (want {shape:?})");
+    }
+    // [1, d1, d2..] with source index 0 along d1? Use a virtual leading [1, 1] view instead.
+    let strides = numbers(&arr.strides());
+    let dtype = arr.dataType();
+    let n: usize = shape.iter().product();
+    let out = &mut *dst[0];
+    out.clear();
+    out.resize(n, 0.0);
+    let ptr = out.as_mut_ptr();
+    let shape = shape.to_vec();
+    let mut err: Option<String> = None;
+    let err_ptr: *mut Option<String> = &mut err;
+    let elem = if dtype == MLMultiArrayDataType::Float32 { 4 } else if dtype == MLMultiArrayDataType::Float16 { 2 } else { 0 };
+    if elem == 0 {
+        bail!("unsupported CoreML output type {:?}", dtype);
+    }
+    let block = RcBlock::new(move |bytes: NonNull<c_void>, size: isize| {
+        let base = bytes.as_ptr() as *const u8;
+        let max_off: usize = shape.iter().zip(&strides).map(|(d, s)| (d - 1) * s).sum();
+        if (max_off + 1) * elem > size as usize {
+            unsafe { *err_ptr = Some(format!("CoreML buffer too small ({size} bytes)")) };
+            return;
+        }
+        let last = *shape.last().unwrap();
+        let last_stride = *strides.last().unwrap();
+        let outer: usize = shape[..shape.len() - 1].iter().product();
+        let mut idx = vec![0usize; shape.len() - 1];
+        for o in 0..outer {
+            let off: usize = idx.iter().zip(&strides).map(|(v, s)| v * s).sum();
+            unsafe {
+                let row = ptr.add(o * last);
+                for j in 0..last {
+                    *row.add(j) = if elem == 4 {
+                        *(base.add(off * 4) as *const f32).add(j * last_stride)
+                    } else {
+                        f16_to_f32(*(base.add(off * 2) as *const u16).add(j * last_stride))
+                    };
+                }
+            }
+            for i in (0..idx.len()).rev() {
+                idx[i] += 1;
+                if idx[i] < shape[i] {
+                    break;
+                }
+                idx[i] = 0;
+            }
+        }
+    });
+    arr.getBytesWithHandler(&block);
+    drop(block);
+    match err {
+        Some(e) => bail!(e),
+        None => Ok(()),
+    }
+}
+
 impl CoreMlBackend {
     pub fn load(man: &Manifest) -> Result<Self> {
         let mut models = Vec::new();
         for name in &man.models {
-            let path = man.dir.join(format!("{name}.mlmodelc"));
-            if !path.exists() {
-                bail!("missing {}", path.display());
-            }
-            let model = autoreleasepool(|_| unsafe {
-                let url = NSURL::fileURLWithPath_isDirectory(&NSString::from_str(&path.to_string_lossy()), true);
-                let cfg = MLModelConfiguration::new();
-                cfg.setComputeUnits(MLComputeUnits::CPUAndGPU);
-                MLModel::modelWithContentsOfURL_configuration_error(&url, &cfg).map_err(ns_err)
-            })?;
-            models.push(Model(model));
+            models.push(Model(load_mlmodel(&man.dir.join(format!("{name}.mlmodelc")))?));
         }
         Ok(CoreMlBackend {
             models,

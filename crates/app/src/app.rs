@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum View {
+    Home,
     Library,
     Studio,
     Live,
@@ -88,6 +89,8 @@ pub struct App {
     pub mixes: Vec<(i64, String, i64)>,
     pub eng: crate::live::adapter::LiveEngine,
     pub settings: crate::settings::Settings,
+    pub home: crate::home::HomeView,
+    pub mix_summaries: Vec<crate::home::MixSummary>,
 }
 
 impl App {
@@ -97,7 +100,8 @@ impl App {
         let mut sh = Shared { deck_count: 2, ..Default::default() };
         sh.reload(&lib);
         let jobs = Jobs::new(Default::default());
-        let mut view = cc.storage.and_then(|s| eframe::get_value(s, "view")).unwrap_or(View::Library);
+        // Always start on the home page (unless `--view` says otherwise).
+        let mut view = View::Home;
         // Developer conveniences: `--import <path>` and `--view library|studio|live`.
         let args: Vec<String> = std::env::args().collect();
         for w in args.windows(2) {
@@ -105,6 +109,7 @@ impl App {
                 "--import" => jobs.import(vec![w[1].clone().into()], true),
                 "--view" => {
                     view = match w[1].as_str() {
+                        "home" => View::Home,
                         "studio" => View::Studio,
                         "live" => View::Live,
                         _ => View::Library,
@@ -115,12 +120,12 @@ impl App {
         }
         let audio_cfg: clubcraft_engine::AudioConfig = cc.storage.and_then(|s| eframe::get_value(s, "audio")).unwrap_or_default();
         let midi_port: Option<String> = cc.storage.and_then(|s| eframe::get_value(s, "midi_port"));
-        let mut app = App { lib, sh, jobs, view, library: LibraryView::default(), status: String::new(), devctl: crate::devctl::DevCtl::from_env(), live: Default::default(), decks: vec![Default::default(); 2], mixer: Default::default(), browser: LibraryView::default(), studio: Default::default(), mixes: Vec::new(), eng: crate::live::adapter::LiveEngine::start(audio_cfg.clone()), settings: crate::settings::Settings::new(audio_cfg, midi_port) };
+        let mut app = App { lib, sh, jobs, view, library: LibraryView::default(), status: String::new(), devctl: crate::devctl::DevCtl::from_env(), live: Default::default(), decks: vec![Default::default(); 2], mixer: Default::default(), browser: LibraryView::default(), studio: Default::default(), mixes: Vec::new(), eng: crate::live::adapter::LiveEngine::start(audio_cfg.clone()), settings: crate::settings::Settings::new(audio_cfg, midi_port), home: Default::default(), mix_summaries: Vec::new() };
         app.settings.connect_midi(app.eng.handle.as_ref());
         if let Some(e) = &app.eng.error {
             app.status = e.clone();
         }
-        app.mixes = app.lib.mixes().unwrap_or_default();
+        app.refresh_mixes();
         let last_mix = cc.storage.and_then(|s| eframe::get_value::<i64>(s, "mix"));
         if let Some(m) = last_mix.and_then(|id| app.lib.mix(id).ok().flatten()) {
             app.studio.set_mix(m);
@@ -133,10 +138,7 @@ impl App {
         let mut reload_all = false;
         for e in events {
             match e {
-                Event::LibraryChanged => {
-                    reload_all = true;
-                    self.mixes = self.lib.mixes().unwrap_or_default();
-                }
+                Event::LibraryChanged => reload_all = true,
                 Event::TrackUpdated(id) => self.sh.reload_track(&self.lib, id),
                 Event::Error { message, .. } => self.status = message,
                 _ => {}
@@ -144,6 +146,7 @@ impl App {
         }
         if reload_all {
             self.sh.reload(&self.lib);
+            self.refresh_mixes();
         }
         self.sh.job_status = self.jobs.active.clone();
         for m in self.eng.tick(&self.lib, &self.sh, &self.jobs) {
@@ -221,13 +224,70 @@ impl App {
         }
     }
 
+    pub fn refresh_mixes(&mut self) {
+        self.mixes = self.lib.mixes().unwrap_or_default();
+        self.mix_summaries = self
+            .mixes
+            .iter()
+            .filter_map(|(id, _, modified)| self.lib.mix(*id).ok().flatten().map(|m| crate::home::MixSummary::from_mix(&m, *modified, &self.sh)))
+            .collect();
+    }
+
+    fn handle_home_actions(&mut self, actions: Vec<crate::home::HomeAction>) {
+        use crate::home::HomeAction as H;
+        for a in actions {
+            match a {
+                H::NewMix { name, tracks, harmonize } => {
+                    self.save_mix();
+                    let order = if harmonize && tracks.len() > 2 {
+                        let items: Vec<_> = tracks.iter().map(|id| clubcraft_core::planner::OrderItem::from_analysis(*id, self.sh.analyses.get(id))).collect();
+                        clubcraft_core::planner::order_tracks(&items, &Default::default())
+                    } else {
+                        tracks
+                    };
+                    let mut mix = clubcraft_core::planner::plan_mix(&name, &order, &|id| self.sh.analyses.get(&id).cloned(), &Default::default());
+                    mix.name = name;
+                    if let Err(e) = self.lib.save_mix(&mut mix) {
+                        self.status = format!("create mix: {e}");
+                    }
+                    self.studio.set_mix(mix);
+                    self.refresh_mixes();
+                    self.view = View::Studio;
+                }
+                H::OpenMix(id) => {
+                    self.save_mix();
+                    if let Ok(Some(m)) = self.lib.mix(id) {
+                        self.studio.set_mix(m);
+                        self.view = View::Studio;
+                    }
+                }
+                H::DeleteMix(id) => {
+                    let _ = self.lib.delete_mix(id);
+                    if self.studio.mix.id == id {
+                        self.studio.set_mix(clubcraft_core::Mix::default());
+                    }
+                    self.refresh_mixes();
+                }
+                H::AddMusic => {
+                    if let Some(folders) = rfd::FileDialog::new().set_title("Add music folder").pick_folders() {
+                        self.jobs.import(folders, true);
+                    }
+                }
+                H::ImportDjStudio => self.handle_studio_actions(vec![crate::studio::StudioAction::ImportDjStudio]),
+                H::GoLibrary => self.view = View::Library,
+                H::GoLive => self.view = View::Live,
+                H::Settings => self.settings.open = true,
+            }
+        }
+    }
+
     pub fn save_mix(&mut self) {
         if self.studio.dirty && !self.studio.mix.tracks.is_empty() {
             match self.lib.save_mix(&mut self.studio.mix) {
                 Ok(_) => self.studio.dirty = false,
                 Err(e) => self.status = format!("save mix: {e}"),
             }
-            self.mixes = self.lib.mixes().unwrap_or_default();
+            self.refresh_mixes();
         }
     }
 
@@ -439,7 +499,7 @@ impl App {
         ui.horizontal(|ui| {
             ui.label(RichText::new("ClubCraft").strong().size(17.0).color(theme::ACCENT));
             ui.add_space(12.0);
-            for (v, name) in [(View::Library, "Library"), (View::Studio, "Studio"), (View::Live, "Live")] {
+            for (v, name) in [(View::Home, "Home"), (View::Library, "Library"), (View::Studio, "Studio"), (View::Live, "Live")] {
                 let sel = self.view == v;
                 let b = egui::Button::new(RichText::new(name).size(14.0).strong()).selected(sel).min_size(egui::vec2(86.0, 24.0));
                 if ui.add(b).clicked() {
@@ -505,7 +565,12 @@ impl eframe::App for App {
             });
         });
         let mut actions = Vec::new();
+        let mut home_actions = Vec::new();
         egui::CentralPanel::default().show(ui, |ui| match self.view {
+            View::Home => {
+                let selected: Vec<TrackId> = self.library.selected.iter().copied().collect();
+                self.home.ui(ui, &self.sh, &self.mix_summaries, &selected, &mut home_actions);
+            }
             View::Library => self.library.ui(ui, &self.sh, false, &mut actions),
             View::Studio => {
                 let mut sa = Vec::new();
@@ -532,6 +597,7 @@ impl eframe::App for App {
             }
         });
         self.handle_library_actions(actions);
+        self.handle_home_actions(home_actions);
         let mut sa = Vec::new();
         self.settings.ui(&ctx, self.eng.handle.as_ref(), &mut sa);
         for a in sa {

@@ -169,6 +169,9 @@ pub enum Command {
     MixResume,
     /// Stop mix playback (decks pause, automation is reset).
     MixStop,
+    /// Update the studio lane mixer (gain, mute/solo, EQ, filter) of the playing mix. Cheap and
+    /// allocation free: send it on every knob movement.
+    SetMixLanes([clubcraft_core::LaneSettings; clubcraft_core::MIX_LANES]),
 
     // ---------------------------------------------------------------- engine
     /// 2 or 4 decks.

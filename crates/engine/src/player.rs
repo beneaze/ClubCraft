@@ -7,7 +7,7 @@ use crate::engine::{CommandSender, EngineHandle};
 use crate::state::EngineState;
 use crate::track::LoadedTrack;
 use anyhow::Result;
-use clubcraft_core::{Mix, MixTimeline, TrackId};
+use clubcraft_core::{LaneSettings, Mix, MixTimeline, TrackId, MIX_LANES};
 use std::sync::Arc;
 
 /// Anything that accepts engine commands (the live handle, a sender, or an offline core).
@@ -83,9 +83,29 @@ impl MixPlayer {
         sink.submit(Command::MixStop)
     }
 
-    /// Replace the mix (after an edit). If `state` shows it playing, playback continues at the
-    /// same mix time with the new schedule.
+    /// Live studio lane mixer edit (gain, mute/solo, EQ, filter). Cheap: no schedule rebuild,
+    /// one small allocation-free command; safe to call every frame while a knob is dragged.
+    pub fn set_lanes(&mut self, lanes: &[LaneSettings], sink: &mut dyn CommandSink) -> Result<()> {
+        let arr: [LaneSettings; MIX_LANES] = std::array::from_fn(|i| lanes.get(i).copied().unwrap_or_default());
+        self.mix.lanes = arr.to_vec();
+        sink.submit(Command::SetMixLanes(arr))
+    }
+
+    /// Replace the mix (after an edit). When only the lane settings changed this takes the
+    /// cheap [`Self::set_lanes`] path; otherwise the schedule is rebuilt and, if `state` shows
+    /// the mix playing, playback continues at the same mix time with the new schedule.
     pub fn update(&mut self, mix: &Mix, tracks: &dyn Fn(TrackId) -> Option<Arc<LoadedTrack>>, sink: &mut dyn CommandSink, state: &EngineState) -> Result<()> {
+        let same_structure = mix.tracks == self.mix.tracks
+            && mix.transitions == self.mix.transitions
+            && mix.tempo == self.mix.tempo
+            && mix.keylock == self.mix.keylock;
+        if same_structure {
+            if mix.lanes != self.mix.lanes {
+                self.set_lanes(&mix.lanes, sink)?;
+            }
+            self.mix = mix.clone();
+            return Ok(());
+        }
         let s = MixSchedule::new(mix, tracks, self.decks)?;
         self.mix = mix.clone();
         self.timeline = s.timeline.clone();

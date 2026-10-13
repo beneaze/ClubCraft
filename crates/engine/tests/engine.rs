@@ -504,3 +504,151 @@ fn quantized_auto_loop_with_keylock_stays_on_grid() {
         assert!((d - period).abs() < 48.0, "click spacing {d} vs {period}");
     }
 }
+
+// ------------------------------------------------------------------ studio lane mixer
+
+fn sine(f: f64, secs: f64, amp: f32) -> Vec<f32> {
+    (0..(secs * SR as f64) as usize).map(|i| (2.0 * std::f64::consts::PI * f * i as f64 / SR as f64).sin() as f32 * amp).collect()
+}
+
+fn rms(x: &[f32], t0: f64, t1: f64) -> f64 {
+    let (a, b) = ((t0 * SR as f64) as usize * 2, (t1 * SR as f64) as usize * 2);
+    let s = &x[a..b.min(x.len())];
+    (s.iter().map(|v| (*v as f64).powi(2)).sum::<f64>() / s.len() as f64).sqrt()
+}
+
+/// Two 120 BPM tracks, transition of 16 beats starting at 20 s (track 2 mixed in at beat 8).
+fn lane_mix(style: TransitionStyle, lanes: [clubcraft_core::LaneSettings; 2]) -> Mix {
+    let mut mix = Mix { keylock: false, tempo: TempoMode::Glide, ..Default::default() };
+    mix.tracks.push(MixTrack { track_id: 1, mix_in: 0.0, mix_out: 20.0, key_shift: 0, gain_db: 0.0 });
+    mix.tracks.push(MixTrack { track_id: 2, mix_in: 4.0, mix_out: 30.0, key_shift: 0, gain_db: 0.0 });
+    mix.normalize();
+    mix.transitions[0] = Transition::new(style, 16);
+    mix.lanes = lanes.to_vec();
+    mix
+}
+
+fn no_limiter() -> RenderOptions {
+    RenderOptions { limiter: false, tail_secs: 0.2, ..Default::default() }
+}
+
+#[test]
+fn lane_mute_and_solo_silence_their_tracks() {
+    let a = sine(440.0, 40.0, 0.3);
+    let b = sine(660.0, 40.0, 0.3);
+    let tr = |id: i64| Some(if id == 1 { track(&a, 120.0, 0.0) } else { track(&b, 120.0, 0.0) });
+    let mut lanes = [clubcraft_core::LaneSettings::default(); 2];
+    lanes[1].mute = true;
+    let (out, rep) = render_mix_to_vec(&lane_mix(TransitionStyle::Crossfade, lanes), &tr, &no_limiter()).unwrap();
+    let end = rep.timeline.transitions[0].end_sec;
+    let before = rms(&out, 2.0, 18.0);
+    let after = rms(&out, end + 0.2, end + 8.0);
+    eprintln!("lane 2 muted: rms before transition {before:.4}, after {after:.2e}");
+    assert!(before > 0.15, "lane 1 audible");
+    assert!(after < 1e-5, "muted lane renders silence: {after}");
+    // solo lane 2: track 1 silent, track 2 audible
+    let mut lanes = [clubcraft_core::LaneSettings::default(); 2];
+    lanes[1].solo = true;
+    let (out, _) = render_mix_to_vec(&lane_mix(TransitionStyle::Crossfade, lanes), &tr, &no_limiter()).unwrap();
+    assert!(rms(&out, 2.0, 18.0) < 1e-5, "non-soloed lane silent");
+    assert!(rms(&out, end + 0.2, end + 8.0) > 0.15, "soloed lane audible");
+}
+
+#[test]
+fn lane_gain_minus_6db_halves_amplitude() {
+    let a = sine(440.0, 40.0, 0.3);
+    let b = sine(660.0, 40.0, 0.3);
+    let tr = |id: i64| Some(if id == 1 { track(&a, 120.0, 0.0) } else { track(&b, 120.0, 0.0) });
+    let (r0, _) = render_mix_to_vec(&lane_mix(TransitionStyle::Crossfade, Default::default()), &tr, &no_limiter()).unwrap();
+    let mut lanes = [clubcraft_core::LaneSettings::default(); 2];
+    lanes[0].gain_db = -6.0;
+    let (r1, rep) = render_mix_to_vec(&lane_mix(TransitionStyle::Crossfade, lanes), &tr, &no_limiter()).unwrap();
+    let ratio = rms(&r1, 2.0, 18.0) / rms(&r0, 2.0, 18.0);
+    let end = rep.timeline.transitions[0].end_sec;
+    let other = rms(&r1, end + 0.2, end + 8.0) / rms(&r0, end + 0.2, end + 8.0);
+    eprintln!("lane gain -6 dB: amplitude ratio {ratio:.4} (expected {:.4}); other lane {other:.4}", 10f64.powf(-6.0 / 20.0));
+    assert!((ratio - 10f64.powf(-6.0 / 20.0)).abs() < 0.003, "ratio {ratio}");
+    assert!((other - 1.0).abs() < 0.003, "other lane unaffected: {other}");
+}
+
+#[test]
+fn lane_eq_low_combines_with_transition_bass_swap() {
+    // incoming track: 60 Hz only; outgoing silent so we see lane 2 alone
+    let silent = vec![0f32; SR as usize * 40];
+    let b = sine(60.0, 40.0, 0.3);
+    let tr = |id: i64| Some(if id == 1 { track(&silent, 120.0, 0.0) } else { track(&b, 120.0, 0.0) });
+    let render = |low: f32| {
+        let mut lanes = [clubcraft_core::LaneSettings::default(); 2];
+        lanes[1].eq[0] = low;
+        render_mix_to_vec(&lane_mix(TransitionStyle::BassSwap, lanes), &tr, &no_limiter()).unwrap()
+    };
+    let (r_ref, rep) = render(0.5);
+    let (r_m12, _) = render(0.25); // -12 dB
+    let (r_kill, _) = render(0.0);
+    let (r_boost, _) = render(1.0); // +6 dB
+    let x = &rep.timeline.transitions[0];
+    let tl = &rep.timeline;
+    // first half of the bass swap: the transition kills the incoming low band
+    let (h0, h1) = (tl.sec_at_beat(x.start_beat + 2.0), tl.sec_at_beat(x.start_beat + 7.5));
+    // after the swap (and after the transition) the lane EQ alone shapes the low band
+    let (a0, a1) = (x.end_sec + 0.5, x.end_sec + 6.0);
+    let db = |a: f64, b: f64| 20.0 * (a / b).log10();
+    let ref_after = rms(&r_ref, a0, a1);
+    let first_half = db(rms(&r_ref, h0, h1), ref_after);
+    let m12 = db(rms(&r_m12, a0, a1), ref_after);
+    let boost = db(rms(&r_boost, a0, a1), ref_after);
+    let kill = db(rms(&r_kill, a0, a1), ref_after);
+    let kill_swap = db(rms(&r_kill, tl.sec_at_beat(x.start_beat + 9.0), x.end_sec), ref_after);
+    eprintln!("lane EQ x bass swap: transition first half {first_half:.1} dB, lane -12 → {m12:.2} dB, lane +6 → {boost:.2} dB, lane kill → {kill:.1} dB (in swap half {kill_swap:.1} dB)");
+    assert!(first_half < -40.0, "bass swap kills the incoming low first: {first_half}");
+    assert!((m12 + 12.0).abs() < 0.5, "lane -12 dB: {m12}");
+    assert!((boost - 6.0).abs() < 0.5, "lane +6 dB: {boost}");
+    assert!(kill < -40.0 && kill_swap < -40.0, "lane kill wins over the transition's 0 dB: {kill} {kill_swap}");
+}
+
+#[test]
+fn live_lane_edits_apply_immediately_without_clicks() {
+    let a = sine(440.0, 40.0, 0.3);
+    let b = sine(660.0, 40.0, 0.3);
+    let mix = lane_mix(TransitionStyle::Crossfade, Default::default());
+    let tr = |id: i64| Some(if id == 1 { track(&a, 120.0, 0.0) } else { track(&b, 120.0, 0.0) });
+    let mut player = MixPlayer::new(&mix, &tr, [0, 1]).unwrap();
+    let mut core = EngineCore::new(SR, 2);
+    core.apply(Command::SetLimiter { enabled: false, ceiling_db: 0.0 });
+    player.play(&mut core, 2.0).unwrap();
+    let mut m = vec![0f32; 256 * 2];
+    let mut c = vec![0f32; 256 * 2];
+    let mut out = Vec::new();
+    let mut run = |core: &mut EngineCore, secs: f64, out: &mut Vec<f32>| {
+        for _ in 0..(secs * SR as f64 / 256.0) as usize {
+            core.process(&mut m, &mut c);
+            out.extend(m.iter().step_by(2));
+        }
+    };
+    run(&mut core, 0.5, &mut out);
+    // mute lane 1 through the full update path (structure unchanged → cheap lane path)
+    let mut edited = mix.clone();
+    edited.lanes[0].mute = true;
+    let st = core.snapshot();
+    player.update(&edited, &tr, &mut core, &st).unwrap();
+    let mark = out.len();
+    run(&mut core, 0.3, &mut out);
+    let tail: f64 = out[mark + (0.1 * SR as f64) as usize..].iter().map(|v| (*v as f64).abs()).fold(0.0, f64::max);
+    assert!(tail < 1e-4, "silent 100 ms after the mute: {tail}");
+    // drag the gain knob every block: the output must stay smooth
+    let mut lanes = edited.lanes.clone();
+    lanes[0].mute = false;
+    let mark = out.len();
+    for k in 0..200 {
+        lanes[0].gain_db = -12.0 * ((k as f32) * 0.05).sin().abs();
+        lanes[0].eq[2] = 0.5 + 0.3 * ((k as f32) * 0.07).sin();
+        player.set_lanes(&lanes, &mut core).unwrap();
+        run(&mut core, 256.0 / SR as f64, &mut out);
+    }
+    // sample-to-sample steps never exceed what a 440 Hz sine at 0.3 does (+ margin): no clicks
+    let max_step = out[mark..].windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0f32, f32::max);
+    let sine_step = 0.3 * 2.0 * std::f32::consts::PI * 440.0 / SR as f32 * 1.2;
+    eprintln!("live lane edits: max step {max_step:.4} (sine slope {sine_step:.4})");
+    assert!(max_step < sine_step * 1.5, "click: step {max_step}");
+    assert!(out[out.len() - 2000..].iter().any(|v| v.abs() > 0.05), "unmuted again");
+}

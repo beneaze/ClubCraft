@@ -2,6 +2,7 @@
 
 mod app;
 mod devctl;
+mod home;
 mod importer;
 mod interop;
 mod jobs;
@@ -10,6 +11,8 @@ mod live;
 mod pipeline;
 mod settings;
 mod studio;
+mod studio_timeline;
+mod studio_transition;
 mod theme;
 mod waveform;
 mod widgets;

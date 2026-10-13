@@ -40,9 +40,14 @@ pub struct StudioView {
     pub position: f64,
     pub render_progress: Option<f32>,
     pub message: String,
-    timeline_dirty: bool,
+    pub timeline_dirty: bool,
     /// Set when the mix changed; the app pushes edits into a running preview.
     pub edited: bool,
+    pub lane_show: [crate::studio_timeline::ShowMode; clubcraft_core::MIX_LANES],
+    pub tempo_open: bool,
+    pub drag: Option<crate::studio_timeline::Drag>,
+    pub drag_acc: f32,
+    pub tgroup: crate::studio_transition::ParamGroup,
 }
 
 impl Default for StudioView {
@@ -62,6 +67,11 @@ impl Default for StudioView {
             message: String::new(),
             timeline_dirty: true,
             edited: false,
+            lane_show: Default::default(),
+            tempo_open: true,
+            drag: None,
+            drag_acc: 0.0,
+            tgroup: Default::default(),
         }
     }
 }
@@ -344,168 +354,13 @@ impl StudioView {
         }
     }
 
-    fn timeline_ui(&mut self, ui: &mut Ui, sh: &Shared, out: &mut Vec<StudioAction>) {
-        let avail = ui.available_rect_before_wrap();
-        let rect = Rect::from_min_size(avail.min, vec2(avail.width(), avail.height().max(160.0)));
-        let resp = ui.allocate_rect(rect, Sense::click_and_drag());
-        if let Some(p) = resp.dnd_release_payload::<DraggedTracks>() {
-            self.add_tracks(sh, &p.0);
-        }
-        let p = ui.painter_at(rect);
-        p.rect_filled(rect, 4.0, theme::BG);
-        let total = self.timeline.total_secs.max(1.0) as f32;
-        // zoom (ctrl/cmd + scroll or pinch) and horizontal scroll
-        if resp.hovered() {
-            let (scroll, zoom_d, cmd) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta(), i.modifiers.command));
-            if cmd && scroll.y != 0.0 || zoom_d != 1.0 {
-                let f = if zoom_d != 1.0 { zoom_d } else { 1.0 + scroll.y / 300.0 };
-                let mouse_x = ui.input(|i| i.pointer.hover_pos()).map(|p| p.x - rect.left()).unwrap_or(rect.width() / 2.0);
-                let t_at = (self.scroll + mouse_x) / self.zoom;
-                self.zoom = (self.zoom * f).clamp(rect.width() / total.max(1.0) * 0.9, 120.0);
-                self.scroll = t_at * self.zoom - mouse_x;
-            } else {
-                self.scroll -= scroll.x + scroll.y;
-            }
-        }
-        if resp.dragged() && ui.input(|i| i.pointer.secondary_down() || i.modifiers.alt) {
-            self.scroll -= resp.drag_delta().x;
-        }
-        if self.follow && self.playing {
-            let x = self.position as f32 * self.zoom - self.scroll;
-            if x > rect.width() * 0.8 || x < 0.0 {
-                self.scroll = self.position as f32 * self.zoom - rect.width() * 0.2;
-            }
-        }
-        self.scroll = self.scroll.clamp(0.0, (total * self.zoom - rect.width() * 0.5).max(0.0));
-        let x_of = |t: f64| rect.left() + t as f32 * self.zoom - self.scroll;
-        // ruler
-        let ruler = Rect::from_min_size(rect.min, vec2(rect.width(), 18.0));
-        p.rect_filled(ruler, 0.0, theme::PANEL);
-        let step = [5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0].into_iter().find(|s| s * self.zoom >= 70.0).unwrap_or(600.0);
-        let mut t = (self.scroll / self.zoom / step).floor() * step;
-        while x_of(t as f64) < rect.right() {
-            let x = x_of(t as f64);
-            p.line_segment([pos2(x, ruler.bottom() - 6.0), pos2(x, ruler.bottom())], Stroke::new(1.0, theme::TEXT_DIM));
-            p.text(pos2(x + 3.0, ruler.top() + 2.0), egui::Align2::LEFT_TOP, theme::fmt_time_short(t as f64), egui::FontId::proportional(10.0), theme::TEXT_DIM);
-            t += step;
-        }
-        // lanes
-        let lane_h = ((rect.height() - 18.0 - 46.0) / 2.0).clamp(50.0, 140.0);
-        let lane_top = [ruler.bottom() + 6.0, ruler.bottom() + 12.0 + lane_h];
-        for (k, x) in self.timeline.transitions.iter().enumerate() {
-            let xr = Rect::from_min_max(pos2(x_of(x.start_sec), lane_top[0]), pos2(x_of(x.end_sec), lane_top[1] + lane_h));
-            let sel = self.selection == Selection::Transition(k);
-            p.rect_filled(xr, 3.0, if sel { Color32::from_rgba_unmultiplied(255, 92, 140, 40) } else { Color32::from_rgba_unmultiplied(255, 210, 120, 34) });
-            if sel {
-                p.rect_stroke(xr, 3.0, Stroke::new(1.0, theme::ACCENT), StrokeKind::Inside);
-            }
-        }
-        let mut clicked_track: Option<usize> = None;
-        for (i, tt) in self.timeline.tracks.iter().enumerate() {
-            let lane = i % 2;
-            let r = Rect::from_min_max(pos2(x_of(tt.start_sec), lane_top[lane]), pos2(x_of(tt.end_sec), lane_top[lane] + lane_h));
-            if r.right() < rect.left() || r.left() > rect.right() {
-                continue;
-            }
-            let accent = theme::deck_color(lane);
-            let sel = self.selection == Selection::Track(i);
-            p.rect_filled(r, 4.0, theme::PANEL);
-            let a = sh.analyses.get(&tt.track_id);
-            if let (Some(wf), Some(a)) = (sh.waveforms.get(&tt.track_id), a) {
-                // draw the waveform segment [track_pos(start), track_pos(end)] stretched into r
-                let t0 = self.timeline.track_pos(i, tt.start_beat);
-                let t1 = self.timeline.track_pos(i, tt.end_beat);
-                let wp = WaveParams { wf, grid: a.grid, cues: &[], sections: &a.sections, style: WaveStyle::Stems, stem_gains: [1.0; 4], loop_region: None, accent };
-                waveform::paint_wave(&p, r.shrink2(vec2(0.0, 14.0)), &wp, t0, t1, true);
-                // cue markers (mix-relevant ones)
-                for c in a.cues.iter().filter(|c| matches!(c.kind, CueKind::Drop | CueKind::Breakdown | CueKind::VocalIn | CueKind::MixIn | CueKind::MixOut)) {
-                    let mb = self.timeline.beat_of_track_pos(i, c.pos);
-                    if mb < tt.start_beat || mb > tt.end_beat {
-                        continue;
-                    }
-                    let x = x_of(self.timeline.sec_at_beat(mb));
-                    p.line_segment([pos2(x, r.top() + 13.0), pos2(x, r.bottom())], Stroke::new(1.0, theme::rgb(c.color).linear_multiply(0.7)));
-                    p.text(pos2(x + 2.0, r.bottom() - 2.0), egui::Align2::LEFT_BOTTOM, c.kind.label(), egui::FontId::proportional(9.0), theme::rgb(c.color));
-                }
-            }
-            p.rect_stroke(r, 4.0, Stroke::new(if sel { 2.0 } else { 1.0 }, if sel { theme::ACCENT } else { accent.linear_multiply(0.6) }), StrokeKind::Inside);
-            let name = sh.track(tt.track_id).map(|t| t.display_name()).unwrap_or_default();
-            let label_x = r.left().max(rect.left()) + 4.0;
-            p.text(pos2(label_x, r.top() + 2.0), egui::Align2::LEFT_TOP, truncate(&format!("{}. {}", i + 1, name), ((r.right() - label_x) / 6.5).max(4.0) as usize), egui::FontId::proportional(11.0), theme::TEXT);
-            if resp.clicked() && resp.interact_pointer_pos().is_some_and(|pp| r.contains(pp)) {
-                clicked_track = Some(i);
-            }
-        }
-        // transition lanes overlay (volume of both sides) for the selected transition
-        if let Selection::Transition(k) = self.selection {
-            if let (Some(x), Some(tr)) = (self.timeline.transitions.get(k), self.mix.transitions.get(k)) {
-                let x0 = x_of(x.start_sec);
-                let x1 = x_of(x.end_sec);
-                for (side, lane) in [(Side::Out, k % 2), (Side::In, (k + 1) % 2)] {
-                    let top = lane_top[lane] + 14.0;
-                    let h = lane_h - 28.0;
-                    let mut pts = Vec::new();
-                    for s in 0..=64 {
-                        let f = s as f32 / 64.0;
-                        let v = tr.value(side, Param::Volume, f * x.beats as f32);
-                        pts.push(pos2(x0 + (x1 - x0) * f, top + h * (1.0 - v)));
-                    }
-                    p.add(egui::Shape::line(pts, Stroke::new(1.5, Color32::WHITE)));
-                }
-            }
-        }
-        // BPM line
-        let bpm_r = Rect::from_min_max(pos2(rect.left(), rect.bottom() - 40.0), rect.max);
-        p.rect_filled(bpm_r, 0.0, theme::PANEL);
-        if self.timeline.total_beats > 0.0 {
-            let mut lo = f64::MAX;
-            let mut hi = f64::MIN;
-            for tt in &self.timeline.tracks {
-                lo = lo.min(tt.grid.bpm);
-                hi = hi.max(tt.grid.bpm);
-            }
-            if let TempoMode::Fixed(b) = self.mix.tempo {
-                lo = lo.min(b);
-                hi = hi.max(b);
-            }
-            let (lo, hi) = (lo - 2.0, hi + 2.0);
-            let mut pts = Vec::new();
-            let mut xpix = bpm_r.left();
-            while xpix < bpm_r.right() {
-                let t = ((xpix - rect.left() + self.scroll) / self.zoom) as f64;
-                if t > self.timeline.total_secs {
-                    break;
-                }
-                let b = self.timeline.bpm_at_beat(self.timeline.beat_at_sec(t));
-                pts.push(pos2(xpix, bpm_r.bottom() - 4.0 - ((b - lo) / (hi - lo)) as f32 * (bpm_r.height() - 8.0)));
-                xpix += 3.0;
-            }
-            p.add(egui::Shape::line(pts, Stroke::new(1.5, theme::WARN)));
-            p.text(bpm_r.left_top() + vec2(4.0, 2.0), egui::Align2::LEFT_TOP, format!("BPM {:.1}", self.timeline.bpm_at_beat(self.timeline.beat_at_sec(self.position))), egui::FontId::proportional(10.0), theme::WARN);
-        }
-        // playhead
-        let xp = x_of(self.position);
-        p.line_segment([pos2(xp, rect.top()), pos2(xp, rect.bottom())], Stroke::new(1.5, Color32::WHITE));
-        if let Some(i) = clicked_track {
-            self.selection = Selection::Track(i);
-        }
-        if resp.clicked() || (resp.dragged() && !ui.input(|i| i.modifiers.alt || i.pointer.secondary_down())) {
-            if let Some(pp) = resp.interact_pointer_pos() {
-                if pp.y < lane_top[0] || pp.y > bpm_r.top() || resp.dragged() {
-                    let t = ((pp.x - rect.left() + self.scroll) / self.zoom) as f64;
-                    out.push(StudioAction::Seek(t.clamp(0.0, self.timeline.total_secs)));
-                }
-            }
-        }
-    }
-
     fn inspector(&mut self, ui: &mut Ui, sh: &Shared) {
         match self.selection {
             Selection::None => {
                 ui.label(RichText::new("Select a track or a transition to edit it. Drag tracks from the library onto the strip above; Harmonize orders them; the timeline shows the beat-matched result.").color(theme::TEXT_DIM));
             }
             Selection::Track(i) if i < self.mix.tracks.len() => self.track_inspector(ui, sh, i),
-            Selection::Transition(k) if k < self.mix.transitions.len() => self.transition_inspector(ui, sh, k),
+            Selection::Transition(k) if k < self.mix.transitions.len() && k + 1 < self.mix.tracks.len() => self.transition_editor(ui, sh, k),
             _ => self.selection = Selection::None,
         }
     }
@@ -565,90 +420,12 @@ impl StudioView {
             self.changed();
         }
     }
-
-    fn transition_inspector(&mut self, ui: &mut Ui, sh: &Shared, k: usize) {
-        let a = sh.track(self.mix.tracks[k].track_id).map(|t| t.title.clone()).unwrap_or_default();
-        let b = sh.track(self.mix.tracks[k + 1].track_id).map(|t| t.title.clone()).unwrap_or_default();
-        let mut changed = false;
-        ui.horizontal(|ui| {
-            ui.heading(format!("Transition: {}  ▶  {}", truncate(&a, 30), truncate(&b, 30)));
-        });
-        let tr: &mut Transition = &mut self.mix.transitions[k];
-        ui.horizontal(|ui| {
-            ui.label("Style");
-            egui::ComboBox::from_id_salt("tstyle").selected_text(tr.style.label()).show_ui(ui, |ui| {
-                for s in TransitionStyle::ALL {
-                    if ui.selectable_label(tr.style == s, s.label()).clicked() && tr.style != s {
-                        *tr = Transition::new(s, tr.beats);
-                        changed = true;
-                    }
-                }
-            });
-            ui.label("Length");
-            for bars in [2u32, 4, 8, 16, 32] {
-                if ui.selectable_label(tr.beats == bars * 4, format!("{bars} bars")).clicked() && tr.beats != bars * 4 {
-                    let style = tr.style;
-                    let lanes = if style == TransitionStyle::Custom { scale_lanes(&tr.lanes, tr.beats as f32, (bars * 4) as f32) } else { style.lanes((bars * 4) as f32) };
-                    tr.beats = bars * 4;
-                    tr.lanes = lanes;
-                    changed = true;
-                }
-            }
-        });
-        ui.add_space(4.0);
-        // lane overview: one row per parameter with both sides
-        let params: Vec<Param> = {
-            let mut v = vec![Param::Volume, Param::EqLow, Param::EqMid, Param::EqHigh, Param::Filter, Param::Echo];
-            v.extend(StemKind::ALL.iter().map(|s| Param::Stem(*s)));
-            v.into_iter().filter(|p| tr.lanes.iter().any(|l| l.param == *p)).collect()
-        };
-        let row_h = 22.0;
-        let w = ui.available_width();
-        for param in params {
-            ui.horizontal(|ui| {
-                ui.add_sized(vec2(70.0, row_h), egui::Label::new(RichText::new(param.label()).size(11.0)));
-                let (r, resp) = ui.allocate_exact_size(vec2(w - 90.0, row_h), Sense::click_and_drag());
-                let p = ui.painter();
-                p.rect_filled(r, 2.0, theme::BG);
-                for bar in 0..=(tr.beats / 4) {
-                    let x = r.left() + r.width() * (bar * 4) as f32 / tr.beats as f32;
-                    p.line_segment([pos2(x, r.top()), pos2(x, r.bottom())], Stroke::new(1.0, theme::LINE));
-                }
-                for (side, col) in [(Side::Out, theme::deck_color(k % 2)), (Side::In, theme::deck_color((k + 1) % 2))] {
-                    let lo = if matches!(param, Param::Filter) { 0.0 } else { 0.0 };
-                    let mut pts = Vec::new();
-                    for s in 0..=96 {
-                        let f = s as f32 / 96.0;
-                        let v = tr.value(side, param, f * tr.beats as f32);
-                        pts.push(pos2(r.left() + r.width() * f, r.bottom() - 2.0 - (v - lo).clamp(0.0, 1.0) * (r.height() - 4.0)));
-                    }
-                    p.add(egui::Shape::line(pts, Stroke::new(1.5, col)));
-                }
-                // simple editing: drag sets the incoming (lower half) or outgoing (upper half) curve point at that beat
-                if resp.dragged() || resp.clicked() {
-                    if let Some(pp) = resp.interact_pointer_pos() {
-                        let x = ((pp.x - r.left()) / r.width()).clamp(0.0, 1.0) * tr.beats as f32;
-                        let x = (x * 2.0).round() / 2.0;
-                        let v = (1.0 - (pp.y - r.top()) / r.height()).clamp(0.0, 1.0);
-                        let side = if ui.input(|i| i.modifiers.shift) { Side::In } else { Side::Out };
-                        set_point(tr, side, param, x, v);
-                        tr.style = TransitionStyle::Custom;
-                        changed = true;
-                    }
-                }
-                resp.on_hover_text("Drag to draw the outgoing curve, Shift+drag for the incoming one");
-            });
-        }
-        if changed {
-            self.changed();
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
 struct OrderDrag(usize);
 
-fn set_point(tr: &mut Transition, side: Side, param: Param, x: f32, v: f32) {
+pub(crate) fn set_point(tr: &mut Transition, side: Side, param: Param, x: f32, v: f32) {
     let lane = match tr.lanes.iter_mut().find(|l| l.side == side && l.param == param) {
         Some(l) => l,
         None => {
@@ -661,7 +438,7 @@ fn set_point(tr: &mut Transition, side: Side, param: Param, x: f32, v: f32) {
     lane.points.sort_by(|a, b| a.0.total_cmp(&b.0));
 }
 
-fn scale_lanes(l: &[clubcraft_core::Lane], from: f32, to: f32) -> Vec<clubcraft_core::Lane> {
+pub(crate) fn scale_lanes(l: &[clubcraft_core::Lane], from: f32, to: f32) -> Vec<clubcraft_core::Lane> {
     l.iter().map(|lane| clubcraft_core::Lane { side: lane.side, param: lane.param, points: lane.points.iter().map(|(x, y)| (x / from * to, *y)).collect() }).collect()
 }
 

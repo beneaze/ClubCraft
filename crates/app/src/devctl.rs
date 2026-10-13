@@ -66,6 +66,7 @@ impl DevCtl {
                 }
                 "view" => out.push(DevCmd::View(match arg.trim() {
                     "studio" => View::Studio,
+                    "home" => View::Home,
                     "live" => View::Live,
                     _ => View::Library,
                 })),

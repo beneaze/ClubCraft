@@ -152,16 +152,39 @@ impl Biquad {
 
 const BUTTERWORTH_Q: f64 = std::f64::consts::FRAC_1_SQRT_2;
 
-/// Maps an EQ knob (0 = kill, 0.5 = unity, 1 = +6 dB) to a linear gain.
+/// Maximum knob value accepted internally: 1.0 = +6 dB is the user range; combined studio
+/// lane + transition automation may reach 1.5 = +12 dB.
+pub const EQ_KNOB_MAX: f32 = 1.5;
+
+/// Maps an EQ knob (0 = kill, 0.5 = unity, 1 = +6 dB; up to [`EQ_KNOB_MAX`] = +12 dB) to a linear
+/// gain. Below 0.5 the law is `(2k)²`.
 #[inline]
 pub fn eq_knob_gain(k: f32) -> f32 {
-    let k = k.clamp(0.0, 1.0);
+    let k = k.clamp(0.0, EQ_KNOB_MAX);
     if k <= 0.5 {
         let x = 2.0 * k;
         x * x
     } else {
         db_to_gain(12.0 * (k - 0.5))
     }
+}
+
+/// Inverse of [`eq_knob_gain`] (clamped to 0..[`EQ_KNOB_MAX`]).
+#[inline]
+pub fn eq_gain_to_knob(g: f32) -> f32 {
+    if g <= 0.0 {
+        0.0
+    } else if g <= 1.0 {
+        0.5 * g.sqrt()
+    } else {
+        (0.5 + gain_to_db(g) / 12.0).min(EQ_KNOB_MAX)
+    }
+}
+
+/// Combine two EQ knob settings multiplicatively (gains add in dB) and return the knob value.
+#[inline]
+pub fn eq_combine(a: f32, b: f32) -> f32 {
+    eq_gain_to_knob(eq_knob_gain(a) * eq_knob_gain(b))
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -618,6 +641,19 @@ mod tests {
             }
         }
         assert!(tp <= 1.0, "true peak {tp}");
+    }
+
+    #[test]
+    fn eq_knob_law_roundtrip_and_combine() {
+        for k in [0.0f32, 0.1, 0.25, 0.5, 0.7, 1.0, 1.3] {
+            assert!((eq_gain_to_knob(eq_knob_gain(k)) - k).abs() < 1e-5, "{k}");
+        }
+        assert_eq!(eq_combine(0.5, 0.5), 0.5);
+        assert_eq!(eq_combine(0.0, 1.0), 0.0);
+        // -12 dB (0.25) + +6 dB (1.0) = -6 dB
+        assert!((gain_to_db(eq_knob_gain(eq_combine(0.25, 1.0))) + 6.04).abs() < 0.01);
+        // +6 + +6 = +12 dB
+        assert!((gain_to_db(eq_knob_gain(eq_combine(1.0, 1.0))) - 12.0).abs() < 0.01);
     }
 
     #[test]

@@ -401,6 +401,7 @@ impl EngineCore {
                 }
             }
             MixPause => self.conductor.pause(&mut self.decks),
+            SetMixLanes(l) => self.conductor.set_lanes(l),
             MixResume => {
                 if self.conductor.sched.is_some() {
                     self.conductor.playing = true;

@@ -17,7 +17,8 @@ use crate::mixer::{CrossfaderAssign, Mixer};
 use crate::state::MixPlaybackState;
 use crate::track::LoadedTrack;
 use anyhow::{anyhow, Result};
-use clubcraft_core::{Mix, MixTimeline, Param, Side, StemKind, TrackId, Transition};
+use crate::dsp::eq_combine;
+use clubcraft_core::{LaneSettings, Mix, MixTimeline, Param, Side, StemKind, TrackId, Transition, MIX_LANES};
 use std::sync::Arc;
 
 /// Everything the audio thread needs to play a mix. Built on the UI thread.
@@ -28,6 +29,9 @@ pub struct MixSchedule {
     /// `transitions[k]` joins track k and k + 1.
     pub transitions: Vec<Transition>,
     pub keylock: bool,
+    /// Studio lane mixer settings (`lanes[i % MIX_LANES]` applies to track `i`). Updated live
+    /// with [`crate::Command::SetMixLanes`].
+    pub lanes: [LaneSettings; MIX_LANES],
     /// Decks used for even / odd tracks.
     pub decks: [DeckId; 2],
 }
@@ -51,11 +55,24 @@ impl MixSchedule {
             mix.tracks.iter().position(|m| m.track_id == id).map(|i| loaded[i].analysis())
         };
         let timeline = MixTimeline::build(&mix, &lookup);
-        Ok(MixSchedule { timeline, tracks: loaded, transitions: mix.transitions.clone(), keylock: mix.keylock, decks })
+        let lanes = std::array::from_fn(|i| mix.lanes.get(i).copied().unwrap_or_default());
+        Ok(MixSchedule { timeline, tracks: loaded, transitions: mix.transitions.clone(), keylock: mix.keylock, lanes, decks })
     }
 
     pub fn duration(&self) -> f64 {
         self.timeline.total_secs
+    }
+
+    /// Lane settings of track `i`.
+    pub fn lane_of(&self, i: usize) -> LaneSettings {
+        self.lanes[i % MIX_LANES]
+    }
+
+    /// Track `i` is audible given the lanes' mute / solo (same rule as [`Mix::lane_audible`]).
+    pub fn lane_audible(&self, i: usize) -> bool {
+        let any_solo = self.lanes.iter().any(|l| l.solo);
+        let l = self.lane_of(i);
+        !l.mute && (!any_solo || l.solo)
     }
 
     /// Mix time (s) at which track `i` is at position `pos` (s).
@@ -156,6 +173,14 @@ impl Conductor {
         }
     }
 
+    /// Replace the lane settings of the playing schedule (allocation free; takes effect on the
+    /// next block, smoothed by the channel's parameter smoothers).
+    pub fn set_lanes(&mut self, lanes: [LaneSettings; MIX_LANES]) {
+        if let Some(s) = self.sched.as_mut() {
+            s.lanes = lanes;
+        }
+    }
+
     pub fn state(&self) -> MixPlaybackState {
         self.state
     }
@@ -212,7 +237,6 @@ impl Conductor {
                     deck.set_keylock(s.keylock);
                     deck.set_key_shift(tr.key_shift as f32);
                     let ch = &mut mixer.channels[d];
-                    ch.trim_db = tr.gain_db;
                     ch.auto_gain_db = s.tracks[i].gain_db.unwrap_or(0.0);
                     ch.fader = 1.0;
                 }
@@ -257,10 +281,21 @@ impl Conductor {
                     // no stems: approximate the stem lanes with the channel volume
                     vol *= lanes.stems.iter().sum::<f32>() / 4.0;
                 }
+                // studio lane mixer: gain adds to the track gain, mute/solo silence the lane
+                // (through the channel's gain smoothers: click free), lane EQ is a base the
+                // transition EQ modulates (gains multiply), and a non-neutral transition filter
+                // overrides the lane filter.
+                let lane = s.lane_of(i);
+                if !s.lane_audible(i) {
+                    vol = 0.0;
+                }
                 let ch = &mut mixer.channels[d];
+                ch.trim_db = tr.gain_db + lane.gain_db;
                 ch.lane_volume = vol;
-                ch.eq_knobs = lanes.eq;
-                ch.filter_knob = lanes.filter;
+                for b in 0..3 {
+                    ch.eq_knobs[b] = eq_combine(lane.eq[b], lanes.eq[b]);
+                }
+                ch.filter_knob = if (lanes.filter - Param::Filter.neutral()).abs() > 1e-4 { lanes.filter } else { lane.filter };
                 ch.echo_send = lanes.echo;
             }
             // preload the next track on a free deck, parked at its mix-in

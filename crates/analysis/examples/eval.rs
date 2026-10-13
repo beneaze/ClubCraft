@@ -10,8 +10,8 @@
 //!
 //! Options:
 //! * `--db <dir>`          DJ.Studio Database dir (default ~/Music/DJ.Studio/Database)
-//! * `--stems-root <dir>`  directory with `<file stem>/{drums,bass,other,vocals}.*` (Demucs layout)
-//!                         to also evaluate with stems
+//! * `--stems-root <dir>`  directory with `<file stem>/{drums,bass,other,vocals}.*` (Demucs
+//!   layout) to also evaluate with stems
 //! * `--only-stems`        only evaluate tracks that have stems
 //! * `--filter <text>`     only tracks whose file name contains the text
 //! * `--limit <n>`         at most n tracks
@@ -36,8 +36,8 @@ struct Truth {
     /// DJ.Studio fixed grid: tempo (fit over beatData) and time of beat nr 0.
     bpm: f64,
     beat0: f64,
-    /// DJ.Studio's (possibly integer) displayed bpm.
-    bpm_display: f64,
+    /// DJ.Studio's beat data is not a constant grid (manual / variable edits; residual > 20 ms).
+    variable: bool,
     key: Option<Key>,
     mik_key: Option<Key>,
     /// Mixed In Key cue points (beat numbers relative to beat 0).
@@ -116,20 +116,16 @@ fn load_truth(db: &Path, index: &HashMap<String, PathBuf>) -> Vec<Truth> {
             for f in rd2.flatten() {
                 let p = f.path();
                 if p.is_file() {
-                    if let Ok(v) = std::fs::read(&p).map(|b| serde_json::from_slice::<Value>(&b)) {
-                        if let Ok(v) = v {
-                            if let Some(k) = v["key"].as_str() {
-                                structures.insert(k.to_string(), v);
-                            }
+                    if let Ok(Ok(v)) = std::fs::read(&p).map(|b| serde_json::from_slice::<Value>(&b)) {
+                        if let Some(k) = v["key"].as_str() {
+                            structures.insert(k.to_string(), v);
                         }
                     }
                 } else if p.is_dir() {
-                    for sub in ["fixed"] {
-                        let q = p.join(sub);
-                        if let Ok(Ok(v)) = std::fs::read(&q).map(|b| serde_json::from_slice::<Value>(&b)) {
-                            if let Some(k) = v["key"].as_str() {
-                                structures.insert(k.to_string(), v);
-                            }
+                    let q = p.join("fixed");
+                    if let Ok(Ok(v)) = std::fs::read(&q).map(|b| serde_json::from_slice::<Value>(&b)) {
+                        if let Some(k) = v["key"].as_str() {
+                            structures.insert(k.to_string(), v);
                         }
                     }
                 }
@@ -170,6 +166,7 @@ fn load_truth(db: &Path, index: &HashMap<String, PathBuf>) -> Vec<Truth> {
         let pts: Vec<(f64, f64)> =
             bd.iter().filter_map(|b| Some((b["nr"].as_f64()?, b["time"].as_f64()?))).collect();
         let Some((beat0, spb)) = fit_line(&pts) else { continue };
+        let resid = (pts.iter().map(|(n, t)| (t - (beat0 + spb * n)).powi(2)).sum::<f64>() / pts.len() as f64).sqrt();
         if spb <= 0.0 {
             continue;
         }
@@ -206,7 +203,7 @@ fn load_truth(db: &Path, index: &HashMap<String, PathBuf>) -> Vec<Truth> {
             path,
             bpm: 60.0 / spb,
             beat0,
-            bpm_display: rec["bpm"].as_f64().unwrap_or(0.0),
+            variable: resid > 0.02,
             key,
             mik_key,
             mik_cues,
@@ -222,6 +219,7 @@ fn load_truth(db: &Path, index: &HashMap<String, PathBuf>) -> Vec<Truth> {
 #[derive(Debug, Clone, Default)]
 struct Res {
     name: String,
+    gt_variable: bool,
     stems: bool,
     secs: f64,
     bpm: f64,
@@ -269,7 +267,7 @@ fn key_relation(a: Key, b: Key) -> &'static str {
 }
 
 fn evaluate(t: &Truth, a: &Analysis, stems: bool, secs: f64, verbose: bool) -> Res {
-    let mut r = Res { name: t.name.clone(), stems, secs, bpm_gt: t.bpm, ..Default::default() };
+    let mut r = Res { name: t.name.clone(), stems, secs, bpm_gt: t.bpm, gt_variable: t.variable, ..Default::default() };
     let gt_spb = 60.0 / t.bpm;
     if let Some(g) = a.grid {
         r.bpm = g.bpm;
@@ -392,9 +390,12 @@ fn pct(n: usize, d: usize) -> String {
     }
 }
 
-fn summarize(label: &str, rs: &[Res]) {
+fn summarize(label: &str, all: &[Res]) {
+    let n_var = all.iter().filter(|r| r.gt_variable).count();
+    let grid_rs: Vec<Res> = all.iter().filter(|r| !r.gt_variable).cloned().collect();
+    println!("\n=== {label}: {} tracks ({n_var} with a non-constant DJ.Studio grid excluded from grid metrics) ===", all.len());
+    let rs = &grid_rs[..];
     let n = rs.len();
-    println!("\n=== {label}: {n} tracks ===");
     let bpm_ok = rs.iter().filter(|r| r.bpm_ok).count();
     let octave = rs.iter().filter(|r| !r.bpm_ok && r.bpm > 0.0 && ((r.bpm * 2.0 - r.bpm_gt).abs() < 0.1 || (r.bpm / 2.0 - r.bpm_gt).abs() < 0.1)).count();
     println!("BPM within 0.05:         {}   (octave errors: {octave})", pct(bpm_ok, n));
@@ -428,8 +429,8 @@ fn summarize(label: &str, rs: &[Res]) {
         let good = mb.iter().filter(|x| **x >= 0.5).count();
         println!("bar phase vs MIK cues:   {}   (mean cue-on-bar-line {:.2})", pct(good, mb.len()), mb.iter().sum::<f64>() / mb.len() as f64);
     }
-    let kn = rs.iter().filter(|r| r.key_rel != "none").count();
-    let count = |s: &str| rs.iter().filter(|r| r.key_rel == s).count();
+    let kn = all.iter().filter(|r| r.key_rel != "none").count();
+    let count = |s: &str| all.iter().filter(|r| r.key_rel == s).count();
     println!(
         "key: exact {}  relative {}  fifth {}  parallel {}  other {}   exact+rel {}",
         pct(count("exact"), kn),
@@ -439,13 +440,13 @@ fn summarize(label: &str, rs: &[Res]) {
         count("other"),
         pct(count("exact") + count("relative"), kn)
     );
-    let rec: Vec<f64> = rs.iter().filter_map(|r| r.mik_recall).collect();
+    let rec: Vec<f64> = all.iter().filter_map(|r| r.mik_recall).collect();
     if !rec.is_empty() {
         println!("MIK cue recall (±1 bar):     {:.2} over {} tracks", rec.iter().sum::<f64>() / rec.len() as f64, rec.len());
     }
-    let sr: Vec<f64> = rs.iter().filter_map(|r| r.seg_recall).collect();
+    let sr: Vec<f64> = all.iter().filter_map(|r| r.seg_recall).collect();
     if !sr.is_empty() {
-        let sp: Vec<f64> = rs.iter().filter_map(|r| r.seg_precision).collect();
+        let sp: Vec<f64> = all.iter().filter_map(|r| r.seg_precision).collect();
         println!(
             "MIK segment boundaries: recall {:.2}, precision {:.2} over {} tracks",
             sr.iter().sum::<f64>() / sr.len() as f64,
@@ -453,18 +454,18 @@ fn summarize(label: &str, rs: &[Res]) {
             sr.len()
         );
     }
-    let en: Vec<(f64, f64)> = rs.iter().filter_map(|r| r.mik_energy.map(|m| (r.energy as f64, m as f64))).collect();
+    let en: Vec<(f64, f64)> = all.iter().filter_map(|r| r.mik_energy.map(|m| (r.energy as f64, m as f64))).collect();
     if !en.is_empty() {
         let mae = en.iter().map(|(a, b)| (a - b).abs()).sum::<f64>() / en.len() as f64;
         println!("energy vs MIK: MAE {:.2} over {} tracks", mae, en.len());
     }
-    let mut tg: Vec<f64> = rs.iter().filter_map(|r| r.dj_target).filter(|x| x.is_finite()).collect();
+    let mut tg: Vec<f64> = all.iter().filter_map(|r| r.dj_target).filter(|x| x.is_finite()).collect();
     tg.sort_by(|a, b| a.total_cmp(b));
     if !tg.is_empty() {
         println!("implied DJ.Studio loudness target: median {:.2} LUFS", tg[tg.len() / 2]);
     }
-    let mi: Vec<f64> = rs.iter().filter_map(|r| r.mix_in_bars).collect();
-    let mo: Vec<f64> = rs.iter().filter_map(|r| r.mix_out_bars).collect();
+    let mi: Vec<f64> = all.iter().filter_map(|r| r.mix_in_bars).collect();
+    let mo: Vec<f64> = all.iter().filter_map(|r| r.mix_out_bars).collect();
     if !mi.is_empty() {
         let w = |v: &[f64], b: f64| v.iter().filter(|x| x.abs() <= b).count();
         println!(
@@ -475,7 +476,7 @@ fn summarize(label: &str, rs: &[Res]) {
             pct(w(&mo, 8.0), mo.len())
         );
     }
-    let mut ts: Vec<f64> = rs.iter().map(|r| r.secs).collect();
+    let mut ts: Vec<f64> = all.iter().map(|r| r.secs).collect();
     ts.sort_by(|a, b| a.total_cmp(b));
     if !ts.is_empty() {
         println!("analysis time: median {:.2} s, max {:.2} s", ts[ts.len() / 2], ts[ts.len() - 1]);

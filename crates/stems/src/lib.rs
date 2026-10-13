@@ -38,6 +38,7 @@ pub mod backend;
 pub mod cache;
 pub mod model;
 pub mod npy;
+pub mod roformer;
 mod pipeline;
 pub mod stft;
 

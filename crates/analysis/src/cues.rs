@@ -1,6 +1,6 @@
 //! Automatic hot cues.
 //!
-//! Up to 8 beat-snapped [`CueSource::Auto`] cues in stable pad slots, so that the same pad
+//! Up to 8 beat-snapped [`CueSource::Auto`](clubcraft_core::CueSource::Auto) cues in stable pad slots, so that the same pad
 //! always means the same thing in the live decks:
 //!
 //! | slot | kind | position |
@@ -91,9 +91,13 @@ pub(crate) fn generate_from(grid: &BeatGrid, sections: &[Section], bars: &BarFea
         let n = bars.len();
         let v = |i: usize| bars.stems[i][3];
         if let Some(mut i) = (0..n.saturating_sub(1)).find(|&i| bars.start[i] >= -0.03 && v(i) > 0.5 && v(i + 1) > 0.4) {
-            // A vocal starting in the last bar of a 4-bar group is a pickup into the next phrase.
-            if (bars.bar_index(i) - bars.phrase_origin + 1).rem_euclid(4) == 0 && i + 1 < n {
-                i += 1;
+            // Snap to the 4-bar phrase grid when within a bar: a vocal starting in the last bar
+            // of a group is a pickup into the next phrase; one starting a bar late (after a
+            // vocal chop / reverb tail) belongs to the phrase line before it.
+            match (bars.bar_index(i) - bars.phrase_origin).rem_euclid(4) {
+                3 if i + 1 < n => i += 1,
+                1 if i > 0 && bars.start[i - 1] >= -0.03 => i -= 1,
+                _ => {}
             }
             push(Some(2), CueKind::VocalIn, bars.bar_index(i) as f64 * bpb);
         }

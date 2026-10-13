@@ -244,6 +244,36 @@ pub enum TempoMode {
     Fixed(f64),
 }
 
+/// Mixer settings of one studio lane (lane `i % 2` holds track `i`). They act on top of the
+/// transition automation: gain adds to the track gain, EQ/filter are a base setting that
+/// transition lanes modulate (EQ gains multiply, a transition filter overrides the lane filter),
+/// mute/solo silence lanes.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct LaneSettings {
+    pub gain_db: f32,
+    pub mute: bool,
+    pub solo: bool,
+    /// EQ knobs 0..1 (0.5 flat) low, mid, high.
+    pub eq: [f32; 3],
+    /// Filter knob 0..1 (0.5 off).
+    pub filter: f32,
+}
+
+impl Default for LaneSettings {
+    fn default() -> Self {
+        LaneSettings { gain_db: 0.0, mute: false, solo: false, eq: [0.5; 3], filter: 0.5 }
+    }
+}
+
+impl LaneSettings {
+    pub fn is_neutral(&self) -> bool {
+        *self == LaneSettings::default()
+    }
+}
+
+/// Number of deck lanes in the studio timeline.
+pub const MIX_LANES: usize = 2;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Mix {
     pub id: i64,
@@ -254,17 +284,39 @@ pub struct Mix {
     pub tempo: TempoMode,
     /// Keep the original key when tempo changes (time stretching) instead of varispeed.
     pub keylock: bool,
+    /// Per-lane mixer settings (`lanes[i % MIX_LANES]` applies to track `i`).
+    #[serde(default = "default_lanes")]
+    pub lanes: Vec<LaneSettings>,
+}
+
+fn default_lanes() -> Vec<LaneSettings> {
+    vec![LaneSettings::default(); MIX_LANES]
 }
 
 impl Default for Mix {
     fn default() -> Self {
-        Mix { id: 0, name: "New mix".into(), tracks: vec![], transitions: vec![], tempo: TempoMode::Glide, keylock: true }
+        Mix { id: 0, name: "New mix".into(), tracks: vec![], transitions: vec![], tempo: TempoMode::Glide, keylock: true, lanes: default_lanes() }
     }
 }
 
 impl Mix {
     /// Keep `transitions.len() == tracks.len() - 1`.
+    /// Lane settings for track `i`.
+    pub fn lane_of(&self, i: usize) -> LaneSettings {
+        self.lanes.get(i % MIX_LANES).copied().unwrap_or_default()
+    }
+
+    /// Whether track `i` is audible given mute / solo of the lanes.
+    pub fn lane_audible(&self, i: usize) -> bool {
+        let any_solo = self.lanes.iter().any(|l| l.solo);
+        let l = self.lane_of(i);
+        !l.mute && (!any_solo || l.solo)
+    }
+
     pub fn normalize(&mut self) {
+        if self.lanes.len() < MIX_LANES {
+            self.lanes.resize(MIX_LANES, LaneSettings::default());
+        }
         let n = self.tracks.len().saturating_sub(1);
         self.transitions.truncate(n);
         while self.transitions.len() < n {

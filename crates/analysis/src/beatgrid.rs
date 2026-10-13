@@ -1,24 +1,35 @@
 //! Constant-tempo beat grid detection.
 //!
-//! 1. **Onset strength**: SuperFlux-style log-mel spectral flux (172 frames/s). With stems the
-//!    drums stem is used (full band + kick band), otherwise the mix (full band + low band <200 Hz
-//!    weighted x2, which locks onto the four-on-the-floor kick).
-//! 2. **Tempo**: autocorrelation of the onset envelope scored as a comb (lags 1, 2 and 4 beats)
-//!    times a log-Gaussian prior centred on 124 BPM; parabolic refinement.
-//! 3. **Phase + precise tempo**: the envelope is *folded* modulo the beat period into a
-//!    fine phase histogram (equivalent-time sampling gives sub-frame resolution). The track is
-//!    split into 16-beat segments; their folded peak phases are unwrapped and fitted with a
-//!    weighted, outlier-rejecting least-squares line whose slope corrects the period and whose
-//!    intercept gives the phase. Iterated 3x, this is a global constant-grid fit accurate to
-//!    ~1 ms over the whole track; segments without drums get no weight, so beatless intros
-//!    and breakdowns do not disturb the grid (which simply extends through them).
-//! 4. **Snapping**: the BPM snaps to the nearest integer or .5 when within 0.03 BPM and the
-//!    folded beat profile is (almost) as sharp as with the free estimate.
-//! 5. **Bar phase (downbeat)**: per-beat log band energies; for each of the 4 candidate bar
-//!    phases we accumulate the bar-level (4 beats) and phrase-level (16 beats) novelty at beats
-//!    of that phase — in dance music new elements enter, chords change and sections switch on
-//!    bar 1. The first strong beat of the track adds a small prior (extended mixes start on a
-//!    downbeat).
+//! 1. **Onset strength**: SuperFlux-style log-mel spectral flux (172 frames/s, lag 2, frequency
+//!    max filter). With stems the drums stem is used, otherwise the mix; the low band
+//!    (< 200 Hz) is added with weight 2 so the four-on-the-floor kick dominates.
+//! 2. **Tempo hypotheses**: autocorrelation of the (locally mean-removed) envelope scored as a
+//!    comb over lags of 1, 2, 4 and 8 beats, times a log-Gaussian prior (124 BPM, 0.6 octaves);
+//!    the four best local maxima are kept, folded into 85..175 BPM by default.
+//! 3. **Global constant-grid fit**: the envelope is *folded* modulo the beat period into a
+//!    96-bin phase histogram (equivalent-time sampling gives sub-frame resolution). The track
+//!    is cut into 8/16-beat segments whose folded peak phases are combined by a circular
+//!    coherence search over tempo corrections (angles doubled, so segments locked onto the
+//!    off-beat do not break the fit), unwrapped and refined with outlier-rejecting weighted
+//!    least squares: the slope corrects the period, the intercept gives the phase (4
+//!    iterations). A final scan picks the tempo with the sharpest whole-track folded profile.
+//!    Beatless intros / breakdowns get no weight; the grid simply extends through them.
+//!    When the beat is weak (sharpness < 2) the runner-up tempo hypotheses are refined as
+//!    well and the sharpest (prior-weighted) grid wins.
+//! 4. **On-beat vs off-beat**: folded onset strength of 150-600 Hz (kick body), 600 Hz-4 kHz
+//!    (claps) and > 4 kHz (open hats) at the beat and half way between; the log-ratio score
+//!    `kick + claps - hats` separates on- from off-beat locks (132/132 on the reference set).
+//! 5. **Snapping**: the BPM snaps to the nearest integer or .5 when within 0.03 BPM and the
+//!    folded beat profile stays (almost) as sharp.
+//! 6. **Bar phase (downbeat)**: the first beat with music (> −65 dBFS, a beat up to 30 ms
+//!    before t = 0 counts) is beat 1 — dance tracks start on a downbeat, and this matches
+//!    DJ.Studio in 96 % and Mixed In Key's cues in 90 % of the reference tracks. Novelty-based
+//!    evidence (bar / phrase-level novelty, `phase_features`) only breaks ties when no
+//!    beat with music is found; it proved less reliable than the start-of-music rule.
+//! 7. `BeatGrid::downbeat` is the first bar-1 beat at or after t = 0.
+//!
+//! Accuracy on 135 DJ.Studio-analysed tracks: BPM within 0.05 on 100 % of constant-grid
+//! references, beat phase within 5 ms on 95 % (15 ms: 98.5 %).
 
 use crate::dsp;
 use crate::frontend::{Spectral, N_MELS};
@@ -68,9 +79,15 @@ pub struct GridEstimate {
 }
 
 /// Detect the beat grid of a track (mix only, or with stems for a more robust result).
+/// `None` when no periodic beat is found (silence, beatless ambient tracks).
 pub fn detect(audio: &clubcraft_audio::AudioBuffer, stems: Option<crate::StemsRef>, opts: &BeatOptions) -> Option<BeatGrid> {
-    let prep = crate::Prepared::new(audio, stems, false);
-    estimate(&prep, opts).map(|e| e.grid)
+    detect_detailed(audio, stems, opts).map(|e| e.grid)
+}
+
+/// Like [`detect`], also returning the grid confidence and bar-phase scores.
+pub fn detect_detailed(audio: &clubcraft_audio::AudioBuffer, stems: Option<crate::StemsRef>, opts: &BeatOptions) -> Option<GridEstimate> {
+    let prep = crate::Prepared::new(audio, stems);
+    estimate(&prep, opts)
 }
 
 /// Onset envelope used for beat tracking.
@@ -557,7 +574,7 @@ fn bar_phase(prep: &crate::Prepared, env: &[f32], fps: f64, first_s: f64, beat_s
 /// Diagnostics: (first beat time, beat length, phase feature matrix) for a track.
 #[doc(hidden)]
 pub fn debug_phase_features(audio: &clubcraft_audio::AudioBuffer) -> Option<(f64, f64, Vec<[f32; 4]>)> {
-    let prep = crate::Prepared::new(audio, None, false);
+    let prep = crate::Prepared::new(audio, None);
     let est = estimate(&prep, &BeatOptions::default())?;
     let g = est.grid;
     let beat_s = g.beat_len();
@@ -570,7 +587,7 @@ pub fn debug_phase_features(audio: &clubcraft_audio::AudioBuffer) -> Option<(f64
 /// grid's beat positions and half way between beats.
 #[doc(hidden)]
 pub fn debug_pulse_profile(audio: &clubcraft_audio::AudioBuffer, grid: &BeatGrid) -> Vec<[f32; 2]> {
-    let prep = crate::Prepared::new(audio, None, false);
+    let prep = crate::Prepared::new(audio, None);
     let spec = &prep.mix;
     let fps = spec.fps;
     let bands = [0..N_MELS, spec.bands(0.0, 150.0), spec.bands(150.0, 600.0), spec.bands(600.0, 4000.0), spec.bands(4000.0, 20000.0)];

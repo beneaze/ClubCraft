@@ -9,6 +9,7 @@ use crate::model::Manifest;
 use anyhow::{bail, Context, Result};
 use ort::session::{builder::GraphOptimizationLevel, Session};
 use ort::value::Tensor;
+use std::sync::OnceLock;
 
 pub struct OrtBackend {
     sessions: Vec<Session>,
@@ -36,15 +37,59 @@ fn opt_level() -> GraphOptimizationLevel {
     }
 }
 
+/// Register one CPU arena allocator on the ORT environment, shared by all sessions
+/// (`with_env_allocators`). With per-session arenas, the four `htdemucs_ft` sessions each keep
+/// their multi-GB peak activation memory, which drove a 16 GB machine into swap; runs are
+/// sequential, so one shared arena only needs the peak of a single run.
+fn shared_arena() -> bool {
+    static OK: OnceLock<bool> = OnceLock::new();
+    *OK.get_or_init(|| {
+        let res = (|| -> Result<()> {
+            use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
+            use ort::AsPointer;
+            let env = ort::environment::get_environment()?;
+            let mi = MemoryInfo::new(AllocationDevice::CPU, 0, AllocatorType::Arena, MemoryType::Default)?;
+            let api = ort::api();
+            let f = api.CreateAndRegisterAllocator.ok_or_else(|| anyhow::anyhow!("no CreateAndRegisterAllocator"))?;
+            // SAFETY: valid env / memory-info pointers; a null arena config selects the defaults.
+            let status = unsafe { f(env.ptr().cast_mut(), mi.ptr(), std::ptr::null()) };
+            if !status.is_null() {
+                let msg = unsafe {
+                    let m = api.GetErrorMessage.map(|g| g(status)).unwrap_or(std::ptr::null());
+                    let s = if m.is_null() { "unknown".to_string() } else { std::ffi::CStr::from_ptr(m).to_string_lossy().into_owned() };
+                    if let Some(r) = api.ReleaseStatus {
+                        r(status);
+                    }
+                    s
+                };
+                anyhow::bail!("CreateAndRegisterAllocator: {msg}");
+            }
+            Ok(())
+        })();
+        match res {
+            Ok(()) => true,
+            Err(e) => {
+                log::warn!("onnxruntime shared arena unavailable ({e:#}); using per-session arenas");
+                false
+            }
+        }
+    })
+}
+
 impl OrtBackend {
     pub fn load(man: &Manifest) -> Result<Self> {
+        let shared = shared_arena();
         let mut sessions = Vec::new();
         for name in &man.models {
             let path = man.dir.join(format!("{name}.onnx"));
             if !path.exists() {
                 bail!("missing {}", path.display());
             }
-            let s = Session::builder()?
+            let mut b = Session::builder()?;
+            if shared {
+                b = b.with_env_allocators()?;
+            }
+            let s = b
                 .with_optimization_level(opt_level())?
                 .with_intra_threads(threads())?
                 .commit_from_file(&path)
@@ -77,6 +122,51 @@ impl Backend for OrtBackend {
             o.wave.clear();
             o.wave.extend_from_slice(&wdata[src * wp..(src + 1) * wp]);
         }
+        Ok(())
+    }
+}
+
+/// An ONNX model with one f32 input and one f32 output of fixed shapes.
+pub struct OrtSingle {
+    session: Session,
+    input: (String, Vec<usize>),
+    output: (String, Vec<usize>),
+}
+
+impl OrtSingle {
+    pub fn load(path: &std::path::Path, input: (&str, &[usize]), output: (&str, &[usize])) -> Result<Self> {
+        if !path.exists() {
+            bail!("missing {}", path.display());
+        }
+        let shared = shared_arena();
+        let mut b = Session::builder()?;
+        if shared {
+            b = b.with_env_allocators()?;
+        }
+        let session = b
+            .with_optimization_level(opt_level())?
+            .with_intra_threads(threads())?
+            .commit_from_file(path)
+            .with_context(|| format!("load {}", path.display()))?;
+        Ok(OrtSingle { session, input: (input.0.into(), input.1.to_vec()), output: (output.0.into(), output.1.to_vec()) })
+    }
+}
+
+impl super::SingleBackend for OrtSingle {
+    fn name(&self) -> &'static str {
+        "onnxruntime-cpu"
+    }
+
+    fn run(&self, input: &[f32], out: &mut Vec<f32>) -> Result<()> {
+        let t = Tensor::from_array((self.input.1.clone(), input))?;
+        let outputs = self.session.run(ort::inputs![self.input.0.as_str() => t]?)?;
+        let (shape, data) = outputs[self.output.0.as_str()].try_extract_raw_tensor::<f32>()?;
+        let want: Vec<i64> = self.output.1.iter().map(|&d| d as i64).collect();
+        if shape != want.as_slice() {
+            bail!("unexpected output shape {shape:?}");
+        }
+        out.clear();
+        out.extend_from_slice(data);
         Ok(())
     }
 }
