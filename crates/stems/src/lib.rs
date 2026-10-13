@@ -1,1 +1,313 @@
+//! # clubcraft-stems — HTDemucs stem separation in Rust
+//!
+//! Splits a track into **drums, bass, other ("Melody"), vocals** ([`clubcraft_core::StemKind`]
+//! order) with Meta's Hybrid Transformer Demucs v4, reproducing `demucs.apply.apply_model` +
+//! `demucs.separate` exactly (normalisation, 7.8 s segments with triangular cross-fades, shift
+//! trick, bag-of-models weights). The STFT / iSTFT run in Rust ([`stft`]), the network runs on
+//!
+//! * **CoreML** (macOS, ML Program fp32 on CPU+GPU, `models/<name>.mlmodelc`) — ~0.3 s per segment
+//!   on an M1 Pro, or
+//! * **ONNX Runtime CPU** (`models/<name>.onnx`) — portable fallback, ~5x slower.
+//!
+//! ```no_run
+//! use clubcraft_stems::{Quality, Separator};
+//! let audio = clubcraft_audio::decode_file("track.mp3".as_ref(), 44_100)?;
+//! let sep = Separator::new(Quality::High)?;
+//! let stems = sep.separate(&audio, &mut |p| { println!("{:.0}%", p * 100.0); true })?;
+//! clubcraft_stems::save_stems(&clubcraft_core::library::stems_path("hash"), &stems)?;
+//! # anyhow::Ok(())
+//! ```
+//!
+//! For live decks use [`Separator::separate_into`], which fills a shared [`StemTrack`] chunk by
+//! chunk starting at the play position. Separated stems are cached as 8-channel 16-bit FLAC
+//! (see [`cache`]).
 
+pub mod backend;
+pub mod cache;
+pub mod model;
+pub mod npy;
+mod pipeline;
+pub mod stft;
+
+pub use backend::BackendKind;
+pub use cache::{load_stem_track, load_stems, save_stem_track, save_stems};
+pub use model::Manifest;
+
+use anyhow::{bail, Result};
+use backend::Backend;
+use clubcraft_audio::AudioBuffer;
+use clubcraft_core::{StemTrack, SAMPLE_RATE};
+use pipeline::{Job, Plan};
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Separation quality presets (cost relative to `Fast` in parentheses).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Quality {
+    /// `htdemucs`, one shifted pass, overlap 0.25 (1x). Good enough for live preview.
+    Fast,
+    /// `htdemucs_ft` (one fine-tuned model per stem), one shifted pass, overlap 0.25 (4x). Default.
+    #[default]
+    High,
+    /// `htdemucs_ft`, 2 shifts, overlap 0.5 (~12x).
+    Ultra,
+}
+
+impl Quality {
+    pub fn options(self) -> Options {
+        match self {
+            Quality::Fast => Options { model: "htdemucs".into(), shifts: 1, overlap: 0.25, ..Default::default() },
+            Quality::High => Options { model: "htdemucs_ft".into(), shifts: 1, overlap: 0.25, ..Default::default() },
+            Quality::Ultra => Options { model: "htdemucs_ft".into(), shifts: 2, overlap: 0.5, ..Default::default() },
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Quality> {
+        match s.to_ascii_lowercase().as_str() {
+            "fast" => Some(Quality::Fast),
+            "high" => Some(Quality::High),
+            "ultra" => Some(Quality::Ultra),
+            _ => None,
+        }
+    }
+}
+
+/// Full separation options (normally derived from a [`Quality`]).
+#[derive(Debug, Clone)]
+pub struct Options {
+    /// Manifest name in the models directory: `htdemucs`, `htdemucs_ft` or `htdemucs_6s`
+    /// (guitar and piano are folded into "other").
+    pub model: String,
+    /// Number of shifted passes, averaged (Demucs `--shifts`; 0 = no shift). Shifts are
+    /// deterministic: pass `i` of `n` delays the input by `(2i + 1) / 2n * 0.5 s`.
+    pub shifts: usize,
+    /// Segment overlap (Demucs `--overlap`).
+    pub overlap: f64,
+    pub backend: BackendKind,
+    /// Explicit shift amounts in samples (overrides `shifts`; for tests / reproducing Demucs runs).
+    /// Demucs' random `offset` corresponds to a shift of `22050 - offset`.
+    pub shift_samples: Option<Vec<usize>>,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options { model: "htdemucs_ft".into(), shifts: 1, overlap: 0.25, backend: BackendKind::Auto, shift_samples: None }
+    }
+}
+
+impl Options {
+    fn shift_list(&self, samplerate: u32) -> Vec<usize> {
+        if let Some(s) = &self.shift_samples {
+            return s.clone();
+        }
+        let max_shift = (0.5 * samplerate as f64) as usize;
+        (0..self.shifts).map(|i| (2 * i + 1) * max_shift / (2 * self.shifts)).collect()
+    }
+}
+
+/// Separated stems, planar stereo, in [`clubcraft_core::StemKind`] order
+/// (drums, bass, other, vocals). Every channel has the length of the input.
+#[derive(Debug, Clone, Default)]
+pub struct Stems {
+    pub sample_rate: u32,
+    pub stems: [(Vec<f32>, Vec<f32>); 4],
+}
+
+impl Stems {
+    pub fn frames(&self) -> usize {
+        self.stems[0].0.len()
+    }
+
+    /// Copy into a complete [`StemTrack`].
+    pub fn to_stem_track(&self, model: &str) -> StemTrack {
+        StemTrack::from_planar(model, &self.stems)
+    }
+
+    /// Copy out of a (complete) [`StemTrack`]; missing chunks read as silence.
+    pub fn from_stem_track(t: &StemTrack) -> Stems {
+        let mut stems: [(Vec<f32>, Vec<f32>); 4] = Default::default();
+        for (l, r) in stems.iter_mut() {
+            l.reserve_exact(t.frames);
+            r.reserve_exact(t.frames);
+        }
+        for c in 0..t.num_chunks() {
+            let n = t.chunk_frames(c);
+            match t.chunk(c) {
+                Some(ch) => {
+                    for f in ch.data.chunks_exact(clubcraft_core::STEM_CHANNELS) {
+                        for (s, (l, r)) in stems.iter_mut().enumerate() {
+                            l.push(f[2 * s]);
+                            r.push(f[2 * s + 1]);
+                        }
+                    }
+                }
+                None => {
+                    for (l, r) in stems.iter_mut() {
+                        l.resize(l.len() + n, 0.0);
+                        r.resize(r.len() + n, 0.0);
+                    }
+                }
+            }
+        }
+        Stems { sample_rate: SAMPLE_RATE, stems }
+    }
+}
+
+/// Returned (inside `anyhow::Error`) when the caller cancels; test with `err.is::<Cancelled>()`.
+#[derive(Debug, Clone, Copy)]
+pub struct Cancelled;
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("stem separation cancelled")
+    }
+}
+impl std::error::Error for Cancelled {}
+
+/// A loaded separation model plus its inference backend. Loading takes a few seconds (CoreML
+/// compiles GPU kernels on first use); keep one around and reuse it for many tracks. It is `Sync`,
+/// but runs on one track at a time are most efficient.
+pub struct Separator {
+    man: Manifest,
+    opts: Options,
+    backend: Box<dyn Backend>,
+    spectro: stft::Spectro,
+}
+
+impl Separator {
+    /// Load the preset's model from [`clubcraft_core::paths::models_dir`].
+    pub fn new(quality: Quality) -> Result<Self> {
+        Self::with_models_dir(quality, &clubcraft_core::paths::models_dir())
+    }
+
+    pub fn with_models_dir(quality: Quality, dir: &Path) -> Result<Self> {
+        Self::with_options(dir, quality.options())
+    }
+
+    pub fn with_options(dir: &Path, opts: Options) -> Result<Self> {
+        let man = Manifest::load(dir, &opts.model)?;
+        let backend = backend::load(opts.backend, &man)?;
+        let spectro = stft::Spectro::new(man.nfft, man.hop_length);
+        log::info!("stem separator: {} on {}", man.name, backend.name());
+        Ok(Separator { man, opts, backend, spectro })
+    }
+
+    /// `"coreml-gpu"` or `"onnxruntime-cpu"`.
+    pub fn backend_name(&self) -> &'static str {
+        self.backend.name()
+    }
+
+    /// Model name (e.g. `"htdemucs_ft"`), stored in [`StemTrack::model`].
+    pub fn model_name(&self) -> &str {
+        &self.man.name
+    }
+
+    pub fn options(&self) -> &Options {
+        &self.opts
+    }
+
+    pub fn manifest(&self) -> &Manifest {
+        &self.man
+    }
+
+    /// Number of model invocations needed for `frames` samples (for time estimates).
+    pub fn segments_for(&self, frames: usize) -> usize {
+        let plan = Plan::new(frames, self.man.segment_samples, self.opts.overlap, &self.opts.shift_list(self.man.samplerate));
+        plan.windows.len() * self.man.models.len()
+    }
+
+    /// Separate a whole track. `progress(fraction)` is called after every model invocation;
+    /// returning `false` cancels (the error is [`Cancelled`]). Input at any sample rate is
+    /// resampled to 44.1 kHz and the stems are resampled back.
+    pub fn separate(&self, audio: &AudioBuffer, progress: &mut dyn FnMut(f32) -> bool) -> Result<Stems> {
+        if audio.sample_rate != self.man.samplerate {
+            let res = clubcraft_audio::resample::resample(audio, self.man.samplerate);
+            let mut st = self.separate(&res, progress)?;
+            for (l, r) in st.stems.iter_mut() {
+                for ch in [l, r] {
+                    let mut v = clubcraft_audio::resample::resample_channel(ch, self.man.samplerate, audio.sample_rate);
+                    v.resize(audio.frames(), 0.0);
+                    *ch = v;
+                }
+            }
+            st.sample_rate = audio.sample_rate;
+            return Ok(st);
+        }
+        let acc = self.run(audio, None, 0, progress)?;
+        let (mean, std) = norm_stats(audio);
+        Ok(Stems { sample_rate: audio.sample_rate, stems: acc.into_planar(std, mean) })
+    }
+
+    /// Progressive separation for live decks: processes the segments around `start_frame` first,
+    /// continues forward, then wraps to the start, and publishes every `STEM_CHUNK_FRAMES` chunk of
+    /// `target` (via [`StemTrack::set_chunk`]) as soon as all segments overlapping it are done.
+    /// Published chunks equal the result of [`Separator::separate`] (up to float summation order).
+    /// `target` must have `audio.frames()` frames; audio must be 44.1 kHz. Setting `cancel` stops
+    /// early with a [`Cancelled`] error (already published chunks stay valid).
+    pub fn separate_into(
+        &self,
+        audio: &AudioBuffer,
+        target: &StemTrack,
+        start_frame: usize,
+        progress: &mut dyn FnMut(f32),
+        cancel: &AtomicBool,
+    ) -> Result<()> {
+        if audio.sample_rate != self.man.samplerate {
+            bail!("separate_into needs {} Hz audio (got {})", self.man.samplerate, audio.sample_rate);
+        }
+        if target.frames != audio.frames() {
+            bail!("StemTrack has {} frames, audio has {}", target.frames, audio.frames());
+        }
+        let mut cb = |p: f32| {
+            progress(p);
+            !cancel.load(Ordering::Relaxed)
+        };
+        self.run(audio, Some(target), start_frame, &mut cb)?;
+        Ok(())
+    }
+
+    fn run(
+        &self,
+        audio: &AudioBuffer,
+        target: Option<&StemTrack>,
+        start_frame: usize,
+        progress: &mut dyn FnMut(f32) -> bool,
+    ) -> Result<pipeline::ChunkedStems> {
+        let len = audio.frames();
+        if len == 0 {
+            return Ok(pipeline::ChunkedStems { len: 0, chunks: Vec::new() });
+        }
+        let (mean, std) = norm_stats(audio);
+        let x: [Vec<f32>; 2] =
+            [&audio.left, &audio.right].map(|c| c.iter().map(|v| (v - mean) / std).collect::<Vec<f32>>());
+        let plan = Plan::new(len, self.man.segment_samples, self.opts.overlap, &self.opts.shift_list(self.man.samplerate));
+        let job = Job {
+            man: &self.man,
+            backend: &*self.backend,
+            spectro: &self.spectro,
+            x: [&x[0], &x[1]],
+            order: plan.order(start_frame),
+            plan: &plan,
+            scale: std,
+            offset: mean,
+            target,
+        };
+        match job.run(progress)? {
+            Some(acc) => Ok(acc),
+            None => Err(Cancelled.into()),
+        }
+    }
+}
+
+/// Demucs `separate.py` normalisation: mean and (unbiased) std of the mono mix.
+fn norm_stats(audio: &AudioBuffer) -> (f32, f32) {
+    let n = audio.frames();
+    if n < 2 {
+        return (0.0, 1.0);
+    }
+    let mono = |i: usize| (audio.left[i] as f64 + audio.right[i] as f64) * 0.5;
+    let mean = (0..n).map(mono).sum::<f64>() / n as f64;
+    let var = (0..n).map(|i| (mono(i) - mean).powi(2)).sum::<f64>() / (n - 1) as f64;
+    let std = var.sqrt();
+    (mean as f32, if std > 1e-8 { std as f32 } else { 1.0 })
+}

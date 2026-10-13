@@ -8,6 +8,7 @@ pub mod key;
 pub mod library;
 pub mod mix;
 pub mod paths;
+pub mod planner;
 pub mod stems;
 
 pub use analysis::*;
