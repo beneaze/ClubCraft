@@ -87,6 +87,7 @@ pub struct App {
     pub studio: crate::studio::StudioView,
     pub mixes: Vec<(i64, String, i64)>,
     pub eng: crate::live::adapter::LiveEngine,
+    pub settings: crate::settings::Settings,
 }
 
 impl App {
@@ -112,7 +113,10 @@ impl App {
                 _ => {}
             }
         }
-        let mut app = App { lib, sh, jobs, view, library: LibraryView::default(), status: String::new(), devctl: crate::devctl::DevCtl::from_env(), live: Default::default(), decks: vec![Default::default(); 2], mixer: Default::default(), browser: LibraryView::default(), studio: Default::default(), mixes: Vec::new(), eng: crate::live::adapter::LiveEngine::start() };
+        let audio_cfg: clubcraft_engine::AudioConfig = cc.storage.and_then(|s| eframe::get_value(s, "audio")).unwrap_or_default();
+        let midi_port: Option<String> = cc.storage.and_then(|s| eframe::get_value(s, "midi_port"));
+        let mut app = App { lib, sh, jobs, view, library: LibraryView::default(), status: String::new(), devctl: crate::devctl::DevCtl::from_env(), live: Default::default(), decks: vec![Default::default(); 2], mixer: Default::default(), browser: LibraryView::default(), studio: Default::default(), mixes: Vec::new(), eng: crate::live::adapter::LiveEngine::start(audio_cfg.clone()), settings: crate::settings::Settings::new(audio_cfg, midi_port) };
+        app.settings.connect_midi(app.eng.handle.as_ref());
         if let Some(e) = &app.eng.error {
             app.status = e.clone();
         }
@@ -149,6 +153,7 @@ impl App {
             self.sh.reload_track(&self.lib, id);
         }
         let st = self.eng.state();
+        self.settings.tick(&st);
         self.decks = (0..2).map(|d| crate::live::adapter::deck_ui(&st, d, &self.sh, &Default::default(), self.eng.is_loading(d))).collect();
         self.mixer = crate::live::adapter::mixer_ui(&st, &self.eng);
         // studio transport state
@@ -309,6 +314,56 @@ impl App {
         }
     }
 
+    /// VirtualDJ-style keyboard shortcuts for the live screen.
+    fn keyboard(&mut self, ctx: &egui::Context) {
+        use crate::live::model::LiveAction as L;
+        use egui::Key;
+        if ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        let mut acts = Vec::new();
+        ctx.input(|i| {
+            let shift = i.modifiers.shift;
+            let pressed = |k: Key| i.key_pressed(k);
+            // deck A: Z cue, X play, C sync · deck B: M cue, Comma play, Period sync
+            for (d, cue, play, sync) in [(0usize, Key::Z, Key::X, Key::C), (1, Key::M, Key::Comma, Key::Period)] {
+                if pressed(cue) {
+                    acts.push(L::CueDown(d));
+                }
+                if i.key_released(cue) {
+                    acts.push(L::CueUp(d));
+                }
+                if pressed(play) {
+                    acts.push(L::PlayPause(d));
+                }
+                if pressed(sync) {
+                    acts.push(L::Sync(d));
+                }
+            }
+            // hot cues: 1-8 deck A, shift + 1-8 deck B
+            let nums = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8];
+            for (n, k) in nums.iter().enumerate() {
+                let d = if shift { 1 } else { 0 };
+                if pressed(*k) {
+                    acts.push(L::HotCue(d, n as u8));
+                }
+                if i.key_released(*k) {
+                    acts.push(L::HotCueRelease(d, n as u8));
+                }
+            }
+            if pressed(Key::ArrowLeft) {
+                acts.push(L::Crossfader((self.mixer.crossfader - 0.1).max(-1.0)));
+            }
+            if pressed(Key::ArrowRight) {
+                acts.push(L::Crossfader((self.mixer.crossfader + 0.1).min(1.0)));
+            }
+            if pressed(Key::Space) {
+                acts.push(L::Crossfader(if self.mixer.crossfader < 0.0 { 1.0 } else { -1.0 }));
+            }
+        });
+        self.handle_live_actions(acts);
+    }
+
     /// Pick a deck for "load": the requested one, else an idle deck (not playing), A first.
     fn load_to_deck(&mut self, id: TrackId, deck: usize) {
         let st = self.eng.state();
@@ -364,6 +419,7 @@ impl App {
                     self.handle_live_actions(vec![act]);
                 }
             }
+            "settings" => self.settings.open = true,
             "studio-play" => self.studio_transport(crate::studio::StudioAction::PlayPause),
             "studio-export" => {
                 let out = clubcraft_core::paths::exports_dir().join(format!("{}.wav", self.studio.mix.name));
@@ -397,6 +453,9 @@ impl App {
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("⚙ Settings").clicked() {
+                    self.settings.open = !self.settings.open;
+                }
                 let mut s = self.jobs.settings.lock();
                 egui::ComboBox::from_id_salt("quality")
                     .selected_text(format!("Stems: {}", s.quality))
@@ -467,19 +526,99 @@ impl eframe::App for App {
             }
             View::Live => {
                 let mut live_actions = Vec::new();
-                let (browser, sh) = (&mut self.browser, &self.sh);
-                self.live.ui(ui, &self.decks, &self.mixer, &mut live_actions, |ui| browser.ui(ui, sh, true, &mut actions));
+                let (browser, sh, queue) = (&mut self.browser, &self.sh, &mut self.eng.automix_queue);
+                self.live.ui(ui, &self.decks, &self.mixer, &mut live_actions, |ui| live_browser(ui, browser, sh, queue, &mut actions));
                 self.handle_live_actions(live_actions);
             }
         });
         self.handle_library_actions(actions);
+        let mut sa = Vec::new();
+        self.settings.ui(&ctx, self.eng.handle.as_ref(), &mut sa);
+        for a in sa {
+            match a {
+                crate::settings::SettingsAction::ProcessAll => {
+                    for t in &self.sh.tracks {
+                        self.jobs.process(t.id, false);
+                    }
+                }
+                crate::settings::SettingsAction::ReanalyseAll => {
+                    for t in &self.sh.tracks {
+                        self.jobs.analyze_only(t.id);
+                    }
+                }
+            }
+        }
+        if self.view == View::Live {
+            self.keyboard(&ctx);
+        }
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, "view", &self.view);
+        eframe::set_value(storage, "audio", &self.settings.audio);
+        eframe::set_value(storage, "midi_port", &self.settings.midi_port);
         self.save_mix();
         if self.studio.mix.id > 0 {
             eframe::set_value(storage, "mix", &self.studio.mix.id);
         }
     }
+}
+
+/// Live screen browser: library table plus the automix queue.
+fn live_browser(ui: &mut egui::Ui, browser: &mut LibraryView, sh: &Shared, queue: &mut Vec<TrackId>, actions: &mut Vec<LibraryAction>) {
+    let w = ui.available_width();
+    ui.horizontal_top(|ui| {
+        ui.vertical(|ui| {
+            ui.set_width(w - 290.0);
+            browser.ui(ui, sh, true, actions);
+        });
+        ui.separator();
+        ui.vertical(|ui| {
+            ui.set_width(270.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Automix queue").strong());
+                if ui.small_button("+ selected").on_hover_text("Add the selected library tracks").clicked() {
+                    let mut sel: Vec<TrackId> = browser.visible(sh).iter().map(|t| t.id).filter(|id| browser.selected.contains(id)).collect();
+                    sel.retain(|id| !queue.contains(id));
+                    queue.extend(sel);
+                }
+                if !queue.is_empty() && ui.small_button("Clear").clicked() {
+                    queue.clear();
+                }
+            });
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(270.0, ui.available_height().max(60.0)), egui::Sense::hover());
+            if let Some(p) = resp.dnd_release_payload::<crate::library_view::DraggedTracks>() {
+                for id in &p.0 {
+                    if !queue.contains(id) {
+                        queue.push(*id);
+                    }
+                }
+            }
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min)));
+            child.painter().rect_filled(rect, 4.0, theme::BG);
+            if queue.is_empty() {
+                child.label(RichText::new("Drag tracks here, then press AUTOMIX. Tracks are mixed at their analysed mix points.").color(theme::TEXT_DIM).size(11.0));
+            }
+            let mut remove = None;
+            egui::ScrollArea::vertical().id_salt("queue").show(&mut child, |ui| {
+                for (i, id) in queue.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        let name = sh.track(*id).map(|t| t.display_name()).unwrap_or_default();
+                        let a = sh.analyses.get(id);
+                        ui.label(RichText::new(format!("{}.", i + 1)).color(theme::TEXT_DIM));
+                        ui.add(egui::Label::new(crate::studio::truncate(&name, 26)).truncate());
+                        if let Some(k) = a.and_then(|a| a.key) {
+                            ui.label(RichText::new(k.camelot()).color(theme::key_color(k)).size(11.0));
+                        }
+                        if ui.small_button("✕").clicked() {
+                            remove = Some(i);
+                        }
+                    });
+                }
+            });
+            if let Some(i) = remove {
+                queue.remove(i);
+            }
+        });
+    });
 }

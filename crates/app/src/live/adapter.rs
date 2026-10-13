@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use clubcraft_core::library::stems_path;
 use clubcraft_core::{Cue, CueSource, Library, Mix, StemKind, StemTrack, TrackId, HOT_CUES};
 use clubcraft_engine::{
-    AudioConfig, Command, CommandSink, Engine, EngineHandle, EngineState, EqBand, FxKind, LoadedTrack, MixPlayer, PitchRange, RenderOptions, WavFormat,
+    AudioConfig, Command, Engine, EngineHandle, EngineState, EqBand, FxKind, LoadedTrack, MixPlayer, PitchRange, RenderOptions, WavFormat,
 };
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use parking_lot::Mutex;
@@ -180,9 +180,9 @@ pub struct LiveEngine {
 }
 
 impl LiveEngine {
-    pub fn start() -> LiveEngine {
+    pub fn start(config: AudioConfig) -> LiveEngine {
         let (tx, rx) = unbounded();
-        let (handle, error) = match Engine::start(AudioConfig::default()) {
+        let (handle, error) = match Engine::start(config).or_else(|_| Engine::start(AudioConfig::default())) {
             Ok(h) => (Some(h), None),
             Err(e) => (None, Some(format!("Audio output unavailable: {e:#}"))),
         };

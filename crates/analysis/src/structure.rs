@@ -37,6 +37,8 @@ pub struct BarFeatures {
     pub bands_db: Vec<[f32; 4]>,
     /// Onset density (relative to the track's p90).
     pub density: Vec<f32>,
+    /// Coarse timbre: mean log-mel magnitude of 8 band groups relative to their loud level.
+    pub timbre: Vec<[f32; 8]>,
     /// Relative energy 0..1.
     pub energy: Vec<f32>,
 }
@@ -126,6 +128,33 @@ pub(crate) fn bar_features(prep: &crate::Prepared, grid: &BeatGrid) -> BarFeatur
         let (a, b) = span(i);
         band_e(a, b)
     }).collect();
+    // Coarse timbre (8 groups of 5 mel bands).
+    let mut timbre: Vec<[f32; 8]> = (0..n)
+        .map(|i| {
+            let (a, b) = span(i);
+            let (fa, fb) = frame_range(a, b);
+            let mut o = [0.0f32; 8];
+            if fb > fa {
+                for f in fa..fb {
+                    let fr = &prep.mix_log[f * N_MELS..(f + 1) * N_MELS];
+                    for g in 0..8 {
+                        o[g] += fr[g * 5..(g + 1) * 5].iter().sum::<f32>() / 5.0;
+                    }
+                }
+                for v in &mut o {
+                    *v /= (fb - fa) as f32;
+                }
+            }
+            o
+        })
+        .collect();
+    for g in 0..8 {
+        let col: Vec<f32> = timbre.iter().map(|t| t[g]).collect();
+        let r = dsp::percentile(&col, 95.0);
+        for t in timbre.iter_mut() {
+            t[g] = ((t[g] - r) / 1.4).max(-4.0);
+        }
+    }
     // Onset density (full band flux on the mix).
     let onset = spec.onset(&prep.mix_log, 0..N_MELS);
     let dens: Vec<f32> = (0..n)
@@ -191,7 +220,7 @@ pub(crate) fn bar_features(prep: &crate::Prepared, grid: &BeatGrid) -> BarFeatur
     let bref: Vec<f32> = (0..4).map(|k| refp(&|i| bands[i][k])).collect();
     let sref: Vec<f32> = (0..4).map(|k| refp(&|i| stems_db[i][k])).collect();
     let dref = dsp::percentile(&dens, 90.0).max(1e-6);
-    let mut out = BarFeatures { first_bar, start: starts.clone(), has_stems, ..Default::default() };
+    let mut out = BarFeatures { first_bar, start: starts.clone(), has_stems, timbre, ..Default::default() };
     out.phrase_origin = (0..n)
         .find(|&i| starts[i] >= -0.03 && level[i] - lref > -40.0)
         .map(|i| first_bar + i as i32)
@@ -243,6 +272,10 @@ fn seg_vector(b: &BarFeatures, i: usize) -> Vec<f32> {
         v.push((b.bands_db[i][k] / 12.0).max(-3.0));
     }
     v.push(b.density[i].min(1.2));
+    let w: f32 = std::env::var("CC_TIMBRE_W").ok().and_then(|v| v.parse().ok()).unwrap_or(0.5);
+    for g in 0..8 {
+        v.push(w * b.timbre[i][g]);
+    }
     v
 }
 

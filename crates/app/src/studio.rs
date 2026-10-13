@@ -135,7 +135,7 @@ impl StudioView {
         if self.timeline_dirty {
             self.refresh_timeline(sh);
         }
-        egui::Panel::left("studio-mixes").default_size(200.0).resizable(true).show_inside(ui, |ui| {
+        egui::Panel::left("studio-mixes").default_size(200.0).resizable(true).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Mixes");
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -161,8 +161,8 @@ impl StudioView {
                 out.push(StudioAction::ExportVirtualDj);
             }
         });
-        egui::Panel::bottom("studio-inspector").default_size(250.0).resizable(true).show_inside(ui, |ui| self.inspector(ui, sh));
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::Panel::bottom("studio-inspector").default_size(250.0).resizable(true).show(ui, |ui| self.inspector(ui, sh));
+        egui::CentralPanel::default().show(ui, |ui| {
             self.header(ui, sh, out);
             ui.add_space(4.0);
             self.order_strip(ui, sh);
