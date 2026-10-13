@@ -1,0 +1,48 @@
+{
+  "name": "htdemucs_ft",
+  "architecture": "htdemucs",
+  "sources": [
+    "drums",
+    "bass",
+    "other",
+    "vocals"
+  ],
+  "samplerate": 44100,
+  "audio_channels": 2,
+  "segment_samples": 343980,
+  "spec_frames": 336,
+  "nfft": 4096,
+  "hop_length": 1024,
+  "models": [
+    "htdemucs_ft_0",
+    "htdemucs_ft_1",
+    "htdemucs_ft_2",
+    "htdemucs_ft_3"
+  ],
+  "weights": [
+    [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      1.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      1.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ]
+}

@@ -1,0 +1,12 @@
+[package]
+name = "clubcraft-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clubcraft-core.workspace = true
+anyhow.workspace = true
+log.workspace = true
+symphonia = { version = "0.6", features = ["all"] }
+lofty = "0.25"

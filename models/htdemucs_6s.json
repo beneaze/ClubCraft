@@ -1,0 +1,31 @@
+{
+  "name": "htdemucs_6s",
+  "architecture": "htdemucs",
+  "sources": [
+    "drums",
+    "bass",
+    "other",
+    "vocals",
+    "guitar",
+    "piano"
+  ],
+  "samplerate": 44100,
+  "audio_channels": 2,
+  "segment_samples": 343980,
+  "spec_frames": 336,
+  "nfft": 4096,
+  "hop_length": 1024,
+  "models": [
+    "htdemucs_6s"
+  ],
+  "weights": [
+    [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ]
+  ]
+}

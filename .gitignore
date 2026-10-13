@@ -1,0 +1,9 @@
+/target
+/models/*.onnx
+/models/*.onnx.data
+tools/model-export/.venv
+tools/model-export/cache
+*.DS_Store
+models/*
+!models/README.md
+!models/*.json
