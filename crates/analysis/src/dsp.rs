@@ -102,10 +102,6 @@ impl MelBank {
         MelBank { filters, centers }
     }
 
-    pub fn len(&self) -> usize {
-        self.filters.len()
-    }
-
     pub fn apply(&self, spec: &[Complex<f32>], out: &mut [f32]) {
         for ((start, w), o) in self.filters.iter().zip(out.iter_mut()) {
             let mut acc = 0.0f32;

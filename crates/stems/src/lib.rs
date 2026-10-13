@@ -7,14 +7,26 @@
 //!
 //! * **CoreML** (macOS, ML Program fp32 on CPU+GPU, `models/<name>.mlmodelc`) — ~0.3 s per segment
 //!   on an M1 Pro, or
-//! * **ONNX Runtime CPU** (`models/<name>.onnx`) — portable fallback, ~5x slower.
+//! * **ONNX Runtime CPU** (`models/<name>.onnx`, ORT 1.20) — portable fallback, ~5x slower.
+//!
+//! Accuracy (Rust vs Python `demucs.apply_model` with identical input and shifts, real house
+//! tracks): CoreML 110–128 dB SDR per stem for all presets, ORT 78–88 dB — i.e. identical for all
+//! practical purposes.
+//!
+//! ## Progressive separation
+//!
+//! [`Separator::separate_into`] processes segments around the play position first and publishes
+//! each [`clubcraft_core::STEM_CHUNK_FRAMES`] chunk as soon as every segment overlapping it is done
+//! (with `Quality::Fast` the chunk under the playhead is ready after 2 model runs, ~0.7 s on an
+//! M1 Pro; with `High` after 8 runs). Published data equals [`Separator::separate`] output
+//! (bit-identical for `Fast`/`High`; ≤1 ulp-level differences with several shifts).
 //!
 //! ```no_run
 //! use clubcraft_stems::{Quality, Separator};
 //! let audio = clubcraft_audio::decode_file("track.mp3".as_ref(), 44_100)?;
 //! let sep = Separator::new(Quality::High)?;
 //! let stems = sep.separate(&audio, &mut |p| { println!("{:.0}%", p * 100.0); true })?;
-//! clubcraft_stems::save_stems(&clubcraft_core::library::stems_path("hash"), &stems)?;
+//! clubcraft_stems::save_stems_with_model(&clubcraft_core::library::stems_path("hash"), &stems, sep.model_name())?;
 //! # anyhow::Ok(())
 //! ```
 //!
@@ -30,7 +42,7 @@ mod pipeline;
 pub mod stft;
 
 pub use backend::BackendKind;
-pub use cache::{load_stem_track, load_stems, save_stem_track, save_stems};
+pub use cache::{load_stem_track, load_stems, save_stem_track, read_model_name, save_stems, save_stems_with_model};
 pub use model::Manifest;
 
 use anyhow::{bail, Result};
@@ -310,4 +322,10 @@ fn norm_stats(audio: &AudioBuffer) -> (f32, f32) {
     let var = (0..n).map(|i| (mono(i) - mean).powi(2)).sum::<f64>() / (n - 1) as f64;
     let std = var.sqrt();
     (mean as f32, if std > 1e-8 { std as f32 } else { 1.0 })
+}
+
+#[allow(dead_code)]
+fn assert_send_sync() {
+    fn is<T: Send + Sync>() {}
+    is::<Separator>();
 }

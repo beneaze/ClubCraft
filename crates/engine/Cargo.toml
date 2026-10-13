@@ -16,9 +16,13 @@ parking_lot.workspace = true
 crossbeam-channel.workspace = true
 rtrb.workspace = true
 cpal = "0.18.2"
-signalsmith-stretch = "0.1.3"
 midir = "0.11.1"
 hound = "3.5.1"
 triple_buffer = "9.0.0"
 
+[build-dependencies]
+cc = "1.2"
+
 [dev-dependencies]
+libc = "0.2"
+rustfft.workspace = true

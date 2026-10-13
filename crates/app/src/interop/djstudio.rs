@@ -60,7 +60,11 @@ impl DjsTrack {
 
 fn parse_track(v: &Value) -> Option<DjsTrack> {
     let key = v.get("key")?.as_str()?.to_string();
-    let path = v.pointer("/externalRec/fileLocationPath").and_then(|p| p.as_str()).filter(|p| !p.is_empty())?;
+    let path = ["/externalRec/fileLocationPath", "/lastKnownFilePath", "/externalRec/lastKnownFilePath"]
+        .iter()
+        .filter_map(|ptr| v.pointer(ptr).and_then(|p| p.as_str()).filter(|p| !p.is_empty()))
+        .find(|p| Path::new(p).exists())
+        .or_else(|| v.pointer("/externalRec/fileLocationPath").and_then(|p| p.as_str()).filter(|p| !p.is_empty()))?;
     let beat0 = v.get("bpmLine").and_then(|l| l.as_array()).and_then(|l| l.first()).and_then(|p| {
         let t = p.get("time")?.as_f64()?;
         let b = p.get("value")?.as_f64()?;

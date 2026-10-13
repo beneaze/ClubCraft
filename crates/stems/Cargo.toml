@@ -13,8 +13,11 @@ log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 realfft = "3.5"
-ort = { version = "=2.0.0-rc.14", default-features = false, features = ["std", "download-binaries", "copy-dylibs", "tls-native", "api-24"] }
-zstd = "0.13"
+ort = { version = "=2.0.0-rc.9", default-features = false, features = ["download-binaries", "copy-dylibs"] }
+# ort 2.0.0-rc.9 asks for ort-sys "^2.0.0-rc.9", which would resolve to a newer (ORT 1.31) build; pin it.
+ort-sys = { version = "=2.0.0-rc.9", default-features = false }
+flacenc = { version = "0.5", features = ["par"] }
+symphonia = { version = "0.6", default-features = false, features = ["flac"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.3"

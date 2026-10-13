@@ -21,3 +21,6 @@ rfd = "0.17"
 walkdir = "2"
 image = { version = "0.25", default-features = false, features = ["png"] }
 quick-xml = "0.38"
+clubcraft-stems = { path = "../stems" }
+clubcraft-analysis.workspace = true
+clubcraft-engine.workspace = true

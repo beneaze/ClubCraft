@@ -59,6 +59,7 @@ pub fn paint_wave(p: &Painter, rect: Rect, w: &WaveParams, t0: f64, t1: f64, mir
     let hmax = if mirrored { rect.height() / 2.0 - 1.0 } else { rect.height() - 1.0 };
     let mut mesh = Mesh::default();
     let stems = if w.style == WaveStyle::Stems { wf.stems.as_ref() } else { None };
+    let wp_gains = w.stem_gains;
     for c in 0..cols {
         let ta = t0 + c as f64 * spp;
         let tb = ta + spp;
@@ -70,17 +71,41 @@ pub fn paint_wave(p: &Painter, rect: Rect, w: &WaveParams, t0: f64, t1: f64, mir
         let x0 = rect.left() + c as f32 * col_w;
         let x1 = x0 + col_w + 0.35;
         if let Some(st) = stems {
-            // Draw the loudest layers first so quieter stems stay visible on top.
-            let mut layers: [(f32, StemKind); 4] = [(0.0, StemKind::Drums); 4];
-            for (i, k) in StemKind::ALL.iter().enumerate() {
-                layers[i] = (amp(bin_max(&st[i], a, b)), *k);
+            // Stacked: the column height is the mix peak, split between the stems in proportion
+            // to their energy. Inner → outer: bass, drums, melody, vocals. Muted stems shrink.
+            let total = amp(bin_max(&wf.peak, a, b));
+            let order = [StemKind::Bass, StemKind::Drums, StemKind::Other, StemKind::Vocals];
+            let mut w = [0f32; 4];
+            let mut sum = 0.0;
+            for (j, k) in order.iter().enumerate() {
+                let v = amp(bin_max(&st[k.index()], a, b));
+                w[j] = v * v;
+                sum += w[j];
             }
-            layers.sort_by(|x, y| y.0.total_cmp(&x.0));
-            for (v, k) in layers {
-                let g = w.stem_gains[k.index()];
-                let col = theme::rgb(k.color());
-                let col = if g < 0.05 { col.linear_multiply(0.12) } else { col.linear_multiply(0.35 + 0.65 * g.min(1.0)) };
-                add_bar(&mut mesh, x0, x1, cy, v * hmax, col);
+            if sum > 1e-9 {
+                let mut gsum = 0.0;
+                let mut eff = [0f32; 4];
+                for (j, k) in order.iter().enumerate() {
+                    let g = params_gain(&wp_gains, k.index());
+                    eff[j] = w[j] * (0.12 + 0.88 * g);
+                    gsum += w[j] * g;
+                }
+                let scale_h = total * hmax * (gsum / sum).max(0.12).sqrt().min(1.0) / eff.iter().sum::<f32>().max(1e-9);
+                let mut acc = 0.0;
+                for (j, k) in order.iter().enumerate() {
+                    let h = eff[j] * scale_h;
+                    if h < 0.2 {
+                        continue;
+                    }
+                    let g = params_gain(&wp_gains, k.index());
+                    let col = theme::rgb(k.color());
+                    let col = if g < 0.05 { col.linear_multiply(0.18) } else { col.linear_multiply(0.45 + 0.55 * g.min(1.0)) };
+                    mesh.add_colored_rect(Rect::from_min_max(pos2(x0, cy - acc - h), pos2(x1, cy - acc)), col);
+                    if mirrored {
+                        mesh.add_colored_rect(Rect::from_min_max(pos2(x0, cy + acc), pos2(x1, cy + acc + h)), col);
+                    }
+                    acc += h;
+                }
             }
         } else {
             let low = amp(bin_max(&wf.low, a, b));
@@ -94,6 +119,11 @@ pub fn paint_wave(p: &Painter, rect: Rect, w: &WaveParams, t0: f64, t1: f64, mir
         }
     }
     p.add(egui::Shape::mesh(mesh));
+}
+
+#[inline]
+fn params_gain(g: &[f32; 4], i: usize) -> f32 {
+    g[i].clamp(0.0, 1.0)
 }
 
 fn time_to_x(rect: Rect, t0: f64, t1: f64, t: f64) -> f32 {

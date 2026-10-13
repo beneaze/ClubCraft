@@ -82,7 +82,7 @@ impl Default for DeckUi {
             fader: 1.0,
             pfl: false,
             vu: [0.0; 2],
-            fx: [FxUi { kind: 0, on: false, amount: 0.5, beats: 0.5 }, FxUi { kind: 1, on: false, amount: 0.5, beats: 1.0 }, FxUi { kind: 2, on: false, amount: 0.5, beats: 1.0 }],
+            fx: [FxUi { kind: 0, on: false, amount: 0.5, beats: 0.5 }, FxUi { kind: 2, on: false, amount: 0.5, beats: 1.0 }, FxUi { kind: 3, on: false, amount: 0.5, beats: 1.0 }],
             waveform: None,
             grid: None,
             cues: Vec::new(),
@@ -100,7 +100,7 @@ pub struct FxUi {
     pub beats: f32,
 }
 
-pub const FX_NAMES: [&str; 7] = ["Echo", "Reverb", "Flanger", "Filter LFO", "Gate", "Roll", "Brake"];
+pub const FX_NAMES: [&str; 9] = ["Echo", "Ping Pong", "Reverb", "Flanger", "Filter LFO", "Gate", "Roll", "Bitcrusher", "Brake"];
 
 #[derive(Clone)]
 pub struct MixerUi {

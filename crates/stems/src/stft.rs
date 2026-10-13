@@ -169,7 +169,9 @@ mod tests {
         let mut y = vec![0f32; len];
         s.ispec_channel(&re, &im, &mut y);
         // Dropping the Nyquist bin loses a tiny bit; the rest must reconstruct.
-        let err = x.iter().zip(&y).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        // HTDemucs' `_ispec` zeroes the two outermost frames, so the first/last ~1.5k samples are
+        // not reconstructed exactly (same in PyTorch); check the interior.
+        let err = x[4096..len - 4096].iter().zip(&y[4096..]).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
         assert!(err < 1e-3, "roundtrip err {err}");
     }
 

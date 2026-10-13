@@ -96,16 +96,16 @@ impl Jobs {
         // Analysis / import workers.
         let n_cpu = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(2, 6) / 2;
         for i in 0..n_cpu.max(1) {
-            let (q, g, tx, st) = (cpu.clone(), gpu.clone(), tx.clone(), settings.clone());
+            let (q, g, tx, st, cn) = (cpu.clone(), gpu.clone(), tx.clone(), settings.clone(), cancel.clone());
             std::thread::Builder::new()
                 .name(format!("cc-analysis-{i}"))
-                .spawn(move || worker(q, g, tx, st, false))
+                .spawn(move || worker(q, g, tx, st, cn, false))
                 .expect("spawn worker");
         }
         // One separation worker: the GPU is the bottleneck, and models are large.
         {
-            let (q, c, tx, st) = (gpu.clone(), cpu.clone(), tx.clone(), settings.clone());
-            std::thread::Builder::new().name("cc-stems".into()).spawn(move || worker(q, c, tx, st, true)).expect("spawn stems worker");
+            let (q, c, tx, st, cn) = (gpu.clone(), cpu.clone(), tx.clone(), settings.clone(), cancel.clone());
+            std::thread::Builder::new().name("cc-stems".into()).spawn(move || worker(q, c, tx, st, cn, true)).expect("spawn stems worker");
         }
         Jobs { tx, rx, cpu, gpu, settings, active: HashMap::new(), log: VecDeque::new(), cancel }
     }
@@ -171,7 +171,7 @@ impl Jobs {
     }
 }
 
-fn worker(q: Arc<Queue>, other: Arc<Queue>, tx: Sender<Event>, settings: Arc<Mutex<pipeline::Settings>>, gpu: bool) {
+fn worker(q: Arc<Queue>, other: Arc<Queue>, tx: Sender<Event>, settings: Arc<Mutex<pipeline::Settings>>, cancel: Arc<AtomicBool>, gpu: bool) {
     let lib = match clubcraft_core::Library::open_default() {
         Ok(l) => l,
         Err(e) => {
@@ -219,7 +219,7 @@ fn worker(q: Arc<Queue>, other: Arc<Queue>, tx: Sender<Event>, settings: Arc<Mut
                 let _ = tx.send(Event::Finished { track: None, stage: Stage::Import });
             }
             Job::Separate(id) => {
-                let r = pipeline::separate(&lib, &mut ctx, id, &s, &mut |frac, label| {
+                let r = pipeline::separate(&lib, &mut ctx, id, &s, &cancel, &mut |frac, label| {
                     let _ = tx.send(Event::Progress { track: Some(id), stage: Stage::Separate, frac, label: label.to_string() });
                 });
                 match r {

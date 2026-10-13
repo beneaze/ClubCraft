@@ -86,6 +86,7 @@ pub struct App {
     pub browser: LibraryView,
     pub studio: crate::studio::StudioView,
     pub mixes: Vec<(i64, String, i64)>,
+    pub eng: crate::live::adapter::LiveEngine,
 }
 
 impl App {
@@ -111,7 +112,10 @@ impl App {
                 _ => {}
             }
         }
-        let mut app = App { lib, sh, jobs, view, library: LibraryView::default(), status: String::new(), devctl: crate::devctl::DevCtl::from_env(), live: Default::default(), decks: vec![Default::default(); 2], mixer: Default::default(), browser: LibraryView::default(), studio: Default::default(), mixes: Vec::new() };
+        let mut app = App { lib, sh, jobs, view, library: LibraryView::default(), status: String::new(), devctl: crate::devctl::DevCtl::from_env(), live: Default::default(), decks: vec![Default::default(); 2], mixer: Default::default(), browser: LibraryView::default(), studio: Default::default(), mixes: Vec::new(), eng: crate::live::adapter::LiveEngine::start() };
+        if let Some(e) = &app.eng.error {
+            app.status = e.clone();
+        }
         app.mixes = app.lib.mixes().unwrap_or_default();
         let last_mix = cc.storage.and_then(|s| eframe::get_value::<i64>(s, "mix"));
         if let Some(m) = last_mix.and_then(|id| app.lib.mix(id).ok().flatten()) {
@@ -138,6 +142,39 @@ impl App {
             self.sh.reload(&self.lib);
         }
         self.sh.job_status = self.jobs.active.clone();
+        for m in self.eng.tick(&self.lib, &self.sh, &self.jobs) {
+            self.status = m;
+        }
+        for id in std::mem::take(&mut self.eng.touched) {
+            self.sh.reload_track(&self.lib, id);
+        }
+        let st = self.eng.state();
+        self.decks = (0..2).map(|d| crate::live::adapter::deck_ui(&st, d, &self.sh, &Default::default(), self.eng.is_loading(d))).collect();
+        self.mixer = crate::live::adapter::mixer_ui(&st, &self.eng);
+        // studio transport state
+        if self.eng.studio_player.is_some() {
+            self.studio.playing = st.mix.active && st.mix.playing;
+            if st.mix.active {
+                self.studio.position = st.mix.time;
+            }
+            if st.mix.finished {
+                self.studio.playing = false;
+            }
+        } else {
+            self.studio.playing = false;
+        }
+        self.studio.render_progress = self.eng.export.as_ref().map(|e| e.progress.load(std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0);
+        if self.studio.edited {
+            self.studio.edited = false;
+            if self.eng.studio_player.is_some() {
+                self.studio.refresh_timeline(&self.sh);
+                self.eng.studio_update(&self.studio.mix);
+            }
+        }
+        let anything_playing = st.decks.iter().any(|d| d.playing) || st.mix.active || self.eng.export.is_some() || self.eng.loading_mix.is_some();
+        if self.view == View::Live || anything_playing {
+            ctx.request_repaint();
+        }
         if self.jobs.pending() > 0 {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
@@ -171,7 +208,7 @@ impl App {
                     self.studio.add_tracks(&self.sh, &ids);
                     self.view = View::Studio;
                 }
-                LibraryAction::LoadDeck(..) => {}
+                LibraryAction::LoadDeck(id, deck) => self.load_to_deck(id, deck),
             }
         }
     }
@@ -226,13 +263,54 @@ impl App {
     }
 
     fn studio_transport(&mut self, a: crate::studio::StudioAction) {
-        log::debug!("studio transport {a:?}");
+        use crate::live::adapter::{LIVE_DECKS, STUDIO_DECKS};
+        use crate::studio::StudioAction as A;
+        match a {
+            A::PlayPause => {
+                if self.eng.studio_player.is_none() {
+                    if self.eng.loading_mix.is_none() && !self.studio.mix.tracks.is_empty() {
+                        self.eng.stop_mix(LIVE_DECKS);
+                        self.status = "Preparing mix preview…".into();
+                        self.eng.play_mix(&self.studio.mix, STUDIO_DECKS, self.studio.position);
+                    }
+                } else {
+                    self.eng.studio_pause(self.studio.playing);
+                }
+            }
+            A::Seek(t) => {
+                self.studio.position = t;
+                self.eng.studio_seek(t);
+            }
+            A::Export => {
+                let dir = clubcraft_core::paths::exports_dir();
+                let _ = std::fs::create_dir_all(&dir);
+                let name: String = self.studio.mix.name.chars().map(|c| if c == '/' || c == ':' { '-' } else { c }).collect();
+                if let Some(out) = rfd::FileDialog::new().set_directory(&dir).set_file_name(format!("{name}.wav")).add_filter("WAV", &["wav"]).save_file() {
+                    self.eng.export_mix(&self.studio.mix, out);
+                    self.status = "Rendering mix…".into();
+                }
+            }
+            A::SendToLive => {
+                self.eng.stop_mix(STUDIO_DECKS);
+                self.eng.play_mix(&self.studio.mix, LIVE_DECKS, 0.0);
+                self.view = View::Live;
+                self.status = format!("Playing '{}' live with automix", self.studio.mix.name);
+            }
+            _ => {}
+        }
     }
 
     fn handle_live_actions(&mut self, actions: Vec<crate::live::model::LiveAction>) {
         for a in actions {
-            log::debug!("live action {a:?}");
+            self.eng.apply(a, &self.decks, &self.sh);
         }
+    }
+
+    /// Pick a deck for "load": the requested one, else an idle deck (not playing), A first.
+    fn load_to_deck(&mut self, id: TrackId, deck: usize) {
+        let st = self.eng.state();
+        let d = if deck < 2 { deck } else { (0..2).find(|d| !st.decks[*d].loaded).or_else(|| (0..2).find(|d| !st.decks[*d].playing)).unwrap_or(0) };
+        self.eng.load(d, id);
     }
 
     fn dev_command(&mut self, cmd: &str) {
@@ -254,6 +332,40 @@ impl App {
                     Some(("transition", n)) => crate::studio::Selection::Transition(n.parse().unwrap_or(0)),
                     _ => crate::studio::Selection::None,
                 }
+            }
+            "load" => {
+                let mut it = arg.split_whitespace();
+                let deck: usize = it.next().and_then(|d| d.parse().ok()).unwrap_or(0);
+                let q = it.collect::<Vec<_>>().join(" ").to_lowercase();
+                if let Some(t) = self.sh.tracks.iter().find(|t| t.display_name().to_lowercase().contains(&q)) {
+                    let id = t.id;
+                    self.eng.load(deck, id);
+                }
+            }
+            "live" => {
+                // raw live action for tests, e.g. `live play 0`
+                let mut it = arg.split_whitespace();
+                let (a, d) = (it.next().unwrap_or(""), it.next().and_then(|d| d.parse().ok()).unwrap_or(0));
+                use crate::live::model::LiveAction as L;
+                let act = match a {
+                    "play" => Some(L::PlayPause(d)),
+                    "sync" => Some(L::Sync(d)),
+                    "seek" => it.next().and_then(|t| t.parse().ok()).map(|t| L::Seek(d, t)),
+                    "fader" => it.next().and_then(|t| t.parse().ok()).map(|t| L::Fader(d, t)),
+                    "acapella" => Some(L::StemPreset(d, crate::live::model::StemPreset::Acapella)),
+                    "instrumental" => Some(L::StemPreset(d, crate::live::model::StemPreset::Instrumental)),
+                    "master" => it.next().and_then(|t| t.parse().ok()).map(L::MasterVol),
+                    _ => None,
+                };
+                if let Some(act) = act {
+                    self.handle_live_actions(vec![act]);
+                }
+            }
+            "studio-play" => self.studio_transport(crate::studio::StudioAction::PlayPause),
+            "studio-export" => {
+                let out = clubcraft_core::paths::exports_dir().join(format!("{}.wav", self.studio.mix.name));
+                let _ = std::fs::create_dir_all(clubcraft_core::paths::exports_dir());
+                self.eng.export_mix(&self.studio.mix, out);
             }
             "process-all" => {
                 for t in &self.sh.tracks {

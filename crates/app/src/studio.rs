@@ -41,6 +41,8 @@ pub struct StudioView {
     pub render_progress: Option<f32>,
     pub message: String,
     timeline_dirty: bool,
+    /// Set when the mix changed; the app pushes edits into a running preview.
+    pub edited: bool,
 }
 
 impl Default for StudioView {
@@ -59,6 +61,7 @@ impl Default for StudioView {
             render_progress: None,
             message: String::new(),
             timeline_dirty: true,
+            edited: false,
         }
     }
 }
@@ -81,6 +84,7 @@ impl StudioView {
         self.mix.normalize();
         self.timeline_dirty = true;
         self.dirty = true;
+        self.edited = true;
     }
 
     pub fn refresh_timeline(&mut self, sh: &Shared) {
