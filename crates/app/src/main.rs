@@ -3,6 +3,7 @@
 mod app;
 mod devctl;
 mod importer;
+mod interop;
 mod jobs;
 mod library_view;
 mod pipeline;
