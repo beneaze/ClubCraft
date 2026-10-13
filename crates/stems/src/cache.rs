@@ -109,12 +109,15 @@ fn read_tags(bytes: &[u8]) -> Result<Vec<(String, String)>> {
     Ok(out)
 }
 
+/// `fill(a, b, k, out)`: append quantised interleaved samples of frames `a..b`.
+type FillFn<'a> = dyn Fn(usize, usize, f32, &mut Vec<i32>) + 'a;
+
 /// Streams quantised samples to the encoder so no full-track integer copy is needed.
 struct StemSource<'a> {
     frames: usize,
     pos: usize,
     k: f32,
-    fill: &'a dyn Fn(usize, usize, f32, &mut Vec<i32>),
+    fill: &'a FillFn<'a>,
     buf: Vec<i32>,
 }
 
@@ -153,7 +156,7 @@ fn write_flac(
     frames: usize,
     model: &str,
     peak: f32,
-    fill: &dyn Fn(usize, usize, f32, &mut Vec<i32>),
+    fill: &FillFn,
 ) -> Result<()> {
     let scale = (peak * (32768.0 / 32767.0)).max(1.0);
     let mut config = flacenc::config::Encoder::default();
@@ -259,7 +262,7 @@ fn decode(path: &Path) -> Result<(usize, String, Vec<Vec<f32>>)> {
     let total = (u64::from_be_bytes(si[10..18].try_into()?) & ((1u64 << 36) - 1)) as usize;
     let per_chunk = if total <= max_bs.max(1) {
         1 // a single FLAC frame
-    } else if min_bs == max_bs && STEM_CHUNK_FRAMES % max_bs == 0 {
+    } else if min_bs == max_bs && STEM_CHUNK_FRAMES.is_multiple_of(max_bs) {
         STEM_CHUNK_FRAMES / max_bs
     } else {
         bail!("unsupported stem file block size {min_bs}..{max_bs}");

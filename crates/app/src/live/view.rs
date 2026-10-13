@@ -268,7 +268,7 @@ impl LiveView {
                 self.cue_held = None;
                 out.push(LiveAction::CueUp(i));
             }
-            if widgets::pad(ui, if d.playing { "❚❚" } else { "▶" }, "", theme::OK, d.playing, sz).clicked() {
+            if widgets::pad(ui, if d.playing { "⏸" } else { "▶" }, "", theme::OK, d.playing, sz).clicked() {
                 out.push(LiveAction::PlayPause(i));
             }
             if widgets::pad(ui, "SYNC", "", accent, d.synced, vec2(60.0, 30.0)).clicked() {

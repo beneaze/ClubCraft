@@ -246,6 +246,10 @@ pub fn project_to_mix(root: &Path, project_key: &str, tracks: &HashMap<String, T
         };
         mix.transitions.push(t);
     }
+    // DJ.Studio plays the first track from its beginning (its cue-in only anchors transitions).
+    if let Some(first) = mix.tracks.first_mut() {
+        first.mix_in = 0.0;
+    }
     mix.normalize();
     Ok(mix)
 }

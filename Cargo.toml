@@ -36,3 +36,13 @@ opt-level = 3
 [profile.release]
 debug = 1
 lto = "thin"
+
+# Real-time DSP and ML pre/post-processing must be fast even in dev builds.
+[profile.dev.package.clubcraft-engine]
+opt-level = 3
+[profile.dev.package.clubcraft-stems]
+opt-level = 3
+[profile.dev.package.clubcraft-analysis]
+opt-level = 3
+[profile.dev.package.clubcraft-audio]
+opt-level = 3

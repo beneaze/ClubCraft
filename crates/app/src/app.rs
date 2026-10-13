@@ -152,6 +152,9 @@ impl App {
         self.decks = (0..2).map(|d| crate::live::adapter::deck_ui(&st, d, &self.sh, &Default::default(), self.eng.is_loading(d))).collect();
         self.mixer = crate::live::adapter::mixer_ui(&st, &self.eng);
         // studio transport state
+        if self.eng.studio_player.is_some() && self.status.starts_with("Preparing") {
+            self.status.clear();
+        }
         if self.eng.studio_player.is_some() {
             self.studio.playing = st.mix.active && st.mix.playing;
             if st.mix.active {

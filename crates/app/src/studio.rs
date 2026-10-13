@@ -177,7 +177,7 @@ impl StudioView {
             if r.changed() {
                 self.dirty = true;
             }
-            let play = if self.playing { "❚❚ Pause" } else { "▶ Play" };
+            let play = if self.playing { "⏸ Pause" } else { "▶ Play" };
             if ui.add(egui::Button::new(RichText::new(play).strong()).min_size(vec2(80.0, 24.0))).clicked() {
                 out.push(StudioAction::PlayPause);
             }
@@ -203,7 +203,7 @@ impl StudioView {
                 } else if ui.add_enabled(!self.mix.tracks.is_empty(), egui::Button::new("Export mix…")).on_hover_text("Render the mix to a WAV file (with cue sheet)").clicked() {
                     out.push(StudioAction::Export);
                 }
-                if ui.add_enabled(!self.mix.tracks.is_empty(), egui::Button::new("Play live ▸")).on_hover_text("Queue this mix on the live decks with automix").clicked() {
+                if ui.add_enabled(!self.mix.tracks.is_empty(), egui::Button::new("Play live ▶")).on_hover_text("Queue this mix on the live decks with automix").clicked() {
                     out.push(StudioAction::SendToLive);
                 }
                 if ui.add_enabled(self.dirty, egui::Button::new("Save")).clicked() {
@@ -395,7 +395,7 @@ impl StudioView {
         for (k, x) in self.timeline.transitions.iter().enumerate() {
             let xr = Rect::from_min_max(pos2(x_of(x.start_sec), lane_top[0]), pos2(x_of(x.end_sec), lane_top[1] + lane_h));
             let sel = self.selection == Selection::Transition(k);
-            p.rect_filled(xr, 3.0, if sel { Color32::from_rgba_unmultiplied(255, 92, 140, 40) } else { Color32::from_rgba_unmultiplied(255, 255, 255, 14) });
+            p.rect_filled(xr, 3.0, if sel { Color32::from_rgba_unmultiplied(255, 92, 140, 40) } else { Color32::from_rgba_unmultiplied(255, 210, 120, 34) });
             if sel {
                 p.rect_stroke(xr, 3.0, Stroke::new(1.0, theme::ACCENT), StrokeKind::Inside);
             }
@@ -571,7 +571,7 @@ impl StudioView {
         let b = sh.track(self.mix.tracks[k + 1].track_id).map(|t| t.title.clone()).unwrap_or_default();
         let mut changed = false;
         ui.horizontal(|ui| {
-            ui.heading(format!("Transition: {}  ▸  {}", truncate(&a, 30), truncate(&b, 30)));
+            ui.heading(format!("Transition: {}  ▶  {}", truncate(&a, 30), truncate(&b, 30)));
         });
         let tr: &mut Transition = &mut self.mix.transitions[k];
         ui.horizontal(|ui| {
