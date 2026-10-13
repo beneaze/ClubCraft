@@ -53,6 +53,10 @@ pub struct App {
     pub library: LibraryView,
     pub status: String,
     pub devctl: crate::devctl::DevCtl,
+    pub live: crate::live::view::LiveView,
+    pub decks: Vec<crate::live::model::DeckUi>,
+    pub mixer: crate::live::model::MixerUi,
+    pub browser: LibraryView,
 }
 
 impl App {
@@ -78,7 +82,7 @@ impl App {
                 _ => {}
             }
         }
-        App { lib, sh, jobs, view, library: LibraryView::default(), status: String::new(), devctl: crate::devctl::DevCtl::from_env() }
+        App { lib, sh, jobs, view, library: LibraryView::default(), status: String::new(), devctl: crate::devctl::DevCtl::from_env(), live: Default::default(), decks: vec![Default::default(); 2], mixer: Default::default(), browser: LibraryView::default() }
     }
 
     fn handle_events(&mut self, ctx: &egui::Context) {
@@ -127,6 +131,12 @@ impl App {
                 }
                 LibraryAction::LoadDeck(..) | LibraryAction::AddToMix(..) => {}
             }
+        }
+    }
+
+    fn handle_live_actions(&mut self, actions: Vec<crate::live::model::LiveAction>) {
+        for a in actions {
+            log::debug!("live action {a:?}");
         }
     }
 
@@ -207,7 +217,10 @@ impl eframe::App for App {
                 ui.label("Studio");
             }
             View::Live => {
-                ui.label("Live");
+                let mut live_actions = Vec::new();
+                let (browser, sh) = (&mut self.browser, &self.sh);
+                self.live.ui(ui, &self.decks, &self.mixer, &mut live_actions, |ui| browser.ui(ui, sh, true, &mut actions));
+                self.handle_live_actions(live_actions);
             }
         });
         self.handle_library_actions(actions);
