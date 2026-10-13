@@ -91,6 +91,8 @@ pub struct App {
     pub settings: crate::settings::Settings,
     pub home: crate::home::HomeView,
     pub mix_summaries: Vec<crate::home::MixSummary>,
+    prepared: (i64, usize),
+    queued: std::collections::HashSet<TrackId>,
 }
 
 impl App {
@@ -120,7 +122,7 @@ impl App {
         }
         let audio_cfg: clubcraft_engine::AudioConfig = cc.storage.and_then(|s| eframe::get_value(s, "audio")).unwrap_or_default();
         let midi_port: Option<String> = cc.storage.and_then(|s| eframe::get_value(s, "midi_port"));
-        let mut app = App { lib, sh, jobs, view, library: LibraryView::default(), status: String::new(), devctl: crate::devctl::DevCtl::from_env(), live: Default::default(), decks: vec![Default::default(); 2], mixer: Default::default(), browser: LibraryView::default(), studio: Default::default(), mixes: Vec::new(), eng: crate::live::adapter::LiveEngine::start(audio_cfg.clone()), settings: crate::settings::Settings::new(audio_cfg, midi_port), home: Default::default(), mix_summaries: Vec::new() };
+        let mut app = App { lib, sh, jobs, view, library: LibraryView::default(), status: String::new(), devctl: crate::devctl::DevCtl::from_env(), live: Default::default(), decks: vec![Default::default(); 2], mixer: Default::default(), browser: LibraryView::default(), studio: Default::default(), mixes: Vec::new(), eng: crate::live::adapter::LiveEngine::start(audio_cfg.clone()), settings: crate::settings::Settings::new(audio_cfg, midi_port), home: Default::default(), mix_summaries: Vec::new(), prepared: (-1, 0), queued: Default::default() };
         app.settings.connect_midi(app.eng.handle.as_ref());
         if let Some(e) = &app.eng.error {
             app.status = e.clone();
@@ -154,6 +156,11 @@ impl App {
         }
         for id in std::mem::take(&mut self.eng.touched) {
             self.sh.reload_track(&self.lib, id);
+        }
+        let key = (self.studio.mix.id, self.studio.mix.tracks.len());
+        if key != self.prepared {
+            self.prepared = key;
+            self.prepare_mix_tracks();
         }
         let st = self.eng.state();
         self.settings.tick(&st);
@@ -220,6 +227,17 @@ impl App {
                     self.view = View::Studio;
                 }
                 LibraryAction::LoadDeck(id, deck) => self.load_to_deck(id, deck),
+            }
+        }
+    }
+
+    /// Make sure every track of the open mix gets analysed and separated (high priority).
+    pub fn prepare_mix_tracks(&mut self) {
+        for t in &self.studio.mix.tracks {
+            let a = self.sh.analyses.get(&t.track_id);
+            let needs = a.is_none_or(|a| a.version < clubcraft_core::Analysis::CURRENT_VERSION || a.stems_model.is_none());
+            if needs && self.queued.insert(t.track_id) {
+                self.jobs.process(t.track_id, true);
             }
         }
     }
@@ -480,6 +498,18 @@ impl App {
                 }
             }
             "settings" => self.settings.open = true,
+            "send-live" => self.studio_transport(crate::studio::StudioAction::SendToLive),
+            "mix-seek" => {
+                if let Ok(t) = arg.trim().parse::<f64>() {
+                    if self.eng.live_player.is_some() {
+                        if let (Some(p), Some(h)) = (self.eng.live_player.as_ref(), self.eng.handle.as_mut()) {
+                            let _ = p.seek(h, t);
+                        }
+                    } else {
+                        self.eng.studio_seek(t);
+                    }
+                }
+            }
             "studio-play" => self.studio_transport(crate::studio::StudioAction::PlayPause),
             "studio-export" => {
                 let out = clubcraft_core::paths::exports_dir().join(format!("{}.wav", self.studio.mix.name));

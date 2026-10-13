@@ -248,6 +248,7 @@ impl LiveEngine {
                     break;
                 }
             }
+            let mix = playable_mix(&mix, &cache);
             let _ = tx.send(LoadResult::Mix { serial, decks, mix: Box::new(mix), from, result });
         });
     }
@@ -293,6 +294,7 @@ impl LiveEngine {
                 for t in &mix.tracks {
                     cache.load(t.track_id, None)?;
                 }
+                let mix = playable_mix(&mix, &cache);
                 let opts = RenderOptions { format: WavFormat::Pcm24, ..Default::default() };
                 let report = clubcraft_engine::render_mix(&mix, &|id| cache.get(id), &out, &opts, &mut |p| {
                     progress.store((p.clamp(0.0, 1.0) * 1000.0) as u32, Ordering::Relaxed);
@@ -526,6 +528,22 @@ impl LiveEngine {
             A::AutomixQueue(ids) => self.automix_queue = ids,
         }
     }
+}
+
+/// Stem-based transition styles need stems on both tracks. For transitions where a track has
+/// none (yet), play a bass-swap blend instead so the tracks never just overlap at full volume.
+pub fn playable_mix(mix: &Mix, cache: &TrackCache) -> Mix {
+    use clubcraft_core::{Param, TransitionStyle};
+    let mut m = mix.clone();
+    let has = |i: usize| m.tracks.get(i).and_then(|t| cache.get(t.track_id)).is_some_and(|t| t.stems.as_ref().is_some_and(|s| s.is_complete()));
+    let flags: Vec<bool> = (0..m.tracks.len()).map(has).collect();
+    for (k, tr) in m.transitions.iter_mut().enumerate() {
+        let uses_stems = tr.lanes.iter().any(|l| matches!(l.param, Param::Stem(_)));
+        if uses_stems && !(flags.get(k).copied().unwrap_or(false) && flags.get(k + 1).copied().unwrap_or(false)) {
+            *tr = clubcraft_core::Transition::new(TransitionStyle::BassSwap, tr.beats);
+        }
+    }
+    m
 }
 
 /// FX kinds selectable in the UI (index = `FxUi::kind`).
