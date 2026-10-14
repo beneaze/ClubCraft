@@ -11,19 +11,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub struct Settings {
     /// Separate stems for every analysed track (cached on disk).
     pub separate_stems: bool,
-    /// "fast" | "high" | "ultra".
+    /// "fast" | "high" | "ultra" | "best".
     pub quality: String,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { separate_stems: true, quality: "high".into() }
+        Settings { separate_stems: true, quality: "best".into() }
     }
 }
 
 impl Settings {
     pub fn quality(&self) -> Quality {
-        Quality::parse(&self.quality).unwrap_or(Quality::High)
+        Quality::parse(&self.quality).unwrap_or(Quality::Best)
     }
 }
 
@@ -69,6 +69,7 @@ pub fn separate(
     if let Some(m) = cached_stems_model(&t.hash) {
         // Keep existing stems unless they came from a weaker model than requested.
         let rank = |m: &str| match m {
+            "melroformer+htdemucs_ft" => 3,
             "htdemucs_ft" => 2,
             "htdemucs" | "htdemucs_6s" => 1,
             _ => 0,

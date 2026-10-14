@@ -673,7 +673,13 @@ fn main() -> anyhow::Result<()> {
             let sep = clubcraft_stems::Separator::new(clubcraft_stems::Quality::Fast)?;
             for (i, t) in todo.iter().enumerate() {
                 let Some(dst) = flac_path(t) else { continue };
-                let audio = clubcraft_audio::decode_file(&t.path, 44_100)?;
+                let audio = match clubcraft_audio::decode_file(&t.path, 44_100) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        eprintln!("skip {}: {e:#}", t.name);
+                        continue;
+                    }
+                };
                 let t0 = Instant::now();
                 let st = sep.separate(&audio, &mut |_| true)?;
                 std::fs::create_dir_all(dst.parent().unwrap())?;

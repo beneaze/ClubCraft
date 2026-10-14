@@ -24,6 +24,7 @@ The `htdemucs_ref_*.npy` tensors are used by `cargo test -p clubcraft-stems --te
 | `Quality::Fast` | `htdemucs` | 1 shift, overlap 0.25 | ~17 s (18x realtime) |
 | `Quality::High` (default) | `htdemucs_ft` | 1 shift, overlap 0.25 | ~80 s (4x) |
 | `Quality::Ultra` | `htdemucs_ft` | 2 shifts, overlap 0.5 | ~245 s (1.3x) |
+| `Quality::Best` | `melroformer` vocals + `htdemucs_ft` drums/bass on the instrumental, other = remainder | RoFormer overlap 2 | ~205 s (1.6x) |
 
 ## Mel-Band RoFormer vocals (`Quality::Best`)
 

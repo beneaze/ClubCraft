@@ -229,10 +229,20 @@ impl Roformer {
 
     /// Vocals of exactly one model chunk (`chunk_samples` per channel).
     pub fn run_chunk(&self, chunk: [&[f32]; 2]) -> Result<[Vec<f32>; 2]> {
+        let t0 = std::time::Instant::now();
         let (planes, x) = self.prepare(chunk);
+        let t1 = std::time::Instant::now();
         let mut mask = Vec::new();
         self.model.run(&x, &mut mask)?;
-        Ok(self.finish(&planes, &mask))
+        let t2 = std::time::Instant::now();
+        let out = self.finish(&planes, &mask);
+        log::debug!(
+            "roformer chunk: prepare {:.3}s model {:.3}s finish {:.3}s",
+            (t1 - t0).as_secs_f64(),
+            (t2 - t1).as_secs_f64(),
+            t2.elapsed().as_secs_f64()
+        );
+        Ok(out)
     }
 
     /// Number of model chunks for a track of `len` frames.

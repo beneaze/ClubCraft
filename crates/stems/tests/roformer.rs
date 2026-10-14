@@ -51,6 +51,7 @@ fn check(kind: BackendKind, min_db: f64) {
 }
 
 #[test]
+#[ignore = "slow: ~2-3 min per 8 s chunk on CPU; run with --ignored"]
 fn roformer_ort() {
     check(BackendKind::Ort, 60.0);
 }

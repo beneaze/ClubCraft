@@ -548,8 +548,9 @@ impl App {
                 egui::ComboBox::from_id_salt("quality")
                     .selected_text(format!("Stems: {}", s.quality))
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut s.quality, "fast".to_string(), "Fast (htdemucs)");
-                        ui.selectable_value(&mut s.quality, "high".to_string(), "High (htdemucs_ft)");
+                        ui.selectable_value(&mut s.quality, "best".to_string(), "Best: RoFormer vocals + htdemucs_ft (~3.5 min/track)");
+                        ui.selectable_value(&mut s.quality, "fast".to_string(), "Fast: htdemucs (~17 s/track)");
+                        ui.selectable_value(&mut s.quality, "high".to_string(), "High: htdemucs_ft (~80 s/track)");
                         ui.selectable_value(&mut s.quality, "ultra".to_string(), "Ultra (ft + shifts)");
                     });
                 ui.checkbox(&mut s.separate_stems, "Auto stems");

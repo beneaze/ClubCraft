@@ -23,7 +23,7 @@
 //! M1 Pro; with `High` after 8 runs). Published data equals [`Separator::separate`] output
 //! (bit-identical for `Fast`/`High`/`Best`; ≤1 ulp-level differences with several shifts).
 //! With `Best` the vocal model runs lazily for the regions the Demucs windows need, so the
-//! chunk under the playhead is ready after ~3 RoFormer chunks + 2 Demucs windows (~6 s).
+//! chunk under the playhead is ready after ~15 s (High: ~6 s; 5:17 track, M1 Pro).
 //!
 //! ```no_run
 //! use clubcraft_stems::{Quality, Separator};
@@ -71,7 +71,8 @@ pub enum Quality {
     Ultra,
     /// Best vocals: Mel-Band RoFormer (Kimberley Jensen, MIT) for vocals, `htdemucs_ft` drums and
     /// bass on the instrumental (`mix − vocals`), other = `instrumental − drums − bass`, so the
-    /// four stems sum to the mix exactly (~9x). Model name `melroformer+htdemucs_ft`.
+    /// four stems sum to the mix to float precision (~2.5x High: 205 s for a 5:17 track on an
+    /// M1 Pro). Model name `melroformer+htdemucs_ft`.
     Best,
 }
 

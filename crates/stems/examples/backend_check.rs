@@ -1,10 +1,22 @@
 //! Developer check: run one segment through a backend and print timing and output statistics.
 //! `cargo run --release -p clubcraft-stems --example backend_check -- [coreml|ort] [input.npy [offset_s]]`
+//! or `-- roformer [seconds]` (vocal model alone; `RUST_LOG`-style debug timing via the `log` crate).
 use clubcraft_stems::backend::{self, BackendKind, SourceOut};
 use clubcraft_stems::{npy, stft::Spectro, Manifest};
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(|s| s.as_str()) == Some("roformer") {
+        // Vocal model alone on N seconds of noise-like signal: per-chunk timing.
+        let dir = clubcraft_core::paths::models_dir();
+        let rf = clubcraft_stems::Roformer::load(&dir, "melroformer", BackendKind::CoreMl)?;
+        let n = 44100 * args.get(2).map(|s| s.parse::<usize>().unwrap()).unwrap_or(30);
+        let x: Vec<f32> = (0..n).map(|i| ((i * 7919 % 1000) as f32 / 1000.0 - 0.5) * 0.3).collect();
+        let t = std::time::Instant::now();
+        rf.separate(&x, &x, &mut |_, _| true)?;
+        println!("roformer alone: {:.1}s for {} chunks", t.elapsed().as_secs_f64(), rf.chunks_for(n));
+        return Ok(());
+    }
     let kind = if args.get(1).map(|s| s.as_str()) == Some("ort") { BackendKind::Ort } else { BackendKind::CoreMl };
     let dir = clubcraft_core::paths::models_dir();
     let man = Manifest::load(&dir, "htdemucs")?;
