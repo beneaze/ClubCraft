@@ -1,5 +1,8 @@
 //! ClubCraft — open-source DJ studio + live performance app.
 
+// No console window for release builds on Windows.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod app;
 mod devctl;
 mod home;
@@ -9,6 +12,7 @@ mod jobs;
 mod library_view;
 mod live;
 mod pipeline;
+mod platform;
 mod settings;
 mod studio;
 mod studio_timeline;

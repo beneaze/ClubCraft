@@ -229,7 +229,7 @@ impl App {
                 }
                 LibraryAction::Reveal(id) => {
                     if let Some(t) = self.sh.track(id) {
-                        let _ = std::process::Command::new("open").arg("-R").arg(&t.path).spawn();
+                        crate::platform::reveal(&t.path);
                     }
                 }
                 LibraryAction::AddToMix(ids) => {

@@ -3,10 +3,10 @@
 use crate::app::Shared;
 use crate::library_view::DraggedTracks;
 use crate::theme;
-use crate::waveform::{self, WaveParams, WaveStyle};
+
 use clubcraft_core::planner::{self, OrderItem, OrderOptions, PlanOptions};
-use clubcraft_core::{Analysis, CueKind, Mix, MixTimeline, MixTrack, Param, Side, StemKind, TempoMode, TrackId, Transition, TransitionStyle};
-use eframe::egui::{self, pos2, vec2, Align, Color32, Layout, Rect, RichText, Sense, Stroke, StrokeKind, Ui};
+use clubcraft_core::{Analysis, Mix, MixTimeline, MixTrack, Param, Side, TempoMode, TrackId, Transition, TransitionStyle};
+use eframe::egui::{self, vec2, Align, Color32, Layout, RichText, Sense, Stroke, StrokeKind, Ui};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StudioAction {

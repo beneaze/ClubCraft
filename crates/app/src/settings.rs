@@ -135,7 +135,7 @@ impl Settings {
                         actions.push(SettingsAction::ReanalyseAll);
                     }
                     if ui.button("Open data folder").clicked() {
-                        let _ = std::process::Command::new("open").arg(clubcraft_core::paths::data_dir()).spawn();
+                        crate::platform::open(&clubcraft_core::paths::data_dir());
                     }
                 });
                 ui.label(RichText::new(format!("Data: {}", clubcraft_core::paths::data_dir().display())).size(11.0).color(theme::TEXT_DIM));

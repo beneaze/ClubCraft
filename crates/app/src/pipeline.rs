@@ -44,7 +44,14 @@ impl WorkerContext {
     pub fn separator(&mut self, q: Quality) -> Result<&Separator> {
         if self.separator.as_ref().map(|s| s.0) != Some(q) {
             self.separator = None; // free the old models first
-            let s = Separator::new(q).context("loading stem models")?;
+            let mut s = Separator::new(q).context("loading stem models")?;
+            // Without GPU acceleration (CoreML / DirectML) the large models take many minutes per
+            // track; fall back to the fast model.
+            if s.backend_name() == "onnxruntime-cpu" && q != Quality::Fast {
+                log::warn!("no GPU backend for stem separation; using the Fast model instead of {q:?}");
+                drop(s);
+                s = Separator::new(Quality::Fast).context("loading stem models")?;
+            }
             log::info!("stem separator: {} on {}", s.model_name(), s.backend_name());
             self.separator = Some((q, s));
         }

@@ -1,4 +1,4 @@
-//! ONNX Runtime CPU backend (portable fallback).
+//! ONNX Runtime backend: CPU everywhere, DirectML (GPU) on Windows.
 //!
 //! Pinned to `ort 2.0.0-rc.9` = ONNX Runtime 1.20: the 1.31 static build that newer `ort` releases
 //! download returns all-NaN outputs for this graph on real music (and is ~10x slower). The CoreML
@@ -13,6 +13,7 @@ use std::sync::OnceLock;
 
 pub struct OrtBackend {
     sessions: Vec<Session>,
+    gpu: bool,
     l: usize,
     f: usize,
     t: usize,
@@ -76,33 +77,58 @@ fn shared_arena() -> bool {
     })
 }
 
+/// Session builder for the CPU provider, or DirectML (Windows GPU) when `gpu` is set.
+fn builder(gpu: bool) -> Result<ort::session::builder::SessionBuilder> {
+    let b = Session::builder()?;
+    #[cfg(windows)]
+    if gpu {
+        use ort::execution_providers::DirectMLExecutionProvider;
+        // DirectML requires sequential execution without memory patterns.
+        return Ok(b
+            .with_memory_pattern(false)?
+            .with_parallel_execution(false)?
+            .with_execution_providers([DirectMLExecutionProvider::default().build().error_on_failure()])?);
+    }
+    #[cfg(not(windows))]
+    if gpu {
+        bail!("DirectML is only available on Windows");
+    }
+    let b = if shared_arena() { b.with_env_allocators()? } else { b };
+    Ok(b)
+}
+
 impl OrtBackend {
+    /// CPU execution provider.
     pub fn load(man: &Manifest) -> Result<Self> {
-        let shared = shared_arena();
+        Self::load_with(man, false)
+    }
+
+    /// `gpu`: DirectML (Windows) instead of the CPU provider.
+    pub fn load_with(man: &Manifest, gpu: bool) -> Result<Self> {
         let mut sessions = Vec::new();
         for name in &man.models {
             let path = man.dir.join(format!("{name}.onnx"));
             if !path.exists() {
                 bail!("missing {}", path.display());
             }
-            let mut b = Session::builder()?;
-            if shared {
-                b = b.with_env_allocators()?;
-            }
-            let s = b
+            let s = builder(gpu)?
                 .with_optimization_level(opt_level())?
                 .with_intra_threads(threads())?
                 .commit_from_file(&path)
                 .with_context(|| format!("load {}", path.display()))?;
             sessions.push(s);
         }
-        Ok(OrtBackend { sessions, l: man.segment_samples, f: man.freqs(), t: man.spec_frames, s: man.sources.len() })
+        Ok(OrtBackend { sessions, gpu, l: man.segment_samples, f: man.freqs(), t: man.spec_frames, s: man.sources.len() })
     }
 }
 
 impl Backend for OrtBackend {
     fn name(&self) -> &'static str {
-        "onnxruntime-cpu"
+        if self.gpu {
+            "onnxruntime-directml"
+        } else {
+            "onnxruntime-cpu"
+        }
     }
 
     fn run(&self, m: usize, mix: &[f32], spec: &[f32], sources: &[usize], out: &mut [SourceOut]) -> Result<()> {
@@ -129,32 +155,36 @@ impl Backend for OrtBackend {
 /// An ONNX model with one f32 input and one f32 output of fixed shapes.
 pub struct OrtSingle {
     session: Session,
+    gpu: bool,
     input: (String, Vec<usize>),
     output: (String, Vec<usize>),
 }
 
 impl OrtSingle {
     pub fn load(path: &std::path::Path, input: (&str, &[usize]), output: (&str, &[usize])) -> Result<Self> {
+        Self::load_with(path, input, output, false)
+    }
+
+    pub fn load_with(path: &std::path::Path, input: (&str, &[usize]), output: (&str, &[usize]), gpu: bool) -> Result<Self> {
         if !path.exists() {
             bail!("missing {}", path.display());
         }
-        let shared = shared_arena();
-        let mut b = Session::builder()?;
-        if shared {
-            b = b.with_env_allocators()?;
-        }
-        let session = b
+        let session = builder(gpu)?
             .with_optimization_level(opt_level())?
             .with_intra_threads(threads())?
             .commit_from_file(path)
             .with_context(|| format!("load {}", path.display()))?;
-        Ok(OrtSingle { session, input: (input.0.into(), input.1.to_vec()), output: (output.0.into(), output.1.to_vec()) })
+        Ok(OrtSingle { session, gpu, input: (input.0.into(), input.1.to_vec()), output: (output.0.into(), output.1.to_vec()) })
     }
 }
 
 impl super::SingleBackend for OrtSingle {
     fn name(&self) -> &'static str {
-        "onnxruntime-cpu"
+        if self.gpu {
+            "onnxruntime-directml"
+        } else {
+            "onnxruntime-cpu"
+        }
     }
 
     fn run(&self, input: &[f32], out: &mut Vec<f32>) -> Result<()> {

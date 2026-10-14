@@ -545,7 +545,7 @@ impl LiveEngine {
             A::Record(on) => {
                 if let Some(h) = &self.handle {
                     if on {
-                        let name = format!("ClubCraft {}.wav", chrono_like_now());
+                        let name = format!("ClubCraft {}.wav", crate::platform::timestamp());
                         let _ = std::fs::create_dir_all(clubcraft_core::paths::recordings_dir());
                         if let Err(e) = h.start_recording(&clubcraft_core::paths::recordings_dir().join(name), WavFormat::Pcm24) {
                             log::error!("recording: {e:#}");
@@ -601,18 +601,6 @@ fn knob_db(v: f32, unity: f32) -> f32 {
     }
 }
 
-fn chrono_like_now() -> String {
-    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    // local time via `date`; fall back to epoch seconds
-    std::process::Command::new("date")
-        .arg("+%Y-%m-%d %H.%M.%S")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| secs.to_string())
-}
 
 /// `.cue` sheet next to an exported mix (75 frames per second).
 fn write_cue_sheet(mix: &Mix, analyses: &HashMap<TrackId, clubcraft_core::Analysis>, wav: &std::path::Path) -> Result<()> {

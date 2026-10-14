@@ -4,14 +4,21 @@
 set -e
 cd "$(dirname "$0")/.."
 . "$HOME/.cargo/env" 2>/dev/null || true
-cargo build --release -p clubcraft
+cargo build --release -j 4 -p clubcraft
 APP=target/ClubCraft.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/models"
 cp target/release/clubcraft "$APP/Contents/MacOS/ClubCraft"
-for m in models/*.json; do cp "$m" "$APP/Contents/Resources/models/"; done
-for m in models/*.mlmodelc; do cp -R "$m" "$APP/Contents/Resources/models/"; done
-if [ "$1" = "--with-onnx" ]; then cp models/*.onnx "$APP/Contents/Resources/models/" 2>/dev/null || true; fi
+# Models used by the app: htdemucs (fast/live), htdemucs_ft (high), melroformer (best vocals),
+# allin1 (optional deep structure analysis, ONNX only). htdemucs_6s is not bundled.
+for m in htdemucs htdemucs_ft melroformer allin1; do
+  [ -f "models/$m.json" ] && cp "models/$m.json" "$APP/Contents/Resources/models/"
+done
+for m in models/htdemucs.mlmodelc models/htdemucs_ft_*.mlmodelc models/melroformer.mlmodelc; do
+  [ -d "$m" ] && cp -R "$m" "$APP/Contents/Resources/models/"
+done
+[ -f models/allin1.onnx ] && cp models/allin1.onnx "$APP/Contents/Resources/models/"
+if [ "$1" = "--with-onnx" ]; then cp models/htdemucs*.onnx models/melroformer.onnx "$APP/Contents/Resources/models/" 2>/dev/null || true; fi
 rm -f "$APP"/Contents/Resources/models/*_ref_*
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

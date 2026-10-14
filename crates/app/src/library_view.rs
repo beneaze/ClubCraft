@@ -254,7 +254,7 @@ impl LibraryView {
                             actions.push(LibraryAction::Reanalyze(ids.clone()));
                             ui.close();
                         }
-                        if ui.button("Show in Finder").clicked() {
+                        if ui.button(format!("Show in {}", crate::platform::file_manager())).clicked() {
                             actions.push(LibraryAction::Reveal(t.id));
                             ui.close();
                         }

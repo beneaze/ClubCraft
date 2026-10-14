@@ -19,6 +19,10 @@ ort-sys = { version = "=2.0.0-rc.9", default-features = false }
 flacenc = { version = "0.5", features = ["par"] }
 symphonia = { version = "0.6", default-features = false, features = ["flac"] }
 
+# GPU separation on Windows through DirectML (any DX12 GPU).
+[target.'cfg(windows)'.dependencies]
+ort = { version = "=2.0.0-rc.9", default-features = false, features = ["download-binaries", "copy-dylibs", "directml"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.3"
 block2 = "0.6.2"

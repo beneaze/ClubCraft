@@ -19,7 +19,7 @@
 use crate::dsp::{hermite, Smoother, MAX_BLOCK};
 use crate::state::{CueMode, DeckState, HotCue, HotCueMode, LoopState, PitchRange, HOT_CUES};
 use crate::track::LoadedTrack;
-use clubcraft_core::{BeatGrid, CueKind, StemKind, STEM_CHANNELS, STEM_CHUNK_FRAMES};
+use clubcraft_core::{BeatGrid, CueKind, StemKind, STEM_CHUNK_FRAMES};
 use crate::stretch::Stretcher;
 use std::sync::Arc;
 

@@ -24,3 +24,5 @@ quick-xml = "0.38"
 clubcraft-stems = { path = "../stems" }
 clubcraft-analysis.workspace = true
 clubcraft-engine.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+dirs = "6"

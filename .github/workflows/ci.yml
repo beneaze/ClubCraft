@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS (Apple Silicon)
+            os: macos-14
+          - name: Windows (x64)
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Unit tests that need no separation models.
+      - name: Test
+        run: cargo test --release -p clubcraft-core -p clubcraft-audio -p clubcraft-engine --lib
+      - name: Build app
+        run: cargo build --release -p clubcraft
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tools/package-windows.ps1 -NoBuild
+      - name: Upload Windows build
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClubCraft-windows-x64
+          path: dist/ClubCraft
+          retention-days: 14

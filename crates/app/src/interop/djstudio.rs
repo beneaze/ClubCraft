@@ -12,12 +12,10 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// DJ.Studio keeps its database in `<Music>/DJ.Studio/Database` on macOS and Windows.
 pub fn default_root() -> PathBuf {
-    dirs_home().join("Music/DJ.Studio/Database")
-}
-
-fn dirs_home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
+    let music = dirs::audio_dir().or_else(|| dirs::home_dir().map(|h| h.join("Music"))).unwrap_or_default();
+    music.join("DJ.Studio").join("Database")
 }
 
 pub fn bucket(key: &str) -> String {
