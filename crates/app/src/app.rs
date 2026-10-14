@@ -471,6 +471,11 @@ impl App {
             match a {
                 A::SaveMix => self.save_mix(),
                 A::FindMashups(id) => self.studio.mashup.open_for(id, &self.sh),
+                A::Harmonize => self.studio.harmonize(&self.sh),
+                A::AutoMixPoints => {
+                    let order: Vec<TrackId> = self.studio.mix.tracks.iter().map(|t| t.track_id).collect();
+                    self.studio.replan(&self.sh, &order);
+                }
                 A::FindVocalOver(k) => {
                     let mix = self.studio.mix.clone();
                     self.studio.mashup.open_for_transition(&mix, k, &self.sh);
@@ -650,6 +655,12 @@ impl App {
                         _ => M::Apply(m, self.studio.mashup.transition_index().unwrap_or(0)),
                     };
                     self.handle_mashup_actions(vec![a]);
+                }
+            }
+            "tab" => {
+                use crate::studio::Tab;
+                if let Some(t) = Tab::ALL.into_iter().find(|t| format!("{t:?}").eq_ignore_ascii_case(arg.trim())) {
+                    self.studio.toggle_tab(t);
                 }
             }
             "engine-state" => {

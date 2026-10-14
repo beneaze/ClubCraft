@@ -68,13 +68,13 @@ Every screenshot here is the real app at work on a mix imported from DJ.Studio. 
 <table>
   <tr>
     <td width="50%" valign="top">
-      <img src="docs/images/studio.jpg" alt="The studio timeline: two deck lanes with mixer headers (fader, solo, mute, EQ and filter knobs), stem-coloured clips with key badges, transition markers on their own strip and the tempo lane gliding between 122 and 130 BPM" width="100%">
+      <img src="docs/images/studio.jpg" alt="The studio timeline: two deck lanes with mixer headers (fader, solo, mute, EQ and filter knobs), stem-coloured clips with key badges, transition markers on their own strip, the tempo lane gliding between 122 and 130 BPM, and the bottom bar with the playlist open, the transport and the panel tabs" width="100%">
       <br>
       <sub>Two lanes, each with its own mixer, and the tempo gliding from 122 to 130 BPM across the mix.</sub>
       <h3>Design the whole set</h3>
       Drop tracks in and <b>✨ Harmonize</b> orders them by Camelot key, tempo and energy arc, using simulated annealing over the whole set. Mix-in and mix-out points come from the analysed structure, and transition lengths fit the intro and outro of each pair.
       <br><br>
-      Slide tracks and transitions by bars, collapse lanes, solo or mute them, shape a lane with its EQ and filter, and render the result to WAV with a cue sheet, faster than real time.
+      Slide tracks and transitions by bars, collapse lanes, solo or mute them, shape a lane with its EQ and filter, and render the result to WAV with a cue sheet, faster than real time. Everything else lives in a DJ.Studio-style bar at the bottom: the transport, plus tabs for Zoom, Playlist, Transition, Track, Mashups and Master that open their panel above it. Every edit can be undone.
     </td>
     <td width="50%" valign="top">
       <img src="docs/images/live.jpg" alt="The live view: two scrolling stem-coloured waveforms in phase, deck A playing Define (Club Mix) and deck B synced to 122 BPM, both with eight auto-generated hot cues (Start, Mix In, Vocal, Break, Drop, Break, Drop, Mix Out), the mixer in the middle and the browser below" width="100%">
@@ -118,7 +118,7 @@ Every screenshot here is the real app at work on a mix imported from DJ.Studio. 
       <br><br>
       Tracks without stems yet automatically fall back to a bass-swap blend, so a transition never just piles two tracks on top of each other.
       <h3>Keyboard first</h3>
-      <b>Studio:</b> Space play · ← → bar (⇧ 8 bars) · [ ] transitions · F follow · + − zoom · ⌘S save.<br>
+      <b>Studio:</b> Space play · ← → bar (⇧ 8 bars) · [ ] transitions · F follow · + − zoom · ⌘Z / ⇧⌘Z undo / redo · ⌘S save.<br>
       <b>Live:</b> Z X C and M , . cue/play/sync · 1–8 hot cues (⇧ deck B) · ← → crossfader.<br>
       MIDI controllers map with MIDI learn.
     </td>
@@ -131,7 +131,7 @@ Every screenshot here is the real app at work on a mix imported from DJ.Studio. 
 
 <p align="center"><img src="docs/images/mashups.jpg" alt="The mashup finder in the studio's bottom section: the vocals of Gorgon City's Mitsubishi matched against the library; every row shows the instrumental's bars, the vocal phrase, the key shift and tempo change, a strip with the fit of every bar, the rule score and the AI score, with preview, new mix and insert buttons" width="100%"></p>
 
-Want the vocals of one track over another? **🎤 Mashups** opens the finder in the studio's bottom section, like the transition editor. It's on the studio toolbar, in the track inspector, in the library's context menu and under ⇧⌘M. It searches your library for the instrumentals that carry those vocals, and tells you where.
+Want the vocals of one track over another? The **🎤 Mashups** tab of the studio's bottom bar opens the finder. You can also start it from the track inspector, the library's context menu or ⇧⌘M. It searches your library for the instrumentals that carry those vocals, and tells you where.
 
 - **Where it fits, bar by bar.** For every 16-bar placement it compares the vocal notes with the instrumental's bass and chords, using a consonance table that knows a vocal a major seventh above a chord is colour but a semitone above it clashes. It also weighs masking by a loud melody in the vocal range, leftover vocals of the backing track, and the tempo and key change needed. On real tracks the original pairing beats its own ±1–2 semitone shifts 93 % of the time, where plain key matching or chroma similarity (as in AutoMashUpper) manages 84 %.
 - **An AI second opinion.** The best 20 candidates are rendered as the mix would play them, with the vocals shifted and stretched, and [COCOLA](https://github.com/gladia-research-group/cocola) (ICASSP 2025), a network trained on separated stems, listens to each. Blending both scores ranks the right match higher than either alone (84 % against random placements, from 78 %).

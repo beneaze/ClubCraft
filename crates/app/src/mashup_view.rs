@@ -55,6 +55,7 @@ pub struct MashupView {
     message: String,
     pub previewing: Option<usize>,
     run_next_frame: bool,
+    just_opened: bool,
 }
 
 impl Default for MashupView {
@@ -79,6 +80,7 @@ impl Default for MashupView {
             message: String::new(),
             previewing: None,
             run_next_frame: false,
+            just_opened: false,
         }
     }
 }
@@ -105,6 +107,7 @@ impl MashupView {
     /// Open for the vocals of `vocal`, searching the whole library.
     pub fn open_for(&mut self, vocal: Option<TrackId>, sh: &Shared) {
         self.open = true;
+        self.just_opened = true;
         self.target = Target::Library;
         self.inst_only = None;
         self.vocal_range = None;
@@ -138,6 +141,11 @@ impl MashupView {
         // vocals from the second half of the outgoing track, instrumental from the first 60 %
         self.vocal_range = Some((na * 45 / 100, na));
         self.inst_range = Some((0, nb * 60 / 100));
+    }
+
+    /// True once after the finder was opened (the studio switches to its tab).
+    pub fn take_opened(&mut self) -> bool {
+        std::mem::take(&mut self.just_opened)
     }
 
     pub fn transition_index(&self) -> Option<usize> {

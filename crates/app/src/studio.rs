@@ -21,6 +21,34 @@ pub enum StudioAction {
     FindMashups(Option<clubcraft_core::TrackId>),
     /// Find the best vocal-over point for transition `k`.
     FindVocalOver(usize),
+    Harmonize,
+    AutoMixPoints,
+}
+
+/// Tabs of the bottom bar; each opens a panel above the transport.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tab {
+    Zoom,
+    Playlist,
+    Transition,
+    Track,
+    Mashups,
+    Master,
+}
+
+impl Tab {
+    pub const ALL: [Tab; 6] = [Tab::Zoom, Tab::Playlist, Tab::Transition, Tab::Track, Tab::Mashups, Tab::Master];
+
+    fn label(self) -> (&'static str, &'static str) {
+        match self {
+            Tab::Zoom => ("🔍", "Zoom"),
+            Tab::Playlist => ("☰", "Playlist"),
+            Tab::Transition => ("🔀", "Transition"),
+            Tab::Track => ("🎵", "Track"),
+            Tab::Mashups => ("🎤", "Mashups"),
+            Tab::Master => ("🔊", "Master"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -42,6 +70,15 @@ pub struct StudioView {
     /// A mashup preview is playing (set by the app).
     pub preview_playing: bool,
     last_selection: Selection,
+    /// Open panel of the bottom bar.
+    pub tab: Option<Tab>,
+    /// Undo / redo history of the mix (one step per edit gesture).
+    undo: Vec<Mix>,
+    redo: Vec<Mix>,
+    committed: Mix,
+    last_change: Option<std::time::Instant>,
+    /// Width of the centred transport group (measured the previous frame).
+    transport_w: f32,
     pub selection: Selection,
     /// Pixels per second in the timeline.
     pub zoom: f32,
@@ -66,7 +103,6 @@ pub struct StudioView {
     pub plan_opts: PlanOptions,
     /// Collapsed lanes in the timeline and the track strip.
     pub lane_collapsed: [bool; clubcraft_core::MIX_LANES],
-    pub strip_open: bool,
 }
 
 impl Default for StudioView {
@@ -80,6 +116,12 @@ impl Default for StudioView {
             mashup_actions: Vec::new(),
             preview_playing: false,
             last_selection: Selection::None,
+            tab: Some(Tab::Playlist),
+            undo: Vec::new(),
+            redo: Vec::new(),
+            committed: Mix::default(),
+            last_change: None,
+            transport_w: 420.0,
             selection: Selection::None,
             zoom: 6.0,
             scroll: 0.0,
@@ -99,7 +141,6 @@ impl Default for StudioView {
             fit_request: true,
             plan_opts: PlanOptions::default(),
             lane_collapsed: [false; clubcraft_core::MIX_LANES],
-            strip_open: true,
         }
     }
 }
@@ -110,6 +151,10 @@ fn analysis_of(sh: &Shared, id: TrackId) -> Option<Analysis> {
 
 impl StudioView {
     pub fn set_mix(&mut self, mix: Mix) {
+        self.committed = mix.clone();
+        self.undo.clear();
+        self.redo.clear();
+        self.last_change = None;
         self.mix = mix;
         self.selection = Selection::None;
         self.position = 0.0;
@@ -122,9 +167,46 @@ impl StudioView {
 
     pub fn changed(&mut self) {
         self.mix.normalize();
+        // Drags call this every frame: changes less than 0.6 s apart form one undo step.
+        let now = std::time::Instant::now();
+        if self.last_change.is_none_or(|t| now.duration_since(t).as_secs_f32() > 0.6) && self.committed != self.mix {
+            self.undo.push(self.committed.clone());
+            if self.undo.len() > 100 {
+                self.undo.remove(0);
+            }
+            self.redo.clear();
+        }
+        self.last_change = Some(now);
+        self.committed = self.mix.clone();
         self.timeline_dirty = true;
         self.dirty = true;
         self.edited = true;
+    }
+
+    fn restore(&mut self, m: Mix) {
+        self.mix = m;
+        self.committed = self.mix.clone();
+        self.last_change = None;
+        self.timeline_dirty = true;
+        self.dirty = true;
+        self.edited = true;
+        if matches!(self.selection, Selection::Track(i) if i >= self.mix.tracks.len()) || matches!(self.selection, Selection::Transition(k) if k >= self.mix.transitions.len()) {
+            self.selection = Selection::None;
+        }
+    }
+
+    pub fn undo(&mut self) {
+        if let Some(m) = self.undo.pop() {
+            self.redo.push(self.mix.clone());
+            self.restore(m);
+        }
+    }
+
+    pub fn redo(&mut self) {
+        if let Some(m) = self.redo.pop() {
+            self.undo.push(self.mix.clone());
+            self.restore(m);
+        }
     }
 
     pub fn refresh_timeline(&mut self, sh: &Shared) {
@@ -184,28 +266,49 @@ impl StudioView {
             self.refresh_timeline(sh);
         }
         self.keyboard(ui.ctx(), sh, out);
-        egui::Panel::top("studio-toolbar").frame(egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(10, 6))).show(ui, |ui| {
-            self.toolbar(ui, sh, mixes, out, load_mix, new_mix);
-        });
-        let finder = self.mashup.open;
-        let none_selected = self.selection == Selection::None && !finder;
-        egui::Panel::bottom(if finder { "studio-mashups" } else if none_selected { "studio-inspector-empty" } else { "studio-inspector-v2" })
-            .default_size(if none_selected { 80.0 } else if finder { 430.0 } else { 380.0 })
-            .min_size(if none_selected { 70.0 } else { (ui.available_height() * 0.40).clamp(220.0, 400.0) })
-            .max_size((ui.available_height() * 0.65).max(260.0))
-            .resizable(true)
-            .frame(egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(12, 8)))
-            .show(ui, |ui| self.inspector(ui, sh));
+        // the finder was opened from elsewhere (library, menu, inspector button)
+        if self.mashup.take_opened() {
+            self.tab = Some(Tab::Mashups);
+        }
+        // Bottom bar (DJ.Studio style), from the bottom up: tabs, transport, the open panel.
+        let bar = egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(12, 4));
+        egui::Panel::bottom("studio-tabs").exact_size(40.0).resizable(false).frame(bar).show(ui, |ui| self.tab_bar(ui));
+        egui::Panel::bottom("studio-transport")
+            .exact_size(48.0)
+            .resizable(false)
+            .frame(egui::Frame::new().fill(theme::blend(theme::PANEL, theme::BG, 0.4)).inner_margin(egui::Margin::symmetric(12, 4)))
+            .show(ui, |ui| self.transport(ui, mixes, out, load_mix, new_mix));
+        if let Some(tab) = self.tab {
+            let (default, min) = match tab {
+                Tab::Zoom => (54.0, 50.0),
+                Tab::Playlist => (100.0, 90.0),
+                Tab::Master => (90.0, 80.0),
+                Tab::Track | Tab::Transition => (380.0, 220.0),
+                Tab::Mashups => (430.0, 240.0),
+            };
+            egui::Panel::bottom(format!("studio-tab-{tab:?}"))
+                .default_size(default)
+                .min_size(min)
+                .max_size((ui.available_height() * 0.7).max(min + 20.0))
+                .resizable(!matches!(tab, Tab::Zoom))
+                .frame(egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(12, 8)))
+                .show(ui, |ui| self.tab_panel(ui, sh, tab));
+        }
         egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin::symmetric(8, 6))).show(ui, |ui| {
-            self.order_strip(ui, sh);
-            ui.add_space(6.0);
             self.timeline_ui(ui, sh, out);
         });
-        // picking a track or transition closes the finder, like any other inspector
-        if self.selection != self.last_selection && self.mashup.open {
-            self.mashup.close(&mut self.mashup_actions);
+        // selecting a clip / transition opens its tab
+        if self.selection != self.last_selection {
+            match self.selection {
+                Selection::Track(_) => self.tab = Some(Tab::Track),
+                Selection::Transition(_) => self.tab = Some(Tab::Transition),
+                Selection::None => {}
+            }
         }
         self.last_selection = self.selection;
+        if self.tab != Some(Tab::Mashups) && self.mashup.open {
+            self.mashup.close(&mut self.mashup_actions);
+        }
     }
 
     /// Studio keyboard shortcuts (ignored while typing in a text field).
@@ -217,6 +320,7 @@ impl StudioView {
         let bar = self.timeline.tracks.first().map(|t| t.grid.bar_len()).unwrap_or(2.0);
         let total = self.timeline.total_secs;
         let mut seek: Option<f64> = None;
+        let (mut undo, mut redo) = (false, false);
         let (cmd, shift) = ctx.input(|i| (i.modifiers.command, i.modifiers.shift));
         ctx.input_mut(|i| {
             if i.consume_key(egui::Modifiers::NONE, Key::Space) {
@@ -250,7 +354,20 @@ impl StudioView {
             if cmd && i.key_pressed(Key::S) {
                 out.push(StudioAction::SaveMix);
             }
+            if cmd && i.key_pressed(Key::Z) {
+                if shift {
+                    redo = true;
+                } else {
+                    undo = true;
+                }
+            }
         });
+        if undo {
+            self.undo();
+        }
+        if redo {
+            self.redo();
+        }
         // previous / next transition: [ and ]
         let (prev, next) = ctx.input(|i| (i.key_pressed(Key::OpenBracket), i.key_pressed(Key::CloseBracket)));
         if prev || next {
@@ -274,161 +391,307 @@ impl StudioView {
         let _ = sh;
     }
 
-    fn toolbar(&mut self, ui: &mut Ui, sh: &Shared, mixes: &[(i64, String, i64)], out: &mut Vec<StudioAction>, load_mix: &mut Option<i64>, new_mix: &mut bool) {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            // mix menu
-            ui.menu_button(RichText::new("☰ Mixes").size(13.0), |ui| {
-                ui.set_min_width(260.0);
-                if ui.button("＋ New mix").clicked() {
-                    *new_mix = true;
-                    ui.close();
+    fn track_at_playhead(&self) -> Option<usize> {
+        let n = self.timeline.tracks.len();
+        (n > 0).then(|| self.timeline.tracks.iter().rposition(|t| t.start_sec <= self.position + 1e-6).unwrap_or(0).min(n - 1))
+    }
+
+    fn transition_at_playhead(&self) -> Option<usize> {
+        let n = self.timeline.transitions.len();
+        (n > 0).then(|| self.timeline.transitions.iter().position(|t| t.end_sec >= self.position).unwrap_or(n - 1))
+    }
+
+    pub fn toggle_tab(&mut self, t: Tab) {
+        if self.tab == Some(t) {
+            self.tab = None;
+            return;
+        }
+        self.tab = Some(t);
+        match t {
+            Tab::Track if !matches!(self.selection, Selection::Track(_)) => {
+                if let Some(i) = self.track_at_playhead() {
+                    self.selection = Selection::Track(i);
                 }
-                ui.separator();
-                egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-                    for (id, name, _) in mixes {
-                        if ui.selectable_label(self.mix.id == *id, name).clicked() {
-                            if self.mix.id != *id {
-                                *load_mix = Some(*id);
-                            }
-                            ui.close();
-                        }
-                    }
-                });
-                ui.separator();
-                if ui.button("Import DJ.Studio projects").clicked() {
-                    out.push(StudioAction::ImportDjStudio);
-                    ui.close();
+            }
+            Tab::Transition if !matches!(self.selection, Selection::Transition(_)) => {
+                if let Some(k) = self.transition_at_playhead() {
+                    self.selection = Selection::Transition(k);
                 }
-                if ui.button("Export cues to VirtualDJ…").clicked() {
-                    out.push(StudioAction::ExportVirtualDj);
-                    ui.close();
-                }
-            });
-            let r = ui.add(egui::TextEdit::singleline(&mut self.mix.name).font(egui::TextStyle::Heading).frame(egui::Frame::NONE).desired_width(240.0));
-            if r.changed() {
-                self.dirty = true;
             }
-            ui.separator();
-            // transport
-            if ui.add(egui::Button::new("⏮").min_size(vec2(28.0, 26.0))).on_hover_text("To start (Home)").clicked() {
-                out.push(StudioAction::Seek(0.0));
-            }
-            let play = if self.playing { "⏸" } else { "▶" };
-            let pb = egui::Button::new(RichText::new(play).size(15.0).color(Color32::BLACK)).fill(theme::accent()).min_size(vec2(44.0, 26.0));
-            if ui.add_enabled(!self.mix.tracks.is_empty(), pb).on_hover_text("Play / pause (Space)").clicked() {
-                out.push(StudioAction::PlayPause);
-            }
-            ui.label(RichText::new(theme::fmt_time(self.position)).monospace().size(16.0).strong());
-            ui.label(RichText::new(format!("/ {}", theme::fmt_time(self.timeline.total_secs))).monospace().color(theme::TEXT_DIM));
-            ui.label(RichText::new(format!("{:.1} BPM", self.timeline.bpm_at_beat(self.timeline.beat_at_sec(self.position)))).monospace().color(theme::WARN));
-            if crate::widgets::toggle(ui, self.follow, "Follow", theme::accent(), vec2(56.0, 22.0)).on_hover_text("Keep the playhead in view (F)").clicked() {
-                self.follow = !self.follow;
-            }
-            ui.separator();
-            if ui.small_button("−").on_hover_text("Zoom out (−, or ⌘/Ctrl/Alt + scroll, or pinch)").clicked() {
-                self.zoom_around_playhead(1.0 / 1.5);
-            }
-            if ui.small_button("Fit").on_hover_text("Show the whole mix").clicked() {
-                self.fit_request = true;
-            }
-            if ui.small_button("+").on_hover_text("Zoom in (+, or ⌘/Ctrl/Alt + scroll, or pinch)").clicked() {
-                self.zoom_around_playhead(1.5);
-            }
-            // log-scale zoom slider
-            let mut lz = self.zoom.ln();
-            let zr = crate::studio_timeline::MIN_ZOOM.ln()..=crate::studio_timeline::MAX_ZOOM.ln();
-            if ui.add(egui::Slider::new(&mut lz, zr).show_value(false)).on_hover_text("Zoom").changed() {
-                let f = lz.exp() / self.zoom;
-                self.zoom_around_playhead(f);
-            }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if let Some(p) = self.render_progress {
-                    ui.add(egui::ProgressBar::new(p).desired_width(140.0).text("Rendering…"));
-                } else if ui.add_enabled(!self.mix.tracks.is_empty(), egui::Button::new("Export…")).on_hover_text("Render the mix to WAV with a cue sheet").clicked() {
-                    out.push(StudioAction::Export);
-                }
-                if ui.add_enabled(!self.mix.tracks.is_empty(), egui::Button::new("Play live ▶")).on_hover_text("Play this mix on the live decks").clicked() {
-                    out.push(StudioAction::SendToLive);
-                }
-                if self.dirty {
-                    if ui.button("Save").on_hover_text("⌘S").clicked() {
-                        out.push(StudioAction::SaveMix);
-                    }
-                } else {
-                    ui.label(RichText::new("saved").size(11.0).color(theme::TEXT_DIM));
-                }
-            });
-        });
-        ui.add_space(2.0);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            if ui.add_enabled(self.mix.tracks.len() > 2, egui::Button::new("✨ Harmonize")).on_hover_text("Re-order for harmonic mixing, smooth tempo and an energy arc").clicked() {
-                self.harmonize(sh);
-            }
-            if ui.button("🎤 Mashups").on_hover_text("Find instrumentals that carry the vocals of a track (⇧⌘M)").clicked() {
+            Tab::Mashups if !self.mashup.open => {
                 let id = match self.selection {
                     Selection::Track(i) => self.mix.tracks.get(i).map(|t| t.track_id),
-                    _ => self.mix.tracks.first().map(|t| t.track_id),
+                    _ => self.track_at_playhead().and_then(|i| self.mix.tracks.get(i)).map(|t| t.track_id),
                 };
-                out.push(StudioAction::FindMashups(id));
+                self.pending.push(StudioAction::FindMashups(id));
             }
-            ui.menu_button("Order options ⏷", |ui| {
-                ui.set_min_width(240.0);
-                ui.label("Priority");
-                ui.horizontal(|ui| {
-                    ui.label("Tempo");
-                    ui.add(egui::Slider::new(&mut self.order_opts.key_weight, 0.0..=1.0).show_value(false));
-                    ui.label("Key");
-                });
-                ui.add(egui::Slider::new(&mut self.order_opts.energy_weight, 0.0..=1.0).text("Energy arc"));
-                ui.checkbox(&mut self.order_opts.lock_first, "Keep first track");
-                ui.checkbox(&mut self.order_opts.lock_last, "Keep last track");
-                ui.checkbox(&mut self.order_opts.allow_key_shift, "Allow ±1 semitone key shifts");
-            });
-            if ui.add_enabled(self.mix.tracks.len() > 1, egui::Button::new("Auto mix points")).on_hover_text("Recompute mix-in/out points and transition lengths from the analysed structure").clicked() {
-                let order: Vec<TrackId> = self.mix.tracks.iter().map(|t| t.track_id).collect();
-                self.replan(sh, &order);
-            }
-            ui.separator();
-            ui.label(RichText::new("Tempo").color(theme::TEXT_DIM));
-            let fixed = matches!(self.mix.tempo, TempoMode::Fixed(_));
-            if ui.selectable_label(!fixed, "Glide").on_hover_text("Each track plays at its own BPM; tempo glides during transitions").clicked() && fixed {
-                self.mix.tempo = TempoMode::Glide;
-                self.changed();
-            }
-            if ui.selectable_label(fixed, "Fixed").clicked() && !fixed {
-                self.mix.tempo = TempoMode::Fixed(self.timeline.bpm_at_beat(0.0).round());
-                self.changed();
-            }
-            if let TempoMode::Fixed(mut b) = self.mix.tempo {
-                if ui.add(egui::DragValue::new(&mut b).range(60.0..=200.0).speed(0.1).suffix(" BPM")).changed() {
-                    self.mix.tempo = TempoMode::Fixed(b);
-                    self.changed();
+            _ => {}
+        }
+        self.last_selection = self.selection;
+    }
+
+    fn tab_bar(&mut self, ui: &mut Ui) {
+        let (w, gap) = (116.0, 4.0);
+        let total = Tab::ALL.len() as f32 * (w + gap);
+        ui.horizontal_centered(|ui| {
+            ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
+            ui.spacing_mut().item_spacing.x = gap;
+            for t in Tab::ALL {
+                let active = self.tab == Some(t);
+                let (r, resp) = ui.allocate_exact_size(vec2(w, 30.0), Sense::click());
+                let p = ui.painter();
+                if active {
+                    p.rect_filled(r, 6.0, theme::SELECT);
+                    p.rect_stroke(r, 6.0, Stroke::new(1.5, theme::accent()), StrokeKind::Inside);
+                } else if resp.hovered() {
+                    p.rect_filled(r, 6.0, theme::PANEL_HI);
+                }
+                let (icon, name) = t.label();
+                let col = if active { theme::accent() } else if resp.hovered() { theme::TEXT } else { theme::TEXT_DIM };
+                p.text(egui::pos2(r.left() + 16.0, r.center().y), egui::Align2::LEFT_CENTER, icon, egui::FontId::proportional(14.0), col);
+                p.text(egui::pos2(r.left() + 38.0, r.center().y), egui::Align2::LEFT_CENTER, name, egui::FontId::proportional(14.0), col);
+                if resp.on_hover_text(if active { "Close this panel" } else { "Open this panel" }).clicked() {
+                    self.toggle_tab(t);
                 }
             }
-            if crate::widgets::toggle(ui, self.mix.keylock, "Keylock", theme::accent(), vec2(62.0, 20.0)).on_hover_text("Keep the original key when the tempo changes").clicked() {
-                self.mix.keylock = !self.mix.keylock;
-                self.changed();
-            }
-            if !self.message.is_empty() {
-                ui.label(RichText::new(&self.message).color(theme::TEXT_DIM).size(11.0));
-            }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(RichText::new("Space play · Left/Right 1 bar (Shift: 8) · [ ] transitions · F follow · +/- zoom").size(10.5).color(theme::TEXT_DIM));
-            });
         });
     }
 
+    /// Transport row: mixes / edit menus on the left, transport centred, output on the right.
+    fn transport(&mut self, ui: &mut Ui, mixes: &[(i64, String, i64)], out: &mut Vec<StudioAction>, load_mix: &mut Option<i64>, new_mix: &mut bool) {
+        let full = ui.available_rect_before_wrap();
+        let has = !self.mix.tracks.is_empty();
+        // ---- left: mixes, name, edit menu, undo / redo
+        let mut left = ui.new_child(egui::UiBuilder::new().max_rect(full).layout(Layout::left_to_right(Align::Center)));
+        left.spacing_mut().item_spacing.x = 6.0;
+        left.menu_button(RichText::new("☰ Mixes").size(13.0), |ui| {
+            ui.set_min_width(260.0);
+            if ui.button("＋ New mix").clicked() {
+                *new_mix = true;
+                ui.close();
+            }
+            ui.separator();
+            egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                for (id, name, _) in mixes {
+                    if ui.selectable_label(self.mix.id == *id, name).clicked() {
+                        if self.mix.id != *id {
+                            *load_mix = Some(*id);
+                        }
+                        ui.close();
+                    }
+                }
+            });
+            ui.separator();
+            if ui.button("Import DJ.Studio projects").clicked() {
+                out.push(StudioAction::ImportDjStudio);
+                ui.close();
+            }
+            if ui.button("Export cues to VirtualDJ…").clicked() {
+                out.push(StudioAction::ExportVirtualDj);
+                ui.close();
+            }
+        });
+        if left.add(egui::TextEdit::singleline(&mut self.mix.name).font(egui::FontId::proportional(15.0)).frame(egui::Frame::NONE).desired_width(190.0)).changed() {
+            self.dirty = true;
+        }
+        if self.dirty {
+            if left.small_button("Save").on_hover_text("⌘S").clicked() {
+                out.push(StudioAction::SaveMix);
+            }
+        } else {
+            left.label(RichText::new("saved").size(11.0).color(theme::TEXT_DIM));
+        }
+        left.menu_button("Edit ⏷", |ui| {
+            ui.set_min_width(240.0);
+            if ui.add_enabled(self.mix.tracks.len() > 2, egui::Button::new("✨ Harmonize order")).on_hover_text("Re-order for harmonic mixing, smooth tempo and an energy arc").clicked() {
+                self.pending.push(StudioAction::Harmonize);
+                ui.close();
+            }
+            if ui.add_enabled(self.mix.tracks.len() > 1, egui::Button::new("Auto mix points")).on_hover_text("Recompute mix-in/out points and transition lengths from the analysed structure").clicked() {
+                self.pending.push(StudioAction::AutoMixPoints);
+                ui.close();
+            }
+            ui.separator();
+            if ui.add_enabled(!self.undo.is_empty(), egui::Button::new("Undo  ⌘Z")).clicked() {
+                self.undo();
+                ui.close();
+            }
+            if ui.add_enabled(!self.redo.is_empty(), egui::Button::new("Redo  Shift+⌘Z")).clicked() {
+                self.redo();
+                ui.close();
+            }
+        });
+        if left.add_enabled(!self.undo.is_empty(), egui::Button::new("↩").min_size(vec2(28.0, 26.0))).on_hover_text("Undo (⌘Z)").clicked() {
+            self.undo();
+        }
+        if left.add_enabled(!self.redo.is_empty(), egui::Button::new("↪").min_size(vec2(28.0, 26.0))).on_hover_text("Redo (Shift+⌘Z)").clicked() {
+            self.redo();
+        }
+        // ---- right: output
+        let mut right = ui.new_child(egui::UiBuilder::new().max_rect(full).layout(Layout::right_to_left(Align::Center)));
+        right.spacing_mut().item_spacing.x = 6.0;
+        if let Some(p) = self.render_progress {
+            right.add(egui::ProgressBar::new(p).desired_width(140.0).text("Rendering…"));
+        } else if right.add_enabled(has, egui::Button::new("Export…")).on_hover_text("Render the mix to WAV with a cue sheet").clicked() {
+            out.push(StudioAction::Export);
+        }
+        if right.add_enabled(has, egui::Button::new("Play live ▶")).on_hover_text("Play this mix on the live decks").clicked() {
+            out.push(StudioAction::SendToLive);
+        }
+        if !self.message.is_empty() {
+            right.label(RichText::new(&self.message).color(theme::TEXT_DIM).size(11.0));
+        }
+        // ---- centre: transport (centred on the measured width of the last frame)
+        let cw = self.transport_w.max(100.0);
+        let crect = egui::Rect::from_min_size(egui::pos2(full.center().x - cw / 2.0, full.top()), vec2(cw + 8.0, full.height()));
+        let mut c = ui.new_child(egui::UiBuilder::new().max_rect(crect).layout(Layout::left_to_right(Align::Center)));
+        c.spacing_mut().item_spacing.x = 8.0;
+        let round = |t: &str| egui::Button::new(RichText::new(t).size(15.0)).corner_radius(17.0).min_size(vec2(34.0, 34.0));
+        if c.add(round("⏮")).on_hover_text("To start (Home)").clicked() {
+            out.push(StudioAction::Seek(0.0));
+        }
+        if c.add_enabled(self.timeline.transitions.len() > 0, round("⏪")).on_hover_text("Previous transition ([)").clicked() {
+            let k = self.timeline.transitions.iter().rposition(|t| t.start_sec < self.position - 0.5);
+            if let Some(k) = k {
+                self.selection = Selection::Transition(k);
+                out.push(StudioAction::Seek(self.timeline.transitions[k].start_sec));
+            }
+        }
+        let play = if self.playing { "⏸" } else { "▶" };
+        let pb = egui::Button::new(RichText::new(play).size(18.0).color(Color32::BLACK)).fill(theme::accent()).corner_radius(20.0).min_size(vec2(40.0, 40.0));
+        if c.add_enabled(has, pb).on_hover_text("Play / pause (Space)").clicked() {
+            out.push(StudioAction::PlayPause);
+        }
+        if c.add_enabled(self.timeline.transitions.len() > 0, round("⏩")).on_hover_text("Next transition (])").clicked() {
+            if let Some(k) = self.timeline.transitions.iter().position(|t| t.start_sec > self.position + 0.5) {
+                self.selection = Selection::Transition(k);
+                out.push(StudioAction::Seek(self.timeline.transitions[k].start_sec));
+            }
+        }
+        if c.add(round("⏭")).on_hover_text("To end (End)").clicked() {
+            out.push(StudioAction::Seek(self.timeline.total_secs));
+        }
+        c.add_space(6.0);
+        c.label(RichText::new(theme::fmt_time(self.position)).monospace().size(16.0).strong());
+        c.label(RichText::new(format!("/ {}", theme::fmt_time(self.timeline.total_secs))).monospace().color(theme::TEXT_DIM));
+        c.label(RichText::new(format!("{:.1} BPM", self.timeline.bpm_at_beat(self.timeline.beat_at_sec(self.position)))).monospace().color(theme::WARN));
+        if crate::widgets::toggle(&mut c, self.follow, "Follow", theme::accent(), vec2(56.0, 22.0)).on_hover_text("Keep the playhead in view (F)").clicked() {
+            self.follow = !self.follow;
+        }
+        self.transport_w = c.min_rect().width();
+        ui.allocate_rect(full, Sense::hover());
+    }
+
+    fn tab_panel(&mut self, ui: &mut Ui, sh: &Shared, tab: Tab) {
+        let hint = |ui: &mut Ui, t: &str| {
+            ui.add_space(6.0);
+            ui.label(RichText::new(t).color(theme::TEXT_DIM));
+        };
+        match tab {
+            Tab::Zoom => {
+                ui.horizontal_centered(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    if ui.button("−").on_hover_text("Zoom out (−, or ⌘/Ctrl/Alt + scroll, or pinch)").clicked() {
+                        self.zoom_around_playhead(1.0 / 1.5);
+                    }
+                    let mut lz = self.zoom.ln();
+                    let zr = crate::studio_timeline::MIN_ZOOM.ln()..=crate::studio_timeline::MAX_ZOOM.ln();
+                    ui.spacing_mut().slider_width = 360.0;
+                    if ui.add(egui::Slider::new(&mut lz, zr).show_value(false)).on_hover_text("Zoom").changed() {
+                        let f = lz.exp() / self.zoom;
+                        self.zoom_around_playhead(f);
+                    }
+                    if ui.button("+").on_hover_text("Zoom in (+, or ⌘/Ctrl/Alt + scroll, or pinch)").clicked() {
+                        self.zoom_around_playhead(1.5);
+                    }
+                    if ui.button("Fit").on_hover_text("Show the whole mix").clicked() {
+                        self.fit_request = true;
+                    }
+                    let visible = ui.ctx().content_rect().width() / self.zoom.max(0.01);
+                    ui.label(RichText::new(format!("{} visible", theme::fmt_time_short(visible as f64))).color(theme::TEXT_DIM));
+                    ui.separator();
+                    ui.label(RichText::new("Space play · Left/Right 1 bar (Shift: 8) · [ ] transitions · F follow · + − zoom · ⌘Z undo").size(11.0).color(theme::TEXT_DIM));
+                });
+            }
+            Tab::Playlist => {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    if ui.add_enabled(self.mix.tracks.len() > 2, egui::Button::new("✨ Harmonize")).on_hover_text("Re-order for harmonic mixing, smooth tempo and an energy arc").clicked() {
+                        self.harmonize(sh);
+                    }
+                    ui.menu_button("Order options ⏷", |ui| {
+                        ui.set_min_width(240.0);
+                        ui.label("Priority");
+                        ui.horizontal(|ui| {
+                            ui.label("Tempo");
+                            ui.add(egui::Slider::new(&mut self.order_opts.key_weight, 0.0..=1.0).show_value(false));
+                            ui.label("Key");
+                        });
+                        ui.add(egui::Slider::new(&mut self.order_opts.energy_weight, 0.0..=1.0).text("Energy arc"));
+                        ui.checkbox(&mut self.order_opts.lock_first, "Keep first track");
+                        ui.checkbox(&mut self.order_opts.lock_last, "Keep last track");
+                        ui.checkbox(&mut self.order_opts.allow_key_shift, "Allow ±1 semitone key shifts");
+                    });
+                    if ui.add_enabled(self.mix.tracks.len() > 1, egui::Button::new("Auto mix points")).on_hover_text("Recompute mix-in/out points and transition lengths from the analysed structure").clicked() {
+                        let order: Vec<TrackId> = self.mix.tracks.iter().map(|t| t.track_id).collect();
+                        self.replan(sh, &order);
+                    }
+                    ui.label(RichText::new(format!("{} tracks · drag tracks from the Library onto the strip, drag cards to reorder", self.mix.tracks.len())).size(11.0).color(theme::TEXT_DIM));
+                });
+                ui.add_space(4.0);
+                self.order_strip(ui, sh);
+            }
+            Tab::Transition => match self.selection {
+                Selection::Transition(k) if k < self.mix.transitions.len() && k + 1 < self.mix.tracks.len() => self.transition_editor(ui, sh, k),
+                _ => hint(ui, "Click a transition (the coloured chip above the lanes) to edit it. A mix needs at least two tracks."),
+            },
+            Tab::Track => match self.selection {
+                Selection::Track(i) if i < self.mix.tracks.len() => self.track_inspector(ui, sh, i),
+                _ => hint(ui, "Click a track in the timeline to edit its mix points, key and level."),
+            },
+            Tab::Mashups => {
+                let playing = self.preview_playing;
+                self.mashup.panel(ui, sh, &self.mix, playing, &mut self.mashup_actions);
+                if !self.mashup.open {
+                    self.tab = None;
+                }
+            }
+            Tab::Master => {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    ui.label(RichText::new("Tempo").color(theme::TEXT_DIM));
+                    let fixed = matches!(self.mix.tempo, TempoMode::Fixed(_));
+                    if ui.selectable_label(!fixed, "Glide").on_hover_text("Each track plays at its own BPM; tempo glides during transitions").clicked() && fixed {
+                        self.mix.tempo = TempoMode::Glide;
+                        self.changed();
+                    }
+                    if ui.selectable_label(fixed, "Fixed").on_hover_text("Every track is stretched to one BPM").clicked() && !fixed {
+                        self.mix.tempo = TempoMode::Fixed(self.timeline.bpm_at_beat(0.0).round());
+                        self.changed();
+                    }
+                    if let TempoMode::Fixed(mut b) = self.mix.tempo {
+                        if ui.add(egui::DragValue::new(&mut b).range(60.0..=200.0).speed(0.1).suffix(" BPM")).changed() {
+                            self.mix.tempo = TempoMode::Fixed(b);
+                            self.changed();
+                        }
+                    }
+                    ui.separator();
+                    if crate::widgets::toggle(ui, self.mix.keylock, "Keylock", theme::accent(), vec2(62.0, 22.0)).on_hover_text("Keep the original key when the tempo changes").clicked() {
+                        self.mix.keylock = !self.mix.keylock;
+                        self.changed();
+                    }
+                    ui.separator();
+                    let (lo, hi) = self.timeline.tracks.iter().fold((f64::MAX, 0.0f64), |(lo, hi), t| (lo.min(t.grid.bpm), hi.max(t.grid.bpm)));
+                    if hi > 0.0 {
+                        ui.label(RichText::new(format!("{} · {} tracks · {:.0}–{:.0} BPM", theme::fmt_time_short(self.timeline.total_secs), self.mix.tracks.len(), lo, hi)).color(theme::TEXT_DIM));
+                    }
+                });
+                hint(ui, "Lane volume, EQ and filter are on the lane headers left of the timeline. Export format and tail: Settings › Export & recording.");
+            }
+        }
+    }
+
     fn order_strip(&mut self, ui: &mut Ui, sh: &Shared) {
-        let chevron = if self.strip_open { "⏷" } else { "⏵" };
-        let n = self.mix.tracks.len();
-        if ui.add(egui::Label::new(RichText::new(format!("{chevron} Tracks ({n})")).size(12.0).color(theme::TEXT_DIM)).sense(Sense::click())).on_hover_text("Show / hide the track order strip").clicked() {
-            self.strip_open = !self.strip_open;
-        }
-        if !self.strip_open {
-            return;
-        }
         let h = 50.0;
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
         if let Some(p) = resp.dnd_release_payload::<DraggedTracks>() {
@@ -536,24 +799,6 @@ impl StudioView {
             }
             self.selection = Selection::None;
             self.changed();
-        }
-    }
-
-    fn inspector(&mut self, ui: &mut Ui, sh: &Shared) {
-        if self.mashup.open {
-            let playing = self.preview_playing;
-            self.mashup.panel(ui, sh, &self.mix, playing, &mut self.mashup_actions);
-            return;
-        }
-        match self.selection {
-            Selection::None => {
-                ui.add_space(8.0);
-                ui.label(RichText::new("Click a track or a transition (the coloured chip on the timeline ruler) to edit it.").color(theme::TEXT_DIM));
-                ui.label(RichText::new("Add tracks by dragging them from the Library onto the strip above. ✨ Harmonize orders them by key, tempo and energy.").color(theme::TEXT_DIM));
-            }
-            Selection::Track(i) if i < self.mix.tracks.len() => self.track_inspector(ui, sh, i),
-            Selection::Transition(k) if k < self.mix.transitions.len() && k + 1 < self.mix.tracks.len() => self.transition_editor(ui, sh, k),
-            _ => self.selection = Selection::None,
         }
     }
 
@@ -709,5 +954,44 @@ pub fn truncate(s: &str, n: usize) -> String {
         let mut t: String = s.chars().take(n.saturating_sub(1)).collect();
         t.push('…');
         t
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clubcraft_core::MixTrack;
+
+    fn mix() -> Mix {
+        let t = |id| MixTrack { track_id: id, mix_in: 0.0, mix_out: 60.0, key_shift: 0, gain_db: 0.0 };
+        Mix { tracks: vec![t(1), t(2)], transitions: vec![Transition::new(TransitionStyle::StemBlend, 32)], ..Default::default() }
+    }
+
+    #[test]
+    fn undo_redo_groups_gestures() {
+        let mut s = StudioView::default();
+        s.set_mix(mix());
+        // a drag: many changes in quick succession = one undo step
+        for g in 1..=5 {
+            s.mix.tracks[0].gain_db = g as f32;
+            s.changed();
+        }
+        s.last_change = None; // gesture over
+        s.mix.tracks[1].key_shift = 2;
+        s.changed();
+        assert_eq!(s.undo.len(), 2);
+        s.undo();
+        assert_eq!((s.mix.tracks[0].gain_db, s.mix.tracks[1].key_shift), (5.0, 0));
+        s.undo();
+        assert_eq!(s.mix.tracks[0].gain_db, 0.0);
+        s.redo();
+        s.redo();
+        assert_eq!((s.mix.tracks[0].gain_db, s.mix.tracks[1].key_shift), (5.0, 2));
+        // a new edit clears the redo stack
+        s.undo();
+        s.last_change = None;
+        s.mix.keylock = !s.mix.keylock;
+        s.changed();
+        assert!(s.redo.is_empty());
     }
 }
