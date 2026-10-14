@@ -1,4 +1,5 @@
 use eframe::egui::{self, Color32, CornerRadius, FontFamily, FontId, Stroke, TextStyle, Visuals};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 pub const BG: Color32 = Color32::from_rgb(14, 15, 18);
 pub const PANEL: Color32 = Color32::from_rgb(24, 26, 31);
@@ -6,7 +7,6 @@ pub const PANEL_HI: Color32 = Color32::from_rgb(34, 37, 44);
 pub const LINE: Color32 = Color32::from_rgb(48, 52, 60);
 pub const TEXT: Color32 = Color32::from_rgb(220, 224, 232);
 pub const TEXT_DIM: Color32 = Color32::from_rgb(130, 136, 148);
-pub const ACCENT: Color32 = Color32::from_rgb(255, 92, 140);
 /// Fill of selected tabs, toggles and list entries: solid graphite, so the pink accent is kept
 /// for primary actions and indicators (a translucent accent fill read as a muddy plum).
 pub const SELECT: Color32 = Color32::from_rgb(66, 71, 83);
@@ -20,6 +20,60 @@ pub const DECK: [Color32; 4] = [
     Color32::from_rgb(170, 110, 255),
     Color32::from_rgb(60, 210, 170),
 ];
+
+static ACCENT_RGB: AtomicU32 = AtomicU32::new(0xFF5C8C);
+static SOFT_STEMS: AtomicBool = AtomicBool::new(true);
+
+/// The interface accent (chosen in Settings › General).
+pub fn accent() -> Color32 {
+    let v = ACCENT_RGB.load(Ordering::Relaxed);
+    Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
+}
+
+pub fn set_accent(c: [u8; 3]) {
+    ACCENT_RGB.store((c[0] as u32) << 16 | (c[1] as u32) << 8 | c[2] as u32, Ordering::Relaxed);
+}
+
+pub fn set_soft_stems(soft: bool) {
+    SOFT_STEMS.store(soft, Ordering::Relaxed);
+}
+
+/// Stem colour in the palette chosen in Settings › Waveforms ("soft" is easier on the eyes over
+/// long sessions, "vivid" separates the stems more strongly).
+pub fn stem_color(k: clubcraft_core::StemKind) -> Color32 {
+    use clubcraft_core::StemKind as S;
+    if SOFT_STEMS.load(Ordering::Relaxed) {
+        match k {
+            S::Drums => Color32::from_rgb(226, 172, 92),
+            S::Bass => Color32::from_rgb(210, 104, 112),
+            S::Other => Color32::from_rgb(104, 170, 216),
+            S::Vocals => Color32::from_rgb(136, 202, 126),
+        }
+    } else {
+        rgb(k.color())
+    }
+}
+
+/// Opaque blend of `a` towards `b` (`t` = 0 → a, 1 → b).
+pub fn blend(a: Color32, b: Color32, t: f32) -> Color32 {
+    let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round().clamp(0.0, 255.0) as u8;
+    Color32::from_rgb(m(a.r(), b.r()), m(a.g(), b.g()), m(a.b(), b.b()))
+}
+
+/// Colour of a transition style (strip chips and overlap markers).
+pub fn style_color(s: clubcraft_core::TransitionStyle) -> Color32 {
+    use clubcraft_core::TransitionStyle as T;
+    match s {
+        T::StemBlend => Color32::from_rgb(70, 196, 130),
+        T::BassSwap => Color32::from_rgb(222, 176, 60),
+        T::Crossfade => Color32::from_rgb(132, 150, 178),
+        T::VocalOver => Color32::from_rgb(64, 190, 204),
+        T::FilterOut => Color32::from_rgb(96, 150, 232),
+        T::EchoOut => Color32::from_rgb(232, 116, 100),
+        T::Cut => Color32::from_rgb(176, 178, 186),
+        T::Custom => Color32::from_rgb(210, 200, 120),
+    }
+}
 
 pub fn rgb(c: [u8; 3]) -> Color32 {
     Color32::from_rgb(c[0], c[1], c[2])
@@ -38,7 +92,7 @@ pub fn apply(ctx: &egui::Context) {
     v.override_text_color = Some(TEXT);
     v.selection.bg_fill = SELECT;
     v.selection.stroke = Stroke::new(1.0, Color32::WHITE);
-    v.hyperlink_color = ACCENT;
+    v.hyperlink_color = accent();
     let r = CornerRadius::same(4);
     for w in [&mut v.widgets.noninteractive, &mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
         w.corner_radius = r;

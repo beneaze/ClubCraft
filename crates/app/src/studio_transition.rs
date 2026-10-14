@@ -31,7 +31,7 @@ impl ParamGroup {
     }
     fn params(self) -> Vec<(Param, &'static str, Color32)> {
         match self {
-            ParamGroup::Stems => [StemKind::Vocals, StemKind::Other, StemKind::Bass, StemKind::Drums].iter().map(|k| (Param::Stem(*k), k.label(), theme::rgb(k.color()))).collect(),
+            ParamGroup::Stems => [StemKind::Vocals, StemKind::Other, StemKind::Bass, StemKind::Drums].iter().map(|k| (Param::Stem(*k), k.label(), theme::stem_color(*k))).collect(),
             ParamGroup::Volume => vec![(Param::Volume, "Volume", VOLUME_COLOR)],
             ParamGroup::Eq => vec![(Param::EqHigh, "High", EQ_COLORS[2]), (Param::EqMid, "Mid", EQ_COLORS[1]), (Param::EqLow, "Low", EQ_COLORS[0])],
             ParamGroup::FilterFx => vec![(Param::Filter, "Filter", FILTER_COLOR), (Param::Echo, "Echo", Color32::from_rgb(255, 160, 90))],

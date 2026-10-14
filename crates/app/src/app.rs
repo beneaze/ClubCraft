@@ -292,6 +292,11 @@ impl App {
         let p = self.prefs.clone();
         let first = self.applied_prefs.is_none();
         crate::theme::set_key_notation(p.key_notation);
+        crate::theme::set_soft_stems(p.soft_stem_colors);
+        if first || self.applied_prefs.as_ref().map(|o| o.accent) != Some(p.accent) {
+            crate::theme::set_accent(p.accent.rgb());
+            crate::theme::apply(ctx);
+        }
         ctx.set_zoom_factor(p.ui_scale);
         if let Some(h) = &self.eng.handle {
             for c in p.engine_commands() {
@@ -380,7 +385,6 @@ impl App {
                 H::ImportDjStudio => self.handle_studio_actions(vec![crate::studio::StudioAction::ImportDjStudio]),
                 H::GoLibrary => self.view = View::Library,
                 H::GoLive => self.view = View::Live,
-                H::Settings => self.settings.open = true,
             }
         }
     }
@@ -558,6 +562,14 @@ impl App {
                     _ => crate::studio::Selection::None,
                 }
             }
+            "view" => {
+                self.view = match arg.trim() {
+                    "library" => View::Library,
+                    "studio" => View::Studio,
+                    "live" => View::Live,
+                    _ => View::Home,
+                };
+            }
             "load" => {
                 let mut it = arg.split_whitespace();
                 let deck: usize = it.next().and_then(|d| d.parse().ok()).unwrap_or(0);
@@ -675,7 +687,7 @@ impl App {
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("ClubCraft").strong().size(17.0).color(theme::ACCENT));
+            ui.label(RichText::new("ClubCraft").strong().size(17.0).color(theme::accent()));
             ui.add_space(12.0);
             for (v, name) in [(View::Home, "Home"), (View::Library, "Library"), (View::Studio, "Studio"), (View::Live, "Live")] {
                 let sel = self.view == v;
@@ -684,7 +696,7 @@ impl App {
                 if sel {
                     // accent underline marks the current view
                     let rr = r.rect.shrink2(egui::vec2(10.0, 0.0));
-                    ui.painter().line_segment([rr.left_bottom() + egui::vec2(0.0, 2.0), rr.right_bottom() + egui::vec2(0.0, 2.0)], egui::Stroke::new(2.0, theme::ACCENT));
+                    ui.painter().line_segment([rr.left_bottom() + egui::vec2(0.0, 2.0), rr.right_bottom() + egui::vec2(0.0, 2.0)], egui::Stroke::new(2.0, theme::accent()));
                 }
                 if r.clicked() {
                     self.view = v;

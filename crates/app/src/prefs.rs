@@ -13,6 +13,38 @@ pub enum KeyNotation {
     Musical,
 }
 
+/// Interface accent colour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum Accent {
+    #[default]
+    Pink,
+    Blue,
+    Green,
+    Amber,
+}
+
+impl Accent {
+    pub const ALL: [Accent; 4] = [Accent::Pink, Accent::Blue, Accent::Green, Accent::Amber];
+
+    pub fn rgb(self) -> [u8; 3] {
+        match self {
+            Accent::Pink => [255, 92, 140],
+            Accent::Blue => [84, 148, 255],
+            Accent::Green => [52, 208, 140],
+            Accent::Amber => [255, 178, 48],
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Accent::Pink => "Pink",
+            Accent::Blue => "Blue",
+            Accent::Green => "Green",
+            Accent::Amber => "Amber",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum CueButton {
     /// CDJ: stopped sets/previews the cue, playing returns to it and stops.
@@ -95,6 +127,7 @@ pub struct Prefs {
     pub ui_scale: f32,
     /// Open the home page on start (otherwise the last view).
     pub start_on_home: bool,
+    pub accent: Accent,
     // ------------------------------------------------------------ decks
     pub cue_button: CueButton,
     pub hot_cue_press: HotCuePress,
@@ -117,6 +150,8 @@ pub struct Prefs {
     pub limiter_ceiling_db: f32,
     // ------------------------------------------------------------ waveforms
     pub stem_waveforms: bool,
+    /// Softer stem colours (otherwise the vivid palette).
+    pub soft_stem_colors: bool,
     /// Seconds visible in the live scrolling waveforms.
     pub wave_zoom_secs: f64,
     // ------------------------------------------------------------ analysis & stems
@@ -146,6 +181,7 @@ impl Default for Prefs {
             key_notation: KeyNotation::Camelot,
             ui_scale: 1.0,
             start_on_home: true,
+            accent: Accent::Pink,
             cue_button: CueButton::Cdj,
             hot_cue_press: HotCuePress::Preview,
             load_position: LoadPosition::FirstBeat,
@@ -163,6 +199,7 @@ impl Default for Prefs {
             limiter: true,
             limiter_ceiling_db: -0.5,
             stem_waveforms: true,
+            soft_stem_colors: true,
             wave_zoom_secs: 8.0,
             separate_stems: true,
             stem_quality: if cfg!(target_os = "macos") { "best".into() } else { "high".into() },

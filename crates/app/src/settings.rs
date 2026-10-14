@@ -348,6 +348,21 @@ fn general_ui(ui: &mut Ui, p: &mut Prefs) {
         ui.selectable_value(&mut p.key_notation, KeyNotation::OpenKey, "Open Key (1m)");
         ui.selectable_value(&mut p.key_notation, KeyNotation::Musical, "Musical (Am)");
     });
+    row(ui, "Accent colour", |ui| {
+        for a in crate::prefs::Accent::ALL {
+            let c = theme::rgb(a.rgb());
+            let sel = p.accent == a;
+            let (r, resp) = ui.allocate_exact_size(egui::vec2(74.0, 22.0), egui::Sense::click());
+            let pnt = ui.painter();
+            pnt.rect_filled(r, 4.0, if sel { theme::SELECT } else { theme::PANEL_HI });
+            pnt.rect_stroke(r, 4.0, egui::Stroke::new(1.0, if sel { c } else { theme::LINE }), egui::StrokeKind::Inside);
+            pnt.circle_filled(egui::pos2(r.left() + 12.0, r.center().y), 5.0, c);
+            pnt.text(egui::pos2(r.left() + 23.0, r.center().y), egui::Align2::LEFT_CENTER, a.label(), egui::FontId::proportional(12.5), theme::TEXT);
+            if resp.clicked() {
+                p.accent = a;
+            }
+        }
+    });
     row(ui, "Interface size", |ui| {
         ui.add(egui::Slider::new(&mut p.ui_scale, 0.8..=1.5).step_by(0.05).custom_formatter(|v, _| format!("{:.0} %", v * 100.0)));
     });
@@ -419,6 +434,13 @@ fn waveforms_ui(ui: &mut Ui, p: &mut Prefs) {
     row(ui, "Colours", |ui| {
         ui.selectable_value(&mut p.stem_waveforms, true, "By stem");
         ui.selectable_value(&mut p.stem_waveforms, false, "By frequency band");
+    });
+    row(ui, "Stem palette", |ui| {
+        ui.selectable_value(&mut p.soft_stem_colors, true, "Soft");
+        ui.selectable_value(&mut p.soft_stem_colors, false, "Vivid");
+        for k in [clubcraft_core::StemKind::Drums, clubcraft_core::StemKind::Bass, clubcraft_core::StemKind::Other, clubcraft_core::StemKind::Vocals] {
+            ui.label(RichText::new("■").size(14.0).color(theme::stem_color(k)));
+        }
     });
     row(ui, "Live waveform zoom", |ui| {
         ui.add(egui::Slider::new(&mut p.wave_zoom_secs, 2.0..=30.0).suffix(" s visible"));

@@ -292,14 +292,14 @@ impl StudioView {
                 out.push(StudioAction::Seek(0.0));
             }
             let play = if self.playing { "⏸" } else { "▶" };
-            let pb = egui::Button::new(RichText::new(play).size(15.0).color(Color32::BLACK)).fill(theme::ACCENT).min_size(vec2(44.0, 26.0));
+            let pb = egui::Button::new(RichText::new(play).size(15.0).color(Color32::BLACK)).fill(theme::accent()).min_size(vec2(44.0, 26.0));
             if ui.add_enabled(!self.mix.tracks.is_empty(), pb).on_hover_text("Play / pause (Space)").clicked() {
                 out.push(StudioAction::PlayPause);
             }
             ui.label(RichText::new(theme::fmt_time(self.position)).monospace().size(16.0).strong());
             ui.label(RichText::new(format!("/ {}", theme::fmt_time(self.timeline.total_secs))).monospace().color(theme::TEXT_DIM));
             ui.label(RichText::new(format!("{:.1} BPM", self.timeline.bpm_at_beat(self.timeline.beat_at_sec(self.position)))).monospace().color(theme::WARN));
-            if crate::widgets::toggle(ui, self.follow, "Follow", theme::ACCENT, vec2(56.0, 22.0)).on_hover_text("Keep the playhead in view (F)").clicked() {
+            if crate::widgets::toggle(ui, self.follow, "Follow", theme::accent(), vec2(56.0, 22.0)).on_hover_text("Keep the playhead in view (F)").clicked() {
                 self.follow = !self.follow;
             }
             ui.separator();
@@ -377,7 +377,7 @@ impl StudioView {
                     self.changed();
                 }
             }
-            if crate::widgets::toggle(ui, self.mix.keylock, "Keylock", theme::ACCENT, vec2(62.0, 20.0)).on_hover_text("Keep the original key when the tempo changes").clicked() {
+            if crate::widgets::toggle(ui, self.mix.keylock, "Keylock", theme::accent(), vec2(62.0, 20.0)).on_hover_text("Keep the original key when the tempo changes").clicked() {
                 self.mix.keylock = !self.mix.keylock;
                 self.changed();
             }
@@ -407,7 +407,7 @@ impl StudioView {
         let hovering = resp.dnd_hover_payload::<DraggedTracks>().is_some();
         ui.painter().rect_filled(rect, 4.0, theme::BG);
         if hovering {
-            ui.painter().rect_stroke(rect, 4.0, Stroke::new(2.0, theme::ACCENT), StrokeKind::Inside);
+            ui.painter().rect_stroke(rect, 4.0, Stroke::new(2.0, theme::accent()), StrokeKind::Inside);
         }
         if self.mix.tracks.is_empty() {
             ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "Drag tracks from the library here to start a mix", egui::FontId::proportional(14.0), theme::TEXT_DIM);
@@ -426,7 +426,7 @@ impl StudioView {
                     let (r, resp) = ui.allocate_exact_size(vec2(150.0, 42.0), Sense::click_and_drag());
                     let p = ui.painter();
                     p.rect_filled(r, 5.0, if sel { theme::PANEL_HI.gamma_multiply(1.4) } else { theme::PANEL_HI });
-                    p.rect_stroke(r, 5.0, Stroke::new(1.0, if sel { theme::ACCENT } else { theme::LINE }), StrokeKind::Inside);
+                    p.rect_stroke(r, 5.0, Stroke::new(1.0, if sel { theme::accent() } else { theme::LINE }), StrokeKind::Inside);
                     let title = t.map(|t| t.title.clone()).unwrap_or("?".into());
                     let artist = t.map(|t| t.artist.clone()).unwrap_or_default();
                     p.text(r.left_top() + vec2(6.0, 5.0), egui::Align2::LEFT_TOP, truncate(&format!("{}. {}", i + 1, title), 22), egui::FontId::proportional(12.0), theme::TEXT);

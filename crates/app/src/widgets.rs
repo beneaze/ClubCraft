@@ -139,13 +139,20 @@ pub fn pad(ui: &mut Ui, label: &str, sub: &str, color: Color32, lit: bool, size:
     resp
 }
 
-/// Small toggle button with an "LED" look.
+/// Small on/off toggle. All toggles share one look: graphite when on, with the colour as the
+/// label, outline and an "LED" bar along the bottom edge (no large coloured fills).
 pub fn toggle(ui: &mut Ui, on: bool, label: &str, color: Color32, size: egui::Vec2) -> Response {
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     let p = ui.painter();
-    p.rect_filled(rect, 4.0, if on { color.linear_multiply(0.85) } else if resp.hovered() { Color32::from_rgb(46, 50, 60) } else { theme::PANEL_HI });
-    p.rect_stroke(rect, 4.0, Stroke::new(1.0, if on { color } else { theme::LINE }), StrokeKind::Inside);
-    p.text(rect.center(), egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(11.5), if on { Color32::BLACK } else { theme::TEXT });
+    let fill = if on { theme::SELECT } else if resp.hovered() { Color32::from_rgb(46, 50, 60) } else { theme::PANEL_HI };
+    p.rect_filled(rect, 4.0, fill);
+    p.rect_stroke(rect, 4.0, Stroke::new(1.0, if on { color.linear_multiply(0.8) } else { theme::LINE }), StrokeKind::Inside);
+    if on {
+        let led = egui::Rect::from_min_max(egui::pos2(rect.left() + 4.0, rect.bottom() - 3.0), egui::pos2(rect.right() - 4.0, rect.bottom() - 1.5));
+        p.rect_filled(led, 1.0, color);
+    }
+    let tc = if on { theme::blend(color, Color32::WHITE, 0.3) } else { theme::TEXT };
+    p.text(rect.center() - egui::vec2(0.0, if on { 0.5 } else { 0.0 }), egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(11.5), tc);
     resp
 }
 

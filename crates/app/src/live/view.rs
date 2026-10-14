@@ -223,10 +223,10 @@ impl LiveView {
                 if d.loaded && ui.small_button("⏏").on_hover_text("Eject").clicked() {
                     out.push(LiveAction::Eject(i));
                 }
-                if widgets::toggle(ui, d.quantize, "Q", theme::ACCENT, vec2(22.0, 18.0)).on_hover_text("Quantize").clicked() {
+                if widgets::toggle(ui, d.quantize, "Q", theme::accent(), vec2(22.0, 18.0)).on_hover_text("Quantize").clicked() {
                     out.push(LiveAction::Quantize(i, !d.quantize));
                 }
-                if widgets::toggle(ui, d.slip, "SLIP", theme::ACCENT, vec2(36.0, 18.0)).clicked() {
+                if widgets::toggle(ui, d.slip, "SLIP", theme::accent(), vec2(36.0, 18.0)).clicked() {
                     out.push(LiveAction::Slip(i, !d.slip));
                 }
             });
@@ -355,11 +355,11 @@ impl LiveView {
                             if n < 4 {
                                 let k = StemKind::ALL[3 - n as usize];
                                 let g = d.stem_gains[k.index()];
-                                (k.label().to_string(), if g > 0.01 { "on".into() } else { "muted".into() }, theme::rgb(k.color()), g > 0.01)
+                                (k.label().to_string(), if g > 0.01 { "on".into() } else { "muted".into() }, theme::stem_color(k), g > 0.01)
                             } else {
                                 let (l, p) = [("Acapella", StemPreset::Acapella), ("Instru", StemPreset::Instrumental), ("Drums", StemPreset::DrumsOnly), ("All", StemPreset::All)][n as usize - 4];
                                 let on = d.stem_gains == p.gains();
-                                (l.to_string(), String::new(), theme::ACCENT, on)
+                                (l.to_string(), String::new(), theme::accent(), on)
                             }
                         }
                         PadMode::Loops => {
@@ -473,7 +473,7 @@ impl LiveView {
             ui.add_enabled_ui(d.has_stems, |ui| {
                 for k in [StemKind::Vocals, StemKind::Other, StemKind::Bass, StemKind::Drums] {
                     let mut g = d.stem_gains[k.index()];
-                    if widgets::knob(ui, &mut g, 0.0..=1.0, 1.0, k.label(), theme::rgb(k.color()), 34.0).changed() {
+                    if widgets::knob(ui, &mut g, 0.0..=1.0, 1.0, k.label(), theme::stem_color(k), 34.0).changed() {
                         out.push(LiveAction::StemGain(i, k.index(), g));
                     }
                 }
@@ -577,7 +577,7 @@ impl LiveView {
             ui.label(RichText::new("MASTER").size(10.5).color(theme::TEXT_DIM));
             widgets::vu(ui, m.master_vu[0], m.master_vu[1], vec2(22.0, 110.0));
             let mut v = m.master;
-            if widgets::knob(ui, &mut v, 0.0..=1.0, 0.8, "MASTER", theme::ACCENT, 38.0).changed() {
+            if widgets::knob(ui, &mut v, 0.0..=1.0, 0.8, "MASTER", theme::accent(), 38.0).changed() {
                 out.push(LiveAction::MasterVol(v));
             }
             ui.horizontal(|ui| {

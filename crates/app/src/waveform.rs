@@ -122,7 +122,7 @@ pub fn paint_wave(p: &Painter, rect: Rect, w: &WaveParams, t0: f64, t1: f64, mir
                         continue;
                     }
                     let g = params_gain(&wp_gains, k.index());
-                    let col = theme::rgb(k.color());
+                    let col = theme::stem_color(*k);
                     let col = if g < 0.05 { col.linear_multiply(0.18) } else { col.linear_multiply(0.45 + 0.55 * g.min(1.0)) };
                     mesh.add_colored_rect(Rect::from_min_max(pos2(x0, cy - acc - h), pos2(x1, cy - acc)), col);
                     if mirrored {

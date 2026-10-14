@@ -258,19 +258,28 @@ impl StudioView {
                 continue;
             }
             let sel = self.selection == Selection::Transition(k);
-            let col = if sel { theme::ACCENT } else { Color32::from_rgb(80, 110, 255) };
+            let tr = &self.mix.transitions[k];
+            let style_col = theme::style_color(tr.style);
+            let col = if sel { theme::accent() } else { style_col };
             p.rect_filled(Rect::from_min_max(pos2(xs, lane_top), pos2(xe, lane_bottom)), 0.0, col.linear_multiply(if sel { 0.10 } else { 0.05 }));
             for xx in [xs, xe] {
                 p.line_segment([pos2(xx, tstrip.bottom()), pos2(xx, lane_bottom)], Stroke::new(if sel { 2.0 } else { 1.0 }, col.linear_multiply(if sel { 0.9 } else { 0.5 })));
             }
-            // label chip on the ruler
-            let tr = &self.mix.transitions[k];
+            // label chip on the ruler, coloured by style: the longest label that fits
             let chip = Rect::from_min_max(pos2(xs + 7.0, tstrip.top() + 2.0), pos2((xe - 7.0).max(xs + 24.0), tstrip.bottom() - 2.0));
-            if chip.width() > 30.0 {
-                p.rect_filled(chip, 4.0, col.linear_multiply(0.7));
-                let full = format!("{} · {} bars", tr.style.label(), tr.beats / 4);
-                let label = if (full.len() as f32) * 6.0 < chip.width() - 6.0 { full } else { format!("{}b", tr.beats / 4) };
-                p.with_clip_rect(chip).text(chip.center(), egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(10.5), Color32::WHITE);
+            if chip.width() > 22.0 {
+                p.rect_filled(chip, 4.0, if sel { style_col } else { theme::blend(theme::PANEL, style_col, 0.55) });
+                if sel {
+                    p.rect_stroke(chip, 4.0, Stroke::new(1.5, theme::accent()), StrokeKind::Outside);
+                }
+                let bars = tr.beats / 4;
+                let abbrev: String = tr.style.label().split_whitespace().filter_map(|w| w.chars().next()).collect::<String>().to_uppercase();
+                let font = egui::FontId::proportional(10.5);
+                let label = [format!("{} · {bars} bars", tr.style.label()), format!("{} · {bars}", tr.style.label()), format!("{abbrev} {bars}"), format!("{bars}")]
+                    .into_iter()
+                    .find(|l| ui.fonts_mut(|f| f.layout_no_wrap(l.clone(), font.clone(), Color32::WHITE).size().x) < chip.width() - 8.0)
+                    .unwrap_or_default();
+                p.with_clip_rect(chip).text(chip.center(), egui::Align2::CENTER_CENTER, label, font, if sel { Color32::BLACK } else { Color32::WHITE });
             }
             let chip_r = ui.interact(chip, Id::new(("tchip", k)), Sense::click());
             if chip_r.clicked() {
@@ -471,7 +480,8 @@ impl StudioView {
         let header = Rect::from_min_size(r.min, vec2(r.width(), 20.0f32.min(r.height())));
         let body = Rect::from_min_max(pos2(r.left(), header.bottom()), r.max);
         p.rect_filled(r, 4.0, Color32::from_rgb(30, 32, 38));
-        p.rect_filled(header, egui::CornerRadius { nw: 4, ne: 4, sw: 0, se: 0 }, Color32::from_rgb(66, 58, 30).linear_multiply(if audible { 1.0 } else { 0.5 }));
+        // title bar tinted with the deck colour of its lane
+        p.rect_filled(header, egui::CornerRadius { nw: 4, ne: 4, sw: 0, se: 0 }, theme::blend(theme::PANEL, accent, if audible { 0.3 } else { 0.14 }));
         // key badge + title (kept visible when the clip is scrolled partly off screen)
         let mut tx = header.left().max(p.clip_rect().left()) + 4.0;
         if let Some(k) = a.and_then(|a| a.key) {
@@ -489,7 +499,7 @@ impl StudioView {
             if !audible {
                 p.rect_filled(r, 4.0, Color32::from_black_alpha(110));
             }
-            p.rect_stroke(r, 4.0, Stroke::new(if sel { 2.0 } else { 1.0 }, if sel { theme::ACCENT } else { accent.linear_multiply(0.5) }), StrokeKind::Inside);
+            p.rect_stroke(r, 4.0, Stroke::new(if sel { 2.0 } else { 1.0 }, if sel { theme::accent() } else { accent.linear_multiply(0.5) }), StrokeKind::Inside);
             return;
         }
         // beat ruler (the track's own bar numbers) and alternating phrase shading
@@ -542,7 +552,7 @@ impl StudioView {
         if !audible {
             p.rect_filled(r, 4.0, Color32::from_black_alpha(110));
         }
-        p.rect_stroke(r, 4.0, Stroke::new(if sel { 2.0 } else { 1.0 }, if sel { theme::ACCENT } else { accent.linear_multiply(0.5) }), StrokeKind::Inside);
+        p.rect_stroke(r, 4.0, Stroke::new(if sel { 2.0 } else { 1.0 }, if sel { theme::accent() } else { accent.linear_multiply(0.5) }), StrokeKind::Inside);
     }
 
     /// Ruler strip at the top of a clip: bar numbers of the track (bar 1 = first downbeat), bar and
@@ -640,7 +650,7 @@ impl StudioView {
                 let top = body.bottom() - sh * stems.len() as f32 - 2.0;
                 for (j, k) in stems.iter().enumerate() {
                     let y = top + j as f32 * sh;
-                    let col = theme::rgb(k.color());
+                    let col = theme::stem_color(*k);
                     for s in 0..steps {
                         let f0 = s as f32 / steps as f32;
                         let f1 = (s + 1) as f32 / steps as f32;
