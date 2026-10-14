@@ -871,54 +871,96 @@ impl App {
         }
     }
 
+    /// The app header: window buttons (macOS), mark and name, the view switcher in the middle,
+    /// background jobs and tools on the right. Empty space drags the window; a double click
+    /// zooms it.
     fn top_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            crate::widgets::logo_mark(ui, 20.0, theme::accent());
-            ui.label(RichText::new("ClubCraft").strong().size(17.0).color(theme::accent()));
-            ui.add_space(12.0);
-            for (v, name) in [(View::Home, "Home"), (View::Library, "Library"), (View::Studio, "Studio"), (View::Live, "Live")] {
-                let sel = self.view == v;
-                let b = egui::Button::new(RichText::new(name).size(14.0).strong()).selected(sel).min_size(egui::vec2(86.0, 24.0));
-                let r = ui.add(b);
-                if sel {
-                    // accent underline marks the current view
-                    let rr = r.rect.shrink2(egui::vec2(10.0, 0.0));
-                    ui.painter().line_segment([rr.left_bottom() + egui::vec2(0.0, 2.0), rr.right_bottom() + egui::vec2(0.0, 2.0)], egui::Stroke::new(2.0, theme::accent()));
-                }
-                if r.clicked() {
-                    self.view = v;
-                }
+        use egui::{pos2, vec2, Align2, FontId, Rect, Sense, Stroke};
+        let full = ui.max_rect();
+        let p = ui.painter().clone();
+        // window drag area (widgets placed later take the pointer first)
+        let bg = ui.interact(full, ui.id().with("header-drag"), Sense::click_and_drag());
+        if bg.drag_started() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
+        if bg.double_clicked() {
+            let max = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
+        }
+        p.line_segment([full.left_bottom(), full.right_bottom()], Stroke::new(1.0, theme::HEADER_LINE));
+        let cy = full.center().y;
+
+        // ---- left: mark + name
+        let x0 = full.left() + crate::window_chrome::LIGHTS_W + 6.0;
+        let mut left = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_max(pos2(x0, full.top()), pos2(full.center().x - 200.0, full.bottom()))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        left.spacing_mut().item_spacing.x = 9.0;
+        crate::widgets::logo_mark(&mut left, 24.0, theme::TEXT);
+        left.label(RichText::new("ClubCraft").size(15.0).strong().color(theme::TEXT));
+
+        // ---- centre: view switcher (segmented control)
+        let views = [(View::Home, "Home", "⌘1"), (View::Library, "Library", "⌘2"), (View::Studio, "Studio", "⌘3"), (View::Live, "Live", "⌘4")];
+        let (seg_w, seg_h, pad) = (92.0, 28.0, 3.0);
+        let track = Rect::from_center_size(pos2(full.center().x, cy), vec2(seg_w * views.len() as f32 + 2.0 * pad, seg_h + 2.0 * pad));
+        p.rect_filled(track, 9.0, theme::SEG_TRACK);
+        for (k, (v, name, key)) in views.into_iter().enumerate() {
+            let r = Rect::from_min_size(pos2(track.left() + pad + seg_w * k as f32, track.top() + pad), vec2(seg_w, seg_h));
+            let resp = ui.interact(r, ui.id().with(("view", k)), Sense::click()).on_hover_text(format!("{name}  {key}"));
+            let sel = self.view == v;
+            if sel {
+                p.rect_filled(r, 7.0, theme::SEG_ON);
+                p.rect_stroke(r, 7.0, Stroke::new(1.0, theme::SEG_ON_LINE), egui::StrokeKind::Inside);
+            } else if resp.hovered() {
+                p.rect_filled(r, 7.0, theme::SEG_HOVER);
             }
-            ui.add_space(16.0);
-            if ui.button("+ Add music…").clicked() {
-                if let Some(folders) = rfd::FileDialog::new().set_title("Add music folder").pick_folders() {
-                    self.jobs.import(folders, true);
-                }
+            let col = if sel { theme::TEXT } else if resp.hovered() { theme::TEXT } else { theme::TEXT_DIM };
+            p.text(r.center(), Align2::CENTER_CENTER, name, FontId::proportional(13.5), col);
+            if resp.clicked() {
+                self.view = v;
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("⚙ Settings").clicked() {
-                    self.settings.open = !self.settings.open;
-                }
-                let p = &mut self.prefs;
-                egui::ComboBox::from_id_salt("quality")
-                    .selected_text(format!("Stems: {}", p.stem_quality))
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut p.stem_quality, "best".to_string(), "Best: RoFormer vocals + htdemucs_ft (~3.5 min/track)");
-                        ui.selectable_value(&mut p.stem_quality, "high".to_string(), "High: htdemucs_ft (~80 s/track)");
-                        ui.selectable_value(&mut p.stem_quality, "fast".to_string(), "Fast: htdemucs (~17 s/track)");
-                    });
-                ui.checkbox(&mut p.separate_stems, "Background stems").on_hover_text("Separate stems for every imported and opened track in the background (uses a lot of CPU / GPU for a while). Off: stems are separated on demand, e.g. when you export a mix or press 'Separate stems now' on a transition.");
-                let pending = self.jobs.pending();
-                if pending > 0 {
-                    if ui.small_button("Stop").clicked() {
-                        self.jobs.cancel_all();
-                    }
-                    ui.spinner();
-                    let label = self.sh.job_status.values().next().map(|s| s.label.clone()).unwrap_or_default();
-                    ui.label(RichText::new(format!("{pending} jobs · {label}")).color(theme::TEXT_DIM));
-                }
-            });
+        }
+
+        // ---- right: jobs, stems, add music, settings
+        let mut right = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_max(pos2(track.right() + 24.0, full.top()), pos2(full.right() - 14.0, full.bottom()))).layout(egui::Layout::right_to_left(egui::Align::Center)));
+        right.spacing_mut().item_spacing.x = 8.0;
+        let ui = &mut right;
+        let icon = |t: &str| egui::Button::new(RichText::new(t).size(15.0).color(theme::TEXT_DIM)).frame(false).min_size(vec2(30.0, 30.0)).corner_radius(7.0);
+        if ui.add(icon("⚙")).on_hover_text("Settings  ⌘,").clicked() {
+            self.settings.open = !self.settings.open;
+        }
+        if ui.add(icon("+")).on_hover_text("Add a music folder").clicked() {
+            if let Some(folders) = rfd::FileDialog::new().set_title("Add music folder").pick_folders() {
+                self.jobs.import(folders, true);
+            }
+        }
+        ui.add_space(2.0);
+        // stems: quality and background separation in one compact menu
+        let p2 = &mut self.prefs;
+        let q = match p2.stem_quality.as_str() {
+            "best" => "Best",
+            "high" => "High",
+            _ => "Fast",
+        };
+        let label = RichText::new(format!("Stems · {q}{}", if p2.separate_stems { " · auto" } else { "" })).size(12.5).color(theme::TEXT_DIM);
+        ui.menu_button(label, |ui| {
+            ui.set_min_width(300.0);
+            ui.label(RichText::new("Stem quality").size(11.5).color(theme::TEXT_DIM));
+            ui.selectable_value(&mut p2.stem_quality, "best".to_string(), "Best: RoFormer vocals + htdemucs_ft (~3.5 min/track)");
+            ui.selectable_value(&mut p2.stem_quality, "high".to_string(), "High: htdemucs_ft (~80 s/track)");
+            ui.selectable_value(&mut p2.stem_quality, "fast".to_string(), "Fast: htdemucs (~17 s/track)");
+            ui.separator();
+            ui.checkbox(&mut p2.separate_stems, "Separate in the background").on_hover_text("Separate stems for every imported and opened track in the background (uses a lot of CPU / GPU for a while). Off: stems are separated on demand, e.g. when you export a mix or press 'Stems missing' in the studio.");
         });
+        let pending = self.jobs.pending();
+        if pending > 0 {
+            ui.add_space(6.0);
+            if ui.add(egui::Button::new(RichText::new("Stop").size(12.0)).corner_radius(6.0)).on_hover_text("Stop all background jobs").clicked() {
+                self.jobs.cancel_all();
+            }
+            let label = self.sh.job_status.values().next().map(|s| s.label.clone()).unwrap_or_default();
+            let txt = format!("{pending} job{} · {label}", if pending == 1 { "" } else { "s" });
+            ui.add(egui::Label::new(RichText::new(txt).size(12.0).color(theme::TEXT_DIM)).truncate()).on_hover_text("Background jobs: analysis and stem separation");
+            ui.add(egui::Spinner::new().size(13.0));
+        }
     }
 }
 
@@ -946,7 +988,9 @@ impl eframe::App for App {
         let dropped: Vec<std::path::PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect());
         self.studio.consumed_drop = false;
 
-        egui::Panel::top("top").exact_size(36.0).show(ui, |ui| self.top_bar(ui));
+        crate::window_chrome::place_traffic_lights();
+        let header = egui::Frame::new().fill(theme::HEADER).inner_margin(egui::Margin::ZERO);
+        egui::Panel::top("top").exact_size(crate::window_chrome::HEADER_H).resizable(false).frame(header).show(ui, |ui| self.top_bar(ui));
         let import_dropped = |app: &mut Self| {
             if !dropped.is_empty() && !app.studio.consumed_drop {
                 app.jobs.import(dropped.clone(), true);

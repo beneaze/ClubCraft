@@ -4,6 +4,13 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 pub const BG: Color32 = Color32::from_rgb(14, 15, 18);
 pub const PANEL: Color32 = Color32::from_rgb(24, 26, 31);
 pub const PANEL_HI: Color32 = Color32::from_rgb(34, 37, 44);
+/// App header and its view switcher.
+pub const HEADER: Color32 = Color32::from_rgb(19, 20, 24);
+pub const HEADER_LINE: Color32 = Color32::from_rgb(38, 40, 47);
+pub const SEG_TRACK: Color32 = Color32::from_rgb(29, 31, 37);
+pub const SEG_HOVER: Color32 = Color32::from_rgb(38, 41, 48);
+pub const SEG_ON: Color32 = Color32::from_rgb(56, 60, 70);
+pub const SEG_ON_LINE: Color32 = Color32::from_rgb(72, 77, 89);
 pub const LINE: Color32 = Color32::from_rgb(48, 52, 60);
 pub const TEXT: Color32 = Color32::from_rgb(220, 224, 232);
 pub const TEXT_DIM: Color32 = Color32::from_rgb(130, 136, 148);
