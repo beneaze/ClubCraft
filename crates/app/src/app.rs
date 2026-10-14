@@ -101,7 +101,14 @@ impl App {
         let lib = Library::open_default().expect("open library");
         let mut sh = Shared { deck_count: 2, ..Default::default() };
         sh.reload(&lib);
-        let jobs = Jobs::new(Default::default());
+        let mut job_settings = crate::pipeline::Settings::default();
+        if let Some(q) = cc.storage.and_then(|s| eframe::get_value::<String>(s, "stems_quality")) {
+            job_settings.quality = q;
+        }
+        if let Some(a) = cc.storage.and_then(|s| eframe::get_value::<bool>(s, "auto_stems")) {
+            job_settings.separate_stems = a;
+        }
+        let jobs = Jobs::new(job_settings);
         // Always start on the home page (unless `--view` says otherwise).
         let mut view = View::Home;
         // Developer conveniences: `--import <path>` and `--view library|studio|live`.
@@ -652,6 +659,11 @@ impl eframe::App for App {
         eframe::set_value(storage, "view", &self.view);
         eframe::set_value(storage, "audio", &self.settings.audio);
         eframe::set_value(storage, "midi_port", &self.settings.midi_port);
+        {
+            let js = self.jobs.settings.lock();
+            eframe::set_value(storage, "stems_quality", &js.quality);
+            eframe::set_value(storage, "auto_stems", &js.separate_stems);
+        }
         self.save_mix();
         if self.studio.mix.id > 0 {
             eframe::set_value(storage, "mix", &self.studio.mix.id);
