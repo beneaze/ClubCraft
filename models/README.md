@@ -65,3 +65,20 @@ mkdir -p cache/allin1 && for f in harmonix-fold{0-0vra4ys2,1-3ozjhtsj,2-gmgo0nsy
   curl -L -o cache/allin1/$f.pth https://huggingface.co/taejunkim/allinone/resolve/main/$f.pth; done
 .venv/bin/python export_allin1.py export --out ../../models
 ```
+
+## COCOLA (mashup finder re-ranking)
+
+`cocola.onnx` (EfficientNet-B0 embeddings, 19 MB), `cocola_w.bin` (bilinear similarity) and
+`cocola.json`, exported from the official COCOLA_HP_v1 checkpoint (MIT,
+github.com/gladia-research-group/cocola; trained on MoisesDB, Slakh2100 and CocoChorales, and MoisesDB is
+non-commercial). The checkpoint is loaded with `torch.load(weights_only=True)`.
+
+```sh
+cd tools/model-export
+uv pip install --python .venv/bin/python efficientnet_pytorch==0.7.1 librosa==0.10.2.post1 gdown==5.2.0
+.venv/bin/python -m gdown --fuzzy "https://drive.google.com/file/d/1S-_OvnDwNFLNZD5BmI1Ouck_prutRVWZ/view" -O cocola_hp_v1.ckpt
+.venv/bin/python export_cocola.py --ckpt cocola_hp_v1.ckpt --out ../../models
+cargo test --release -p clubcraft-analysis --test cocola_ref   # front end vs librosa, embeddings vs PyTorch
+```
+
+Without these files the finder works with the rule-based score only.

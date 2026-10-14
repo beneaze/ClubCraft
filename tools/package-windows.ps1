@@ -32,7 +32,7 @@ if (-not (Test-Path "$dist\DirectML.dll")) {
 
 # Models: ONNX files + manifests (CoreML packages are macOS-only).
 if (Test-Path "models") {
-  Get-ChildItem "models" -Include *.json, *.onnx, *.onnx.data -File -Recurse | Where-Object { $_.Name -notlike "*_ref_*" -and $_.Name -notlike "htdemucs_6s*" } | ForEach-Object { Copy-Item $_.FullName "$dist\models" }
+  Get-ChildItem "models" -Include *.json, *.onnx, *.onnx.data, cocola_w.bin -File -Recurse | Where-Object { $_.Name -notlike "*_ref_*" -and $_.Name -notlike "htdemucs_6s*" } | ForEach-Object { Copy-Item $_.FullName "$dist\models" }
 }
 Copy-Item "README.md" $dist
 Copy-Item "models\README.md" "$dist\models\README.md" -ErrorAction SilentlyContinue

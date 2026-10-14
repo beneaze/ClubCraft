@@ -157,7 +157,7 @@ pub fn change_marker() -> std::path::PathBuf {
 
 fn tools() -> Value {
     let ids = json!({"type": "array", "items": {"type": "integer"}, "description": "Track ids (from search_tracks)."});
-    let style = json!({"type": "string", "enum": ["stem_blend", "bass_swap", "crossfade", "vocal_over", "filter_out", "echo_out", "cut"], "description": "Transition style. stem_blend needs stems on both tracks (bass_swap is played otherwise)."});
+    let style = json!({"type": "string", "enum": ["stem_blend", "bass_swap", "crossfade", "vocal_over", "filter_out", "echo_out", "cut", "mashup"], "description": "Transition style. stem_blend, vocal_over and mashup need stems on both tracks (bass_swap is played otherwise). mashup: the outgoing vocals sing over the incoming instrumental for the whole transition."});
     let ro = json!({"readOnlyHint": true, "openWorldHint": false});
     let rw = json!({"readOnlyHint": false, "destructiveHint": false, "openWorldHint": false});
     let tool = |name: &str, title: &str, desc: &str, props: Value, required: &[&str], ann: &Value| {
@@ -279,6 +279,36 @@ fn tools() -> Value {
                 "snap": {"type": "string", "enum": ["beat", "bar", "none"], "description": "Default bar."}
             }),
             &["mix_id", "index"],
+            &rw,
+        ),
+        tool(
+            "find_mashups",
+            "Find mashups",
+            "Find where the vocals of a track fit over the instrumental of other tracks (vocals of A over the instrumental of B, with key shift and tempo change). Scores every 16-bar placement bar by bar for harmony, masking and leftover vocals, then re-ranks the best with a neural network (COCOLA). Needs stems on both tracks. Bars are 1-based (bar 1 = first downbeat).",
+            json!({
+                "vocal_track_id": {"type": "integer"},
+                "vocal_bar": {"type": "integer", "description": "Use the vocal phrase starting at this bar. Default: the strongest vocal phrases."},
+                "bars": {"type": "integer", "enum": [8, 16, 32], "description": "Phrase length, default 16."},
+                "key_range": {"type": "integer", "description": "Allowed key shift of the vocals in ± semitones, default 2."},
+                "tempo_tolerance_pct": {"type": "number", "description": "Allowed tempo change of the vocals in ± %, default 6."},
+                "instrumental_track_ids": ids,
+                "rerank": {"type": "boolean", "description": "Neural re-ranking of the best 20 (a few seconds), default true."},
+                "limit": {"type": "integer", "description": "Default 15."}
+            }),
+            &["vocal_track_id"],
+            &ro,
+        ),
+        tool(
+            "create_mashup_mix",
+            "Create mashup mix",
+            "Create a two-track mix from a find_mashups result: the vocal track plays 16 bars before its phrase, then its vocals sing over the instrumental, which continues to its end.",
+            json!({
+                "vocal_track_id": {"type": "integer"}, "instrumental_track_id": {"type": "integer"},
+                "vocal_bar": {"type": "integer"}, "instrumental_bar": {"type": "integer"},
+                "bars": {"type": "integer"}, "key_shift": {"type": "integer"},
+                "name": {"type": "string"}
+            }),
+            &["vocal_track_id", "instrumental_track_id", "vocal_bar", "instrumental_bar"],
             &rw,
         ),
         tool(
@@ -666,6 +696,37 @@ fn call_tool(name: &str, a: &Value, call: &Call) -> Result<Value> {
             }
             save_and_view(&lib, &mut mix)
         }
+        "find_mashups" => find_mashups(&lib, a, call),
+        "create_mashup_mix" => {
+            let analyses = lib.all_analyses()?;
+            let (v, i) = (arg_i64(a, "vocal_track_id")?, arg_i64(a, "instrumental_track_id")?);
+            for id in [v, i] {
+                if analyses.get(&id).and_then(|x| x.grid).is_none() {
+                    bail!("track {id} is not analysed");
+                }
+            }
+            let m = clubcraft_analysis::mashup::Match {
+                vocal_track: v,
+                vocal_bar: arg_i64(a, "vocal_bar")? as i32 - 1,
+                inst_track: i,
+                inst_bar: arg_i64(a, "instrumental_bar")? as i32 - 1,
+                bars: a.get("bars").and_then(|x| x.as_u64()).unwrap_or(16).clamp(4, 64) as usize,
+                key_shift: a.get("key_shift").and_then(|x| x.as_i64()).unwrap_or(0).clamp(-6, 6) as i32,
+                tempo_ratio: 1.0,
+                score: 0.0,
+                harmony: 0.0,
+                harmony_min: 0.0,
+                masking: 0.0,
+                residual_vocals: 0.0,
+                per_bar: vec![],
+                learned: None,
+            };
+            let title = |id: TrackId| lib.track(id).ok().flatten().map(|t| if t.title.is_empty() { t.display_name() } else { t.title }).unwrap_or_default();
+            let name = opt_str(a, "name").map(str::to_string).unwrap_or_else(|| format!("{} × {}", title(v), title(i)));
+            let mut mix = crate::mashup::mashup_mix(&name, &m, &analyses, 16).ok_or_else(|| anyhow!("could not build the mix"))?;
+            mix.keylock = crate::prefs::Prefs::load().mix_keylock;
+            save_and_view(&lib, &mut mix)
+        }
         "export_mix" => export_mix(&lib, a, call),
         "export_virtualdj" => export_virtualdj(&lib, a),
         _ => bail!("unknown tool `{name}`"),
@@ -841,6 +902,51 @@ fn export_mix(lib: &Library, a: &Value, call: &Call) -> Result<Value> {
     }))
 }
 
+fn find_mashups(lib: &Library, a: &Value, call: &Call) -> Result<Value> {
+    let vocal = arg_i64(a, "vocal_track_id")?;
+    let opts = clubcraft_analysis::mashup::MatchOptions {
+        bars: a.get("bars").and_then(|v| v.as_u64()).unwrap_or(16).clamp(4, 64) as usize,
+        key_range: a.get("key_range").and_then(|v| v.as_i64()).unwrap_or(2).clamp(0, 6) as i32,
+        tempo_tolerance: opt_f64(a, "tempo_tolerance_pct").unwrap_or(6.0).clamp(0.0, 20.0) / 100.0,
+        max_results: a.get("limit").and_then(|v| v.as_u64()).unwrap_or(15).clamp(1, 100) as usize,
+        ..Default::default()
+    };
+    let q = crate::mashup::Query {
+        vocal,
+        vocal_bar: a.get("vocal_bar").and_then(|v| v.as_i64()).map(|b| b as i32 - 1),
+        candidates: if a.get("instrumental_track_ids").is_some() { Some(ids_arg(a, "instrumental_track_ids")?) } else { None },
+        opts,
+        rerank: opt_bool(a, "rerank").unwrap_or(true),
+    };
+    let found = crate::mashup::run(&q, &call.cancel, &mut |f, l| call.progress(f as f64, 1.0, l))?;
+    let analyses = lib.all_analyses()?;
+    let title = |id: TrackId| lib.track(id).ok().flatten().map(|t| t.display_name()).unwrap_or_default();
+    let matches: Vec<Value> = found
+        .iter()
+        .map(|m| {
+            let (tv, ti) = crate::mashup::match_times(m, &analyses).unwrap_or((0.0, 0.0));
+            json!({
+                "instrumental_track_id": m.inst_track,
+                "instrumental": title(m.inst_track),
+                "instrumental_bar": m.inst_bar + 1,
+                "instrumental_start_sec": r2(ti),
+                "vocal_bar": m.vocal_bar + 1,
+                "vocal_start_sec": r2(tv),
+                "bars": m.bars,
+                "key_shift": m.key_shift,
+                "tempo_change_pct": r2((m.tempo_ratio - 1.0) * 100.0),
+                "score": r2(m.score as f64),
+                "harmony": r2(m.harmony as f64),
+                "weakest_4_bars": r2(m.harmony_min as f64),
+                "masking": r2(m.masking as f64),
+                "leftover_vocals": r2(m.residual_vocals as f64),
+                "ai_score": m.learned.map(|l| r2(l as f64)),
+            })
+        })
+        .collect();
+    Ok(json!({"vocal_track_id": vocal, "vocals": title(vocal), "matches": matches}))
+}
+
 fn virtualdj_running() -> bool {
     let probe = if cfg!(windows) {
         std::process::Command::new("tasklist").args(["/FI", "IMAGENAME eq virtualdj.exe", "/NH"]).output().map(|o| String::from_utf8_lossy(&o.stdout).to_lowercase().contains("virtualdj"))
@@ -895,7 +1001,7 @@ mod tests {
     fn tool_schemas_are_objects() {
         let t = tools();
         let names: Vec<&str> = t.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names.len(), 15);
+        assert_eq!(names.len(), 17);
         for tool in t.as_array().unwrap() {
             assert_eq!(tool["inputSchema"]["type"], "object");
             for r in tool["inputSchema"]["required"].as_array().unwrap() {

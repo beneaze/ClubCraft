@@ -57,3 +57,36 @@ report `notifications/progress` when the client sends a progress token, and stop
 in-process mutex plus an OS file lock on `<data>/heavy.lock` shared with the app. After every write
 the server touches `<data>/.library-changed`; the app polls its mtime once per second and reloads
 the library, and the open mix too if it has no unsaved edits.
+
+## Mashup finder
+
+`clubcraft-analysis::mashup` holds the features and the scorer, `crates/app/src/mashup.rs` the
+search job and `mashup_view.rs` the window.
+
+* **Features**: per bar of the beat grid, from the stems: chroma of the vocal, bass and melody
+  stems (16384-point STFT, A440, log-compressed, salient notes only), the RMS level of every stem
+  and the melody's level in the vocal band (300 Hz to 3.4 kHz). They're stored in
+  `<data>/Mashup/<hash>.ccmf` (about 6 kB per track), written by the analysis when stems exist,
+  and computed on demand for older tracks.
+* **Score** for "vocals of A, bars a..a+n, shifted k semitones, over the instrumental of B from
+  bar b":
+  * per bar, a directional interval-consonance table applied to the two chroma vectors
+    (`CONSONANCE`), with bass weight 0.45;
+  * calibrated to 0..1 (random ≈ 0.5, own instrumental ≈ 0.65), combined as 0.7·mean + 0.3·weakest
+    4 bars;
+  * minus masking, leftover vocals of B, tempo cost (quadratic within the tolerance) and key cost,
+    plus a phrase bonus.
+  * `examples/mashup_eval.rs` measures it: own pairing vs its ±1-2 semitone shifts AUC 0.93,
+    vs random placements 0.78. Chroma cosine scores 0.84 / 0.72, beat resolution doesn't help.
+* **Search**: every vocal phrase (default: the 3 strongest) × every phrase-aligned bar of every
+  track with stems × key shifts, in parallel. That's under 1 ms for 17 tracks.
+* **Re-ranking**: COCOLA (`analysis::cocola`).
+  * The librosa front end (STFT, median-filter HPSS, Slaney mel, dB) is ported to Rust and matches
+    librosa within 0.003 dB (`tests/cocola_ref.rs`), and the ONNX embeddings match PyTorch within 1e-5.
+  * Two 5 s snippets per candidate: the vocals stretched and pitch-shifted with Signalsmith, as the
+    mix plays them, and the instrumental (drums + bass + melody).
+  * Final score = 0.6 rule + 0.4 learned (AUC vs random: 0.78 rule, 0.79 learned, 0.84 blend).
+* **Result**: a `TransitionStyle::Mashup`: the outgoing instrumental and the incoming instrumental
+  swap within the first bar, the outgoing vocals sing for the whole transition, the incoming
+  vocals return on its last beat. Previews play on the studio decks through a separate
+  `MixPlayer` (`LiveEngine::preview_player`).

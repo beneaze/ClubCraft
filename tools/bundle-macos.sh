@@ -19,6 +19,8 @@ for m in models/htdemucs.mlmodelc models/htdemucs_ft_*.mlmodelc models/melroform
   [ -d "$m" ] && cp -R "$m" "$APP/Contents/Resources/models/"
 done
 [ -f models/allin1.onnx ] && cp models/allin1.onnx "$APP/Contents/Resources/models/"
+# COCOLA (mashup finder re-ranking, ONNX, 19 MB)
+[ -f models/cocola.onnx ] && cp models/cocola.onnx models/cocola_w.bin models/cocola.json "$APP/Contents/Resources/models/"
 if [ "$1" = "--with-onnx" ]; then cp models/htdemucs*.onnx models/melroformer.onnx "$APP/Contents/Resources/models/" 2>/dev/null || true; fi
 rm -f "$APP"/Contents/Resources/models/*_ref_*
 cat > "$APP/Contents/Info.plist" <<PLIST

@@ -60,11 +60,13 @@
 
 pub mod allinone;
 pub mod beatgrid;
+pub mod cocola;
 pub mod cues;
 mod dsp;
 pub mod energy;
 pub mod frontend;
 pub mod key;
+pub mod mashup;
 pub mod loudness;
 pub mod structure;
 pub mod waveform;

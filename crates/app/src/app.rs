@@ -96,6 +96,7 @@ pub struct App {
     applied_prefs: Option<crate::prefs::Prefs>,
     pub mix_summaries: Vec<crate::home::MixSummary>,
     prepared: (i64, usize),
+    pub mashup: crate::mashup_view::MashupView,
     /// Last seen change from `clubcraft mcp` (marker mtime) and when it was checked.
     external: (Option<std::time::SystemTime>, f64),
     queued: std::collections::HashSet<TrackId>,
@@ -130,7 +131,7 @@ impl App {
         }
         let audio_cfg: clubcraft_engine::AudioConfig = cc.storage.and_then(|s| eframe::get_value(s, "audio")).unwrap_or_default();
         let midi_port: Option<String> = cc.storage.and_then(|s| eframe::get_value(s, "midi_port"));
-        let mut app = App { lib, sh, jobs, view, library: LibraryView::default(), status: String::new(), devctl: crate::devctl::DevCtl::from_env(), live: Default::default(), decks: vec![Default::default(); 2], mixer: Default::default(), browser: LibraryView::default(), studio: Default::default(), mixes: Vec::new(), eng: crate::live::adapter::LiveEngine::start(audio_cfg.clone()), settings: crate::settings::Settings::new(audio_cfg, midi_port), home: Default::default(), prefs, applied_prefs: None, menu: crate::menu::AppMenu::install(&cc.egui_ctx), ui_ctx_cmd: None, mix_summaries: Vec::new(), prepared: (-1, 0), queued: Default::default(), external: (std::fs::metadata(crate::mcp::change_marker()).and_then(|m| m.modified()).ok(), 0.0) };
+        let mut app = App { lib, sh, jobs, view, library: LibraryView::default(), status: String::new(), devctl: crate::devctl::DevCtl::from_env(), live: Default::default(), decks: vec![Default::default(); 2], mixer: Default::default(), browser: LibraryView::default(), studio: Default::default(), mixes: Vec::new(), eng: crate::live::adapter::LiveEngine::start(audio_cfg.clone()), settings: crate::settings::Settings::new(audio_cfg, midi_port), home: Default::default(), prefs, applied_prefs: None, menu: crate::menu::AppMenu::install(&cc.egui_ctx), ui_ctx_cmd: None, mix_summaries: Vec::new(), prepared: (-1, 0), mashup: Default::default(), queued: Default::default(), external: (std::fs::metadata(crate::mcp::change_marker()).and_then(|m| m.modified()).ok(), 0.0) };
         app.settings.connect_midi(app.eng.handle.as_ref());
         if let Some(e) = &app.eng.error {
             app.status = e.clone();
@@ -245,6 +246,7 @@ impl App {
                     }
                     self.sh.reload(&self.lib);
                 }
+                LibraryAction::FindMashups(id) => self.mashup.open_for(Some(id), &self.sh),
                 LibraryAction::Reveal(id) => {
                     if let Some(t) = self.sh.track(id) {
                         crate::platform::reveal(&t.path);
@@ -265,6 +267,10 @@ impl App {
         use crate::studio::StudioAction as S;
         match c {
             M::Settings => self.settings.open = true,
+            M::MashupFinder => {
+                let id = self.studio.mix.tracks.first().map(|t| t.track_id);
+                self.mashup.open_for(id, &self.sh);
+            }
             M::NewMix => self.handle_home_actions(vec![H::NewMix { name: "New mix".into(), tracks: vec![], harmonize: false }]),
             M::AddMusic => self.handle_home_actions(vec![H::AddMusic]),
             M::ImportDjStudio => self.handle_studio_actions(vec![S::ImportDjStudio]),
@@ -399,11 +405,73 @@ impl App {
         }
     }
 
+    fn handle_mashup_actions(&mut self, actions: Vec<crate::mashup_view::MashupAction>) {
+        use crate::mashup_view::MashupAction as M;
+        let short = |sh: &Shared, id: TrackId| sh.track(id).map(|t| if t.title.is_empty() { t.display_name() } else { t.title.clone() }).unwrap_or_default();
+        for a in actions {
+            match a {
+                M::Preview(m) => {
+                    if let Some(mix) = crate::mashup::mashup_mix("Preview", &m, &self.sh.analyses, 4) {
+                        let tl = clubcraft_core::MixTimeline::build(&mix, &|id| self.sh.analyses.get(&id).cloned());
+                        let bar = self.sh.analyses.get(&m.vocal_track).and_then(|a| a.grid).map(|g| g.bar_len()).unwrap_or(2.0);
+                        let from = tl.transitions.first().map(|t| (t.start_sec - 2.0 * bar).max(0.0)).unwrap_or(0.0);
+                        self.eng.play_preview(&mix, from, &self.sh);
+                        self.status = format!("Preview: vocals of {} over {}", short(&self.sh, m.vocal_track), short(&self.sh, m.inst_track));
+                    }
+                }
+                M::StopPreview => self.eng.stop_preview(),
+                M::NewMix(m) => {
+                    self.eng.stop_preview();
+                    self.save_mix();
+                    let name = format!("{} × {}", short(&self.sh, m.vocal_track), short(&self.sh, m.inst_track));
+                    if let Some(mut mix) = crate::mashup::mashup_mix(&name, &m, &self.sh.analyses, 16) {
+                        mix.keylock = self.prefs.mix_keylock;
+                        if let Err(e) = self.lib.save_mix(&mut mix) {
+                            self.status = format!("save mix: {e}");
+                        }
+                        self.status = format!("Created the mix '{}'", mix.name);
+                        self.studio.set_mix(mix);
+                        self.studio.selection = crate::studio::Selection::Transition(0);
+                        self.refresh_mixes();
+                        self.view = View::Studio;
+                        self.mashup.open = false;
+                    }
+                }
+                M::Insert(m) => {
+                    if let Some(k) = self.studio.mix.tracks.iter().position(|t| t.track_id == m.vocal_track) {
+                        if crate::mashup::insert_after(&mut self.studio.mix, k, &m, &self.sh.analyses) {
+                            self.studio.changed();
+                            self.studio.selection = crate::studio::Selection::Transition(k);
+                            self.view = View::Studio;
+                            self.mashup.open = false;
+                            self.eng.stop_preview();
+                            self.status = "Mashup inserted into the mix".into();
+                        }
+                    }
+                }
+                M::Apply(m, k) => {
+                    if crate::mashup::apply_to_transition(&mut self.studio.mix, k, &m, &self.sh.analyses) {
+                        self.studio.changed();
+                        self.studio.selection = crate::studio::Selection::Transition(k);
+                        self.status = "Transition set to the mashup".into();
+                        self.mashup.open = false;
+                        self.eng.stop_preview();
+                    }
+                }
+            }
+        }
+    }
+
     fn handle_studio_actions(&mut self, actions: Vec<crate::studio::StudioAction>) {
         use crate::studio::StudioAction as A;
         for a in actions {
             match a {
                 A::SaveMix => self.save_mix(),
+                A::FindMashups(id) => self.mashup.open_for(id, &self.sh),
+                A::FindVocalOver(k) => {
+                    let mix = self.studio.mix.clone();
+                    self.mashup.open_for_transition(&mix, k, &self.sh);
+                }
                 A::ImportDjStudio => {
                     let tx = self.jobs.sender();
                     std::thread::spawn(move || {
@@ -561,6 +629,33 @@ impl App {
                     Some(("transition", n)) => crate::studio::Selection::Transition(n.parse().unwrap_or(0)),
                     _ => crate::studio::Selection::None,
                 }
+            }
+            "mashup" => {
+                // `mashup <track query>`: open the finder for that track's vocals
+                let q = arg.to_lowercase();
+                let id = self.sh.tracks.iter().find(|t| t.display_name().to_lowercase().contains(&q)).map(|t| t.id);
+                self.mashup.open_for(id, &self.sh);
+            }
+            "mashup-preview" | "mashup-newmix" | "mashup-use" => {
+                // act on result `arg` of the finder (tests)
+                use crate::mashup_view::MashupAction as M;
+                if let Some(m) = self.mashup.result(arg.trim().parse().unwrap_or(0)) {
+                    let a = match c {
+                        "mashup-preview" => M::Preview(m),
+                        "mashup-newmix" => M::NewMix(m),
+                        _ => M::Apply(m, self.mashup.transition_index().unwrap_or(0)),
+                    };
+                    self.handle_mashup_actions(vec![a]);
+                }
+            }
+            "engine-state" => {
+                let st = self.eng.state();
+                log::info!("engine: mix active {} playing {} time {:.2} | decks {:?}", st.mix.active, st.mix.playing, st.mix.time, st.decks.iter().map(|d| (d.loaded, d.playing, (d.position * 10.0).round() / 10.0, d.track_id)).collect::<Vec<_>>());
+            }
+            "mashup-transition" => {
+                let k: usize = arg.trim().parse().unwrap_or(0);
+                let mix = self.studio.mix.clone();
+                self.mashup.open_for_transition(&mix, k, &self.sh);
             }
             "view" => {
                 self.view = match arg.trim() {
@@ -779,6 +874,7 @@ impl eframe::App for App {
                 let (mut load, mut new) = (None, false);
                 let mixes = self.mixes.clone();
                 self.studio.ui(ui, &self.sh, &mixes, &mut sa, &mut load, &mut new);
+                sa.append(&mut self.studio.pending);
                 if new {
                     self.save_mix();
                     self.studio.set_mix(clubcraft_core::Mix::default());
@@ -802,6 +898,10 @@ impl eframe::App for App {
         self.handle_home_actions(home_actions);
         let mut sa = Vec::new();
         self.settings.ui(&ctx, self.eng.handle.as_ref(), &mut sa, &mut self.prefs);
+        let mut ma = Vec::new();
+        let previewing = self.eng.preview_player.is_some();
+        self.mashup.ui(&ctx, &self.sh, &self.studio.mix, previewing, &mut ma);
+        self.handle_mashup_actions(ma);
         self.apply_prefs(&ctx);
         for a in sa {
             match a {

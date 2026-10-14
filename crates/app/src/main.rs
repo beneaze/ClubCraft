@@ -11,6 +11,8 @@ mod interop;
 mod jobs;
 mod library_view;
 mod live;
+mod mashup;
+mod mashup_view;
 mod mcp;
 mod menu;
 mod pipeline;

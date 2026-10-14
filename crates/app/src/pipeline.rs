@@ -158,6 +158,59 @@ fn analyze_with(lib: &Library, id: TrackId, s: &Settings, structure: clubcraft_a
     progress(0.9, "Saving");
     wf.save(&t.hash)?;
     lib.save_analysis(id, &analysis)?;
+    if let (Some(sr), Some(grid)) = (sref.as_ref(), analysis.grid) {
+        progress(0.95, "Mashup features");
+        let f = mashup_features_from(sr, grid, &analysis);
+        if let Err(e) = save_mashup_features(&t.hash, &f) {
+            log::warn!("mashup features: {e:#}");
+        }
+    }
     let _ = Waveform::cache_path(&t.hash);
     Ok(())
+}
+
+// ------------------------------------------------------------------ mashup features
+
+pub fn mashup_features_path(hash: &str) -> std::path::PathBuf {
+    clubcraft_core::paths::data_dir().join("Mashup").join(format!("{hash}.ccmf"))
+}
+
+fn mashup_features_from(stems: &clubcraft_analysis::StemsRef, grid: clubcraft_core::BeatGrid, a: &clubcraft_core::Analysis) -> clubcraft_analysis::mashup::MashupFeatures {
+    let starts: Vec<f64> = a.sections.iter().map(|s| s.start).collect();
+    clubcraft_analysis::mashup::compute(stems, grid, a.duration, a.gain_db.unwrap_or(0.0), &starts)
+}
+
+fn save_mashup_features(hash: &str, f: &clubcraft_analysis::mashup::MashupFeatures) -> Result<()> {
+    let p = mashup_features_path(hash);
+    std::fs::create_dir_all(p.parent().unwrap())?;
+    std::fs::write(&p, f.to_bytes())?;
+    Ok(())
+}
+
+/// Cached mashup features of a track if they are current (same grid as the analysis).
+pub fn cached_mashup_features(hash: &str, a: &clubcraft_core::Analysis) -> Option<clubcraft_analysis::mashup::MashupFeatures> {
+    let f = clubcraft_analysis::mashup::MashupFeatures::from_bytes(&std::fs::read(mashup_features_path(hash)).ok()?)?;
+    let g = a.grid?;
+    (f.version == clubcraft_analysis::mashup::FEATURE_VERSION && (f.bpm - g.bpm).abs() < 1e-6 && (f.downbeat - g.downbeat).abs() < 1e-6).then_some(f)
+}
+
+/// Mashup features of a track, computed from its cached stems when missing or stale (~1-2 s,
+/// a few hundred MB while it runs; callers hold the heavy-work lock). `None` without stems.
+pub fn mashup_features(lib: &Library, id: TrackId) -> Result<Option<clubcraft_analysis::mashup::MashupFeatures>> {
+    let t = lib.track(id)?.context("unknown track")?;
+    let Some(a) = lib.analysis(id)? else { return Ok(None) };
+    if let Some(f) = cached_mashup_features(&t.hash, &a) {
+        return Ok(Some(f));
+    }
+    let Some(grid) = a.grid else { return Ok(None) };
+    let sp = stems_path(&t.hash);
+    if !sp.exists() {
+        return Ok(None);
+    }
+    let st = clubcraft_stems::load_stem_track(&sp)?;
+    let owned = OwnedStems::from_stem_track_partial(&st);
+    drop(st);
+    let f = mashup_features_from(&owned.as_ref(), grid, &a);
+    save_mashup_features(&t.hash, &f)?;
+    Ok(Some(f))
 }

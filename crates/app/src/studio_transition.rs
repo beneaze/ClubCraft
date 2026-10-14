@@ -48,6 +48,7 @@ fn style_help(s: TransitionStyle) -> &'static str {
         TransitionStyle::FilterOut => "High-pass sweep out of the old track while the new one comes in.",
         TransitionStyle::EchoOut => "Old track echoes out, new track drops in on the downbeat.",
         TransitionStyle::Cut => "Hard cut on the downbeat.",
+        TransitionStyle::Mashup => "The old track's vocals sing over the new track's instrumental for the whole transition.",
         TransitionStyle::Custom => "Your own curves.",
     }
 }
@@ -81,6 +82,10 @@ impl StudioView {
                 let c = a.compatibility(b);
                 let (txt, col) = if c >= 0.85 { ("harmonic", theme::OK) } else if c >= 0.5 { ("acceptable", theme::WARN) } else { ("key clash", Color32::from_rgb(255, 90, 90)) };
                 ui.label(RichText::new(txt).color(col).size(12.0)).on_hover_text(if c < 0.5 { "Try a key shift on one of the tracks (select the track)" } else { "Camelot-compatible keys" });
+            }
+            ui.add_space(12.0);
+            if ui.button("🎤 Find vocal-over point").on_hover_text("Find where the outgoing vocals sound best over the incoming instrumental").clicked() {
+                self.pending.push(crate::studio::StudioAction::FindVocalOver(k));
             }
         });
         ui.add_space(4.0);

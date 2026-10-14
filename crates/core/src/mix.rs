@@ -105,12 +105,15 @@ pub enum TransitionStyle {
     EchoOut,
     /// Hard cut on the downbeat.
     Cut,
+    /// Mashup: the outgoing vocals sing over the incoming instrumental for the whole transition
+    /// (instrumentals swap within the first bar, the incoming vocals return at the end).
+    Mashup,
     /// Lanes edited by hand.
     Custom,
 }
 
 impl TransitionStyle {
-    pub const ALL: [TransitionStyle; 8] = [
+    pub const ALL: [TransitionStyle; 9] = [
         TransitionStyle::StemBlend,
         TransitionStyle::BassSwap,
         TransitionStyle::Crossfade,
@@ -118,6 +121,7 @@ impl TransitionStyle {
         TransitionStyle::FilterOut,
         TransitionStyle::EchoOut,
         TransitionStyle::Cut,
+        TransitionStyle::Mashup,
         TransitionStyle::Custom,
     ];
 
@@ -130,6 +134,7 @@ impl TransitionStyle {
             TransitionStyle::FilterOut => "Filter out",
             TransitionStyle::EchoOut => "Echo out",
             TransitionStyle::Cut => "Cut",
+            TransitionStyle::Mashup => "Mashup",
             TransitionStyle::Custom => "Custom",
         }
     }
@@ -184,6 +189,21 @@ impl TransitionStyle {
                 Lane::new(Out, Volume, &[(0.0, 1.0), (len - 4.0_f32.min(len), 1.0), (len, 0.0)]),
                 Lane::new(In, Volume, &[(0.0, 0.0), (len - 0.01, 0.0), (len, 1.0)]),
             ],
+            TransitionStyle::Mashup => {
+                let bar = 4.0f32.min(len * 0.25);
+                vec![
+                    // outgoing: instrumental out over the first bar, vocals until the last bar
+                    Lane::new(Out, Stem(StemKind::Drums), &[(0.0, 1.0), (bar, 0.0)]),
+                    Lane::new(Out, Stem(StemKind::Bass), &[(0.0, 1.0), (bar * 0.5 - 0.01, 1.0), (bar * 0.5, 0.0)]),
+                    Lane::new(Out, Stem(StemKind::Other), &[(0.0, 1.0), (bar, 0.0)]),
+                    Lane::new(Out, Stem(StemKind::Vocals), &[(0.0, 1.0), (len - bar, 1.0), (len, 0.0)]),
+                    // incoming: instrumental in over the first bar, own vocals muted until the end
+                    Lane::new(In, Stem(StemKind::Drums), &[(0.0, 0.0), (bar, 1.0)]),
+                    Lane::new(In, Stem(StemKind::Bass), &[(0.0, 0.0), (bar * 0.5 - 0.01, 0.0), (bar * 0.5, 1.0)]),
+                    Lane::new(In, Stem(StemKind::Other), &[(0.0, 0.0), (bar, 1.0)]),
+                    Lane::new(In, Stem(StemKind::Vocals), &[(0.0, 0.0), (len - 1.0, 0.0), (len, 1.0)]),
+                ]
+            }
             TransitionStyle::Cut => vec![
                 Lane::new(Out, Volume, &[(0.0, 1.0), (len - 0.01, 1.0), (len, 0.0)]),
                 Lane::new(In, Volume, &[(0.0, 0.0), (len - 0.01, 0.0), (len, 1.0)]),

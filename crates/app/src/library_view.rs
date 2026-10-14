@@ -43,6 +43,7 @@ pub enum LibraryAction {
     Reanalyze(Vec<TrackId>),
     Remove(Vec<TrackId>),
     Reveal(TrackId),
+    FindMashups(TrackId),
 }
 
 /// Drag payload for tracks dragged out of the table.
@@ -248,6 +249,10 @@ impl LibraryView {
                         ui.separator();
                         if ui.button("Analyse + separate stems").clicked() {
                             actions.push(LibraryAction::Process(ids.clone()));
+                            ui.close();
+                        }
+                        if sh.analyses.get(&t.id).is_some_and(|a| a.stems_model.is_some()) && ui.button("🎤 Find mashups for the vocals").clicked() {
+                            actions.push(LibraryAction::FindMashups(t.id));
                             ui.close();
                         }
                         if ui.button("Re-analyse (keep stems)").clicked() {

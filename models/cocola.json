@@ -1,0 +1,17 @@
+{
+ "name": "cocola_hp_v1",
+ "sample_rate": 16000,
+ "seconds": 5,
+ "n_fft": 1024,
+ "win_length": 400,
+ "hop": 160,
+ "fmin": 60.0,
+ "fmax": 7800.0,
+ "n_mels": 64,
+ "frames": 501,
+ "hpss_kernel": 31,
+ "top_db": 80.0,
+ "embedding_dim": 512,
+ "licence": "MIT (code and weights; trained on MoisesDB/Slakh2100/CocoChorales)",
+ "source": "https://github.com/gladia-research-group/cocola (COCOLA_HP_v1)"
+}

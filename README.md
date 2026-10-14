@@ -127,6 +127,17 @@ Every screenshot here is the real app at work on a mix imported from DJ.Studio. 
 
 <br>
 
+## Find mashups
+
+<p align="center"><img src="docs/images/mashups.jpg" alt="The mashup finder: the vocals of Gorgon City's Mitsubishi matched against the library; every row shows the instrumental's bars, the vocal phrase, the key shift and tempo change, a strip with the fit of every bar, the rule score and the AI score, with preview, new mix and insert buttons" width="100%"></p>
+
+Want the vocals of one track over another? **🎤 Mashups** (⇧⌘M, the studio toolbar, the track inspector or the library's context menu) searches your library for the instrumentals that carry them, and tells you where.
+
+- **Where it fits, bar by bar.** For every 16-bar placement it compares the vocal notes with the instrumental's bass and chords, using a consonance table that knows a vocal a major seventh above a chord is colour but a semitone above it clashes. It also weighs masking by a loud melody in the vocal range, leftover vocals of the backing track, and the tempo and key change needed. On real tracks the original pairing beats its own ±1–2 semitone shifts 93 % of the time, where plain key matching or chroma similarity (as in AutoMashUpper) manages 84 %.
+- **An AI second opinion.** The best 20 candidates are rendered as the mix would play them, with the vocals shifted and stretched, and [COCOLA](https://github.com/gladia-research-group/cocola) (ICASSP 2025), a network trained on separated stems, listens to each. Blending both scores ranks the right match higher than either alone (84 % against random placements, from 78 %).
+- **Hear it, then use it.** ▶ plays the vocals over the instrumental straight away. **New mix** makes a two-track mashup, and **Insert** puts the instrumental after the vocal track in the open mix. Both use the new **Mashup** transition: the instrumentals swap within a bar and the vocals keep singing for the whole phrase.
+- **For transitions too.** In the transition editor, **🎤 Find vocal-over point** finds where the outgoing vocals sound best over the incoming track and sets the transition with one click.
+
 ## Everything in the box
 
 <table>
@@ -222,6 +233,7 @@ For Claude Desktop or other clients, add it to the MCP config (on Windows, the c
 | Library | `library_overview`, `search_tracks` (text, BPM, key, harmonic match, energy, stems), `get_track` (grid, key, loudness, sections, hot cues), `import_tracks` |
 | Processing | `analyze_tracks`, `separate_stems` (Fast to Best, with progress and cancel), `set_hot_cue` |
 | Studio | `list_mixes`, `get_mix`, `create_mix` (harmonic ordering), `edit_mix`, `set_transition`, `set_mix_points` |
+| Mashups | `find_mashups` (where the vocals of one track fit over other tracks' instrumentals), `create_mashup_mix` |
 | Export | `export_mix` (WAV plus cue sheet), `export_virtualdj` (grids, keys and cues into `database.xml`) |
 
 Separation and rendering share a lock with the app, so only one heavy job runs at a time.
@@ -256,4 +268,4 @@ Development builds: `tools/bundle-macos.sh` (macOS), and the `ClubCraft-windows-
 
 ## License
 
-ClubCraft is dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE). The Demucs weights are MIT (Meta Platforms). The Mel-Band RoFormer checkpoint (Kimberley Jensen) and ZFTurbo's implementation are MIT, and so is Signalsmith Stretch. DJ.Studio and VirtualDJ are trademarks of their respective owners, and ClubCraft is not affiliated with either.
+ClubCraft is dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE). The Demucs weights are MIT (Meta Platforms). The Mel-Band RoFormer checkpoint (Kimberley Jensen) and ZFTurbo's implementation are MIT, and so is Signalsmith Stretch. COCOLA (Ciranni et al.) is MIT; its checkpoint was trained on datasets that include MoisesDB, which is licensed for non-commercial research. DJ.Studio and VirtualDJ are trademarks of their respective owners, and ClubCraft is not affiliated with either.

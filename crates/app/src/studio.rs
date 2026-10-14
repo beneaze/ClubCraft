@@ -17,6 +17,10 @@ pub enum StudioAction {
     SaveMix,
     ImportDjStudio,
     ExportVirtualDj,
+    /// Open the mashup finder for the vocals of a track.
+    FindMashups(Option<clubcraft_core::TrackId>),
+    /// Find the best vocal-over point for transition `k`.
+    FindVocalOver(usize),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -30,6 +34,8 @@ pub struct StudioView {
     pub mix: Mix,
     pub timeline: MixTimeline,
     pub dirty: bool,
+    /// Actions raised outside `ui`'s `out` (inspector buttons), drained by the app.
+    pub pending: Vec<StudioAction>,
     pub selection: Selection,
     /// Pixels per second in the timeline.
     pub zoom: f32,
@@ -63,6 +69,7 @@ impl Default for StudioView {
             mix: Mix::default(),
             timeline: MixTimeline::default(),
             dirty: false,
+            pending: Vec::new(),
             selection: Selection::None,
             zoom: 6.0,
             scroll: 0.0,
@@ -343,6 +350,13 @@ impl StudioView {
             if ui.add_enabled(self.mix.tracks.len() > 2, egui::Button::new("✨ Harmonize")).on_hover_text("Re-order for harmonic mixing, smooth tempo and an energy arc").clicked() {
                 self.harmonize(sh);
             }
+            if ui.button("🎤 Mashups").on_hover_text("Find instrumentals that carry the vocals of a track (⇧⌘M)").clicked() {
+                let id = match self.selection {
+                    Selection::Track(i) => self.mix.tracks.get(i).map(|t| t.track_id),
+                    _ => self.mix.tracks.first().map(|t| t.track_id),
+                };
+                out.push(StudioAction::FindMashups(id));
+            }
             ui.menu_button("Order options ⏷", |ui| {
                 ui.set_min_width(240.0);
                 ui.label("Priority");
@@ -545,6 +559,12 @@ impl StudioView {
                 if let Some(e) = a.energy {
                     ui.label(RichText::new(format!("energy {e}")).color(theme::WARN));
                 }
+                if a.stems_model.is_some() {
+                    ui.add_space(12.0);
+                    if ui.button("🎤 Find a backing for these vocals").on_hover_text("Search the library for instrumentals that carry this track's vocals").clicked() {
+                        self.pending.push(StudioAction::FindMashups(Some(id)));
+                    }
+                }
             } else {
                 ui.label(RichText::new("analysing…").color(theme::TEXT_DIM));
             }
@@ -656,6 +676,7 @@ fn short_style(s: TransitionStyle) -> &'static str {
         TransitionStyle::FilterOut => "Filter",
         TransitionStyle::EchoOut => "Echo",
         TransitionStyle::Cut => "Cut",
+        TransitionStyle::Mashup => "Mashup",
         TransitionStyle::Custom => "Custom",
     }
 }

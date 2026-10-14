@@ -211,6 +211,8 @@ pub struct LiveEngine {
     /// Mix player per deck pair (studio preview on C/D, live mix on A/B).
     pub studio_player: Option<MixPlayer>,
     pub live_player: Option<MixPlayer>,
+    /// Mashup finder preview (on the studio decks, independent of the studio mix).
+    pub preview_player: Option<MixPlayer>,
     pub loading_mix: Option<u64>,
     pub export: Option<Export>,
     pub automix_queue: Vec<TrackId>,
@@ -243,6 +245,7 @@ impl LiveEngine {
             scratching: [false; 4],
             studio_player: None,
             live_player: None,
+            preview_player: None,
             loading_mix: None,
             export: None,
             automix_queue: Vec::new(),
@@ -280,6 +283,7 @@ impl LiveEngine {
     /// Start playing `mix` on `decks`. Tracks are loaded just in time (only the current and the
     /// next couple of tracks are kept in memory).
     pub fn play_mix(&mut self, mix: &Mix, decks: [usize; 2], from: f64, sh: &Shared) {
+        self.stop_preview();
         self.stop_mix(STUDIO_DECKS);
         self.stop_mix(LIVE_DECKS);
         let mix = playable_mix(mix, &|id| sh.analyses.get(&id).is_some_and(|a| a.stems_model.is_some()));
@@ -293,6 +297,27 @@ impl LiveEngine {
             self.studio_player = Some(p);
         } else {
             self.live_player = Some(p);
+        }
+    }
+
+    /// Play a short mix (a mashup preview) on the studio decks from `from` seconds.
+    pub fn play_preview(&mut self, mix: &Mix, from: f64, sh: &Shared) {
+        self.stop_preview();
+        self.stop_mix(STUDIO_DECKS);
+        self.stop_mix(LIVE_DECKS);
+        let mix = playable_mix(mix, &|id| sh.analyses.get(&id).is_some_and(|a| a.stems_model.is_some()));
+        let mut p = MixPlayer::lazy(&mix, &|id| sh.analyses.get(&id).cloned(), STUDIO_DECKS);
+        if let Some(h) = self.handle.as_mut() {
+            if let Err(e) = p.play(h, from) {
+                log::warn!("preview: {e:#}");
+            }
+        }
+        self.preview_player = Some(p);
+    }
+
+    pub fn stop_preview(&mut self) {
+        if let (Some(mut p), Some(h)) = (self.preview_player.take(), self.handle.as_mut()) {
+            let _ = p.stop(h);
         }
     }
 
@@ -400,8 +425,13 @@ impl LiveEngine {
         // Prefetch upcoming tracks of a playing mix.
         let st = self.state();
         let loader = self.loader();
-        for which in 0..2 {
-            let (player, h) = if which == 0 { (self.studio_player.as_mut(), self.handle.as_mut()) } else { (self.live_player.as_mut(), self.handle.as_mut()) };
+        for which in 0..3 {
+            let player = match which {
+                0 => self.studio_player.as_mut(),
+                1 => self.live_player.as_mut(),
+                _ => self.preview_player.as_mut(),
+            };
+            let h = self.handle.as_mut();
             if let (Some(p), Some(h)) = (player, h) {
                 match p.poll(h, &st, &loader) {
                     Ok(status) => {
