@@ -1237,6 +1237,10 @@ impl Deck {
 
     /// Render `XF_LEN` frames of the current path's continuation into the crossfade tail.
     fn capture_tail(&mut self) {
+        crate::prof::time(3, || self.capture_tail_inner())
+    }
+
+    fn capture_tail_inner(&mut self) {
         let mut tmp = std::mem::take(&mut self.xf_tmp);
         match self.cur_path {
             Path::Silent => tmp.fill(0.0),
@@ -1410,12 +1414,16 @@ impl Deck {
         let t = (pitch * 2f64.powf(self.key_shift as f64 / 12.0) * self.track_sr / self.sr_out) as f32;
         if (t - self.transpose).abs() > 1e-6 {
             self.transpose = t;
-            self.stretch.set_transpose_factor(t);
+            crate::prof::time(4, || self.stretch.set_transpose_factor(t));
         }
     }
 
     /// Reset the stretcher and prime it so its next output sample is the heard position.
     fn stretch_restart(&mut self, rate: f64) {
+        crate::prof::time(0, || self.stretch_restart_inner(rate))
+    }
+
+    fn stretch_restart_inner(&mut self, rate: f64) {
         self.stretch.reset();
         let speed = rate / self.src_per_out;
         self.update_transpose(speed);
@@ -1458,8 +1466,8 @@ impl Deck {
             d = self.feed_distance(self.feed_map(p_end + la));
         }
         let m = (d.round().max(0.0) as usize).min(FEED_CAP);
-        self.read_feed(m, true);
-        self.stretch.process(&self.feed_buf[..m * 2], &mut out[..n * 2]);
+        crate::prof::time(2, || self.read_feed(m, true));
+        crate::prof::time(1, || self.stretch.process(&self.feed_buf[..m * 2], &mut out[..n * 2]));
         self.pos = p_end;
     }
 

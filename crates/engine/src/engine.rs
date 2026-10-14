@@ -273,11 +273,15 @@ fn open_stream(
     let cell = SendCell(cell);
     let mut ret = Some(ret);
     let mut load = 0f32;
+    let mut health = crate::state::AudioHealth::default();
+    let mut last_start: Option<Instant> = None;
+    let mut window = (0f32, 0f32); // (peak in the current ~2 s window, seconds in it)
     let mc = master_ch;
     let cc = cue_ch;
     let err2 = errors.clone();
     let data_cb = move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
         let t0 = Instant::now();
+        let faults0 = major_faults();
         // SAFETY: exclusive access from the callback.
         let slot = unsafe { &mut *cell.0.get() };
         if eject.load(Ordering::Acquire) {
@@ -297,6 +301,7 @@ fn open_stream(
                 Err(_) => break,
             }
         }
+        side.core.prof[0] = t0.elapsed().as_micros() as u32;
         let frames = data.len() / ch;
         let mut done = 0;
         while done < frames {
@@ -325,6 +330,37 @@ fn open_stream(
         let l = t0.elapsed().as_secs_f32() / budget.max(1e-6);
         load = load * 0.9 + l * 0.1;
         side.core.cpu_load = load;
+        // health: overruns, late callbacks, peaks
+        health.buffer_frames = frames as u32;
+        if l > 1.0 {
+            health.overruns += 1;
+        }
+        if major_faults() > faults0 + 8 {
+            health.faulted += 1;
+            if l > 1.0 {
+                health.faulted_overruns += 1;
+            }
+        }
+        if let Some(prev) = last_start {
+            if t0.duration_since(prev).as_secs_f32() > 2.0 * budget + 0.002 {
+                health.late += 1;
+            }
+        }
+        last_start = Some(t0);
+        health.peak_load = health.peak_load.max(l);
+        window.0 = window.0.max(l);
+        window.1 += budget;
+        health.recent_peak = health.recent_peak.max(window.0);
+        if window.1 >= 2.0 {
+            health.recent_peak = window.0;
+            window = (0.0, 0.0);
+        }
+        let sections = side.core.audio.section_peak_us;
+        for (k, v) in crate::prof::take().into_iter().enumerate() {
+            health.deck_peak_us[k] = health.deck_peak_us[k].max(v);
+        }
+        side.core.audio = health;
+        side.core.audio.section_peak_us = sections;
         side.core.stream_errors = err2.load(Ordering::Relaxed);
     };
     let err_cb = move |e: cpal::Error| {
@@ -451,4 +487,18 @@ impl Drop for EngineHandle {
             let _ = j.join();
         }
     }
+}
+
+/// Page faults of the process so far (memory read back from swap, disk or the compressor).
+fn major_faults() -> i64 {
+    #[cfg(unix)]
+    {
+        // SAFETY: getrusage only writes the struct.
+        let mut u: libc::rusage = unsafe { std::mem::zeroed() };
+        if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut u) } == 0 {
+            // minor faults include pages macOS decompresses from its memory compressor
+            return u.ru_majflt as i64 + u.ru_minflt as i64;
+        }
+    }
+    0
 }

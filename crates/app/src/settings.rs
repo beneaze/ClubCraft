@@ -244,6 +244,10 @@ impl Settings {
         if let Some(h) = handle {
             let i = h.stream_info();
             ui.label(RichText::new(format!("Running: {} · {} Hz · {} ch · buffer {}{}", i.device, i.sample_rate, i.channels, i.buffer_frames.map(|b| b.to_string()).unwrap_or("default".into()), if i.cue_channels.is_some() { " · headphone cue on" } else { "" })).size(11.0).color(theme::TEXT_DIM));
+            let a = h.state().audio;
+            let txt = format!("Audio callback: {} frames · peak load {:.0} % · dropouts {}", a.buffer_frames, a.peak_load * 100.0, a.overruns + a.late);
+            let col = if a.overruns + a.late > 0 { theme::WARN } else { theme::TEXT_DIM };
+            ui.label(RichText::new(txt).size(11.0).color(col)).on_hover_text("Dropouts = callbacks that took longer than their buffer or started late. If they keep rising while playing, pick a larger buffer.");
         }
         if cfg != self.audio {
             self.audio = cfg.clone();

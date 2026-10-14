@@ -58,6 +58,8 @@ pub use mixer::{CrossfaderAssign, CrossfaderCurve, FaderCurve};
 pub use player::{CommandSink, MixPlayer, PrefetchStatus, TrackLoader};
 pub use render::{render_mix, render_mix_to_vec, RenderOptions, RenderReport};
 pub use state::*;
+pub mod pin;
+pub mod prof;
 pub use track::LoadedTrack;
 pub use wav::WavFormat;
 pub use clubcraft_core::{MixTimeline, ActiveTrack, TimelineTrack, TimelineTransition};

@@ -207,6 +207,9 @@ pub struct DeckState {
     pub filter: f32,
     pub filter_resonance: f32,
     pub fader: f32,
+    /// Volume automation of a mix player / automix on this channel (1 = none), on top of the
+    /// fader, in fader units.
+    pub auto_volume: f32,
     pub crossfader_assign: CrossfaderAssign,
     pub pfl: bool,
     /// Post-fader channel level.
@@ -300,6 +303,31 @@ pub struct EngineState {
     pub frames: u64,
     /// The audio callback was late / the device reported an error since start.
     pub stream_errors: u32,
+    pub audio: AudioHealth,
+}
+
+/// Real-time health of the audio callback since the stream started.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct AudioHealth {
+    /// Frames per callback (last).
+    pub buffer_frames: u32,
+    /// Callbacks that took longer than their buffer lasts (the output then has a gap).
+    pub overruns: u32,
+    /// Callbacks that started more than a buffer late (the system did not run us in time).
+    pub late: u32,
+    /// Highest callback time / buffer duration.
+    pub peak_load: f32,
+    /// Highest callback time / buffer duration over the last ~2 s.
+    pub recent_peak: f32,
+    /// Longest time (µs) spent in one callback on: commands, conductor, decks 1–4, mixer,
+    /// state publishing.
+    pub section_peak_us: [u32; 8],
+    /// Callbacks during which the process had to read memory back from swap / disk, and how
+    /// many of those overran.
+    pub faulted: u32,
+    pub faulted_overruns: u32,
+    /// Longest time (µs) in one callback per deck section ([`crate::prof::NAMES`]).
+    pub deck_peak_us: [u32; crate::prof::SECTIONS],
 }
 
 impl EngineState {

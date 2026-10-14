@@ -565,9 +565,15 @@ impl LiveView {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 3.0;
                 widgets::vu(ui, d.vu[0], d.vu[1], vec2(12.0, 84.0));
-                let mut v = d.fader;
-                if widgets::vfader(ui, &mut v, 1.0, vec2(34.0, 88.0), accent).changed() {
-                    out.push(LiveAction::Fader(i, v));
+                // the fader shows what plays: automix moves it with its volume automation
+                let auto = d.auto_volume.clamp(0.0, 1.0);
+                let mut v = d.fader * auto;
+                let r = widgets::vfader(ui, &mut v, 1.0, vec2(34.0, 88.0), accent);
+                if r.changed() {
+                    out.push(LiveAction::Fader(i, if auto > 0.05 { (v / auto).min(1.0) } else { v }));
+                }
+                if auto < 0.999 {
+                    r.on_hover_text(format!("Automix volume {:.0} %", auto * 100.0));
                 }
             });
         }

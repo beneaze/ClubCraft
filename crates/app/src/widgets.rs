@@ -201,3 +201,30 @@ pub fn play_button(ui: &mut Ui, playing: bool, enabled: bool, d: f32) -> Respons
     }
     resp
 }
+
+/// The ClubCraft mark: "CC" as two decks (two C platters around their spindles over a
+/// crossfader), `size` px wide. Same geometry as the app icon (`tools/make_icon.py`).
+pub fn logo_mark(ui: &mut Ui, size: f32, color: Color32) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(size, size * 0.62), Sense::hover());
+    let p = ui.painter();
+    // icon units: the mark spans x 0.195..0.805 and y 0.29..0.76 of the icon
+    let k = size / 0.61;
+    let at = |x: f32, y: f32| rect.min + vec2((x - 0.195) * k, (y - 0.29) * k);
+    let w = 0.058 * k;
+    for cx in [0.345, 0.655] {
+        let c = at(cx, 0.44);
+        let r = (0.15 - 0.029) * k;
+        let (gap, n) = (78f32, 40);
+        let (a0, a1) = ((gap / 2.0).to_radians(), (360.0 - gap / 2.0).to_radians());
+        let pts: Vec<egui::Pos2> = (0..=n).map(|i| a0 + (a1 - a0) * i as f32 / n as f32).map(|a| c + vec2(a.cos(), a.sin()) * r).collect();
+        for q in [pts[0], pts[n]] {
+            p.circle_filled(q, w / 2.0, color);
+        }
+        p.add(egui::Shape::line(pts, Stroke::new(w, color)));
+        p.circle_filled(c, 0.026 * k, color);
+    }
+    let fw = (0.018 * k).max(1.0);
+    p.line_segment([at(0.28, 0.715), at(0.72, 0.715)], Stroke::new(fw, color.gamma_multiply(0.45)));
+    p.rect_filled(Rect::from_center_size(at(0.5, 0.715), vec2(0.05 * k, 0.085 * k)), 0.012 * k, color);
+    resp
+}

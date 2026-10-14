@@ -20,6 +20,9 @@ midir = "0.11.1"
 hound = "3.5.1"
 triple_buffer = "9.0.0"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [build-dependencies]
 cc = "1.2"
 

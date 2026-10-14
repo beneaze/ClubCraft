@@ -37,6 +37,8 @@ pub struct DeckUi {
     pub filter: f32,
     pub gain: f32,
     pub fader: f32,
+    /// Automix volume on top of the fader (1 = none).
+    pub auto_volume: f32,
     pub pfl: bool,
     pub vu: [f32; 2],
     pub fx: [FxUi; 3],
@@ -80,6 +82,7 @@ impl Default for DeckUi {
             filter: 0.5,
             gain: 0.5,
             fader: 1.0,
+            auto_volume: 1.0,
             pfl: false,
             vu: [0.0; 2],
             fx: [FxUi { kind: 0, on: false, amount: 0.5, beats: 0.5 }, FxUi { kind: 2, on: false, amount: 0.5, beats: 1.0 }, FxUi { kind: 3, on: false, amount: 0.5, beats: 1.0 }],

@@ -94,6 +94,8 @@ impl HomeView {
             ui.add_space(18.0);
             ui.horizontal(|ui| {
                 ui.add_space(24.0);
+                crate::widgets::logo_mark(ui, 58.0, theme::accent());
+                ui.add_space(10.0);
                 ui.vertical(|ui| {
                     ui.label(RichText::new("ClubCraft").size(34.0).strong().color(theme::accent()));
                     ui.label(RichText::new("Design mixes with stems in the studio, perform them live on the decks.").size(15.0).color(theme::TEXT_DIM));

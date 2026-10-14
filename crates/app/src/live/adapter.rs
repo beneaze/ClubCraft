@@ -61,6 +61,24 @@ impl TrackCache {
         }
     }
 
+    /// Keep the tracks that decks and players hold locked in RAM, so the audio thread never
+    /// waits for memory the OS compressed or swapped out (runs for the life of the app).
+    fn spawn_pinner(&self) {
+        let inner = self.inner.clone();
+        let _ = std::thread::Builder::new().name("track-pinner".into()).spawn(move || {
+            let mut pinner = clubcraft_engine::pin::MemoryPinner::default();
+            loop {
+                let snapshot: Vec<Arc<LoadedTrack>> = inner.lock().values().cloned().collect();
+                // references: the cache, this snapshot, the pinner (if locked), then the users
+                let in_use: Vec<Arc<LoadedTrack>> = snapshot.iter().filter(|t| Arc::strong_count(t) > 2 + pinner.holds(t) as usize).cloned().collect();
+                drop(snapshot);
+                pinner.update(&in_use);
+                drop(in_use);
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+        });
+    }
+
     pub fn invalidate(&self, id: TrackId) {
         self.inner.lock().remove(&id);
     }
@@ -232,10 +250,12 @@ impl LiveEngine {
         if let Some(h) = &handle {
             let _ = h.send(Command::SetAutoGain(true));
         }
+        let cache = TrackCache::default();
+        cache.spawn_pinner();
         LiveEngine {
             handle,
             error,
-            cache: TrackCache::default(),
+            cache,
             sep: Arc::new(LiveSeparator::new()),
             tx,
             rx,
@@ -700,6 +720,7 @@ pub fn deck_ui(st: &EngineState, d: usize, sh: &Shared, fx_ui: &[FxUi; 3], loadi
     u.filter = ds.filter;
     u.gain = (ds.trim_db / 24.0 + 0.5).clamp(0.0, 1.0);
     u.fader = ds.fader;
+    u.auto_volume = ds.auto_volume;
     u.pfl = ds.pfl;
     u.vu = ds.level.peak;
     u.fx = *fx_ui;

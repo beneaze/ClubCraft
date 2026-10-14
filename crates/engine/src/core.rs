@@ -52,6 +52,10 @@ pub struct EngineCore {
     /// Smoothed callback load (set by the real-time wrapper).
     pub cpu_load: f32,
     pub stream_errors: u32,
+    /// Real-time diagnostics (set by the real-time wrapper): see [`EngineState::audio`].
+    pub audio: crate::state::AudioHealth,
+    /// Time (µs) per section in the current callback (see `AudioHealth::section_peak_us`).
+    pub prof: [u32; 8],
 }
 
 impl EngineCore {
@@ -82,6 +86,8 @@ impl EngineCore {
             state_in: None,
             cpu_load: 0.0,
             stream_errors: 0,
+            audio: Default::default(),
+            prof: [0; 8],
         }
     }
 
@@ -541,23 +547,31 @@ impl EngineCore {
 
     fn process_block(&mut self, n: usize) {
         let sr = self.sr as f64;
+        let t0 = std::time::Instant::now();
         {
             let garbage = &mut self.garbage;
             let mut drop_track = |t: Arc<LoadedTrack>| Self::dispose(garbage, Garbage::Track(t));
             self.mixer.extra_on = self.conductor.render_samples(n, sr, &mut self.mixer.extra);
             self.conductor.step(&mut self.decks, &mut self.mixer, n, sr, &mut drop_track);
         }
+        self.prof[1] += t0.elapsed().as_micros() as u32;
         self.update_master();
         self.sync_step();
         let active = self.deck_count;
         for d in 0..active {
+            let td = std::time::Instant::now();
             let deck = &mut self.decks[d];
             let bpm = deck.effective_bpm().unwrap_or(120.0).max(1.0);
             let beat = if deck.is_playing() { deck.beat_position() } else { None };
             self.ctxs[d] = FxCtx { sr: self.sr as f32, bpm, beat, beats_per_frame: bpm / 60.0 / sr };
             deck.process(&mut self.deck_bufs[d][..n * 2]);
+            if d < 4 {
+                self.prof[2 + d] += td.elapsed().as_micros() as u32;
+            }
         }
+        let tm = std::time::Instant::now();
         self.mixer.process(&mut self.deck_bufs, &self.ctxs, active, n, &mut self.master_buf, &mut self.cue_buf);
+        self.prof[6] += tm.elapsed().as_micros() as u32;
         if let Some(rec) = &mut self.recorder {
             if rec.slots() >= n * 2 {
                 for s in &self.master_buf[..n * 2] {
@@ -585,7 +599,13 @@ impl EngineCore {
             }
             done += n;
         }
+        let tp = std::time::Instant::now();
         self.publish();
+        self.prof[7] += tp.elapsed().as_micros() as u32;
+        for (k, v) in self.prof.iter_mut().enumerate() {
+            self.audio.section_peak_us[k] = self.audio.section_peak_us[k].max(*v);
+            *v = 0;
+        }
     }
 
     /// Fill a snapshot of the whole engine.
@@ -605,6 +625,7 @@ impl EngineCore {
             ds.filter = ch.filter_knob;
             ds.filter_resonance = ch.filter_resonance;
             ds.fader = ch.fader;
+            ds.auto_volume = ch.lane_volume;
             ds.crossfader_assign = ch.assign;
             ds.pfl = ch.pfl;
             ds.level = ch.levels();
@@ -634,6 +655,7 @@ impl EngineCore {
         st.cpu_load = self.cpu_load;
         st.frames = self.frames;
         st.stream_errors = self.stream_errors;
+        st.audio = self.audio;
     }
 
     pub fn snapshot(&self) -> EngineState {
