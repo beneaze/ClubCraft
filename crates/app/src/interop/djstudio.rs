@@ -2,7 +2,7 @@
 //! projects as ClubCraft mixes (track order, mix-in/out points, transition lengths and styles,
 //! key shifts and gains). Read-only: DJ.Studio's files are never modified.
 //!
-//! Format notes (see docs/research): every table is a folder of JSON files named by record key;
+//! Format notes: every table is a folder of JSON files named by record key;
 //! `audio-library` and `track-structures` records sit in hash buckets = (sum of the key's char
 //! codes) % 256 as unpadded lowercase hex.
 
