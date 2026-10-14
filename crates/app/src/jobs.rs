@@ -121,11 +121,12 @@ impl Jobs {
     }
 
     /// Full processing of a track: stems (if enabled) then analysis.
+    /// Analyse now (fast, without stems) and separate stems afterwards (if enabled); the
+    /// separation job re-analyses with the stems when it is done.
     pub fn process(&self, id: TrackId, priority: bool) {
+        self.cpu.push(Job::Analyze(id), priority);
         if self.settings.lock().separate_stems {
             self.gpu.push(Job::Separate(id), priority);
-        } else {
-            self.cpu.push(Job::Analyze(id), priority);
         }
     }
 
@@ -208,10 +209,11 @@ fn worker(q: Arc<Queue>, other: Arc<Queue>, tx: Sender<Event>, settings: Arc<Mut
                             if analyze {
                                 let needs = lib.analysis(id).ok().flatten().map(|a| a.version < clubcraft_core::Analysis::CURRENT_VERSION).unwrap_or(true);
                                 if needs {
+                                    // Quick analysis first (key, BPM, grid, cues in ~1 s), stems
+                                    // later; analysis is redone with the stems afterwards.
+                                    other_or_self(&q, &other, gpu, false).push(Job::Analyze(id), false);
                                     if s.separate_stems {
                                         other_or_self(&q, &other, gpu, true).push(Job::Separate(id), false);
-                                    } else {
-                                        other_or_self(&q, &other, gpu, false).push(Job::Analyze(id), false);
                                     }
                                 }
                             }
@@ -245,7 +247,10 @@ fn worker(q: Arc<Queue>, other: Arc<Queue>, tx: Sender<Event>, settings: Arc<Mut
                 other_or_self(&q, &other, gpu, false).push(Job::Analyze(id), true);
             }
             Job::Analyze(id) => {
-                let _heavy = HEAVY.lock();
+                // Only analysis with stems (and the optional structure model) is heavy; the quick
+                // analysis of a fresh import must not wait behind a long separation.
+                let has_stems = lib.track(id).ok().flatten().is_some_and(|t| clubcraft_core::library::stems_path(&t.hash).exists());
+                let _heavy = if has_stems { Some(HEAVY.lock()) } else { None };
                 let r = pipeline::analyze(&lib, id, &s, &mut |frac, label| {
                     let _ = tx.send(Event::Progress { track: Some(id), stage: Stage::Analyze, frac, label: label.to_string() });
                 });

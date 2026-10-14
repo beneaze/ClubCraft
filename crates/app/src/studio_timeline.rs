@@ -24,7 +24,7 @@ impl ShowMode {
     pub const ALL: [ShowMode; 5] = [ShowMode::All, ShowMode::Volume, ShowMode::Eq, ShowMode::Stems, ShowMode::None];
     pub fn label(self) -> &'static str {
         match self {
-            ShowMode::All => "Show all",
+            ShowMode::All => "Volume & stems",
             ShowMode::Volume => "Volume",
             ShowMode::Eq => "EQ & filter",
             ShowMode::Stems => "Stems",
@@ -73,10 +73,12 @@ impl StudioView {
         ui.allocate_rect(full, Sense::hover());
         let ruler_h = 24.0;
         let tempo_h = if self.tempo_open { 58.0 } else { 24.0 };
-        let lane_h = ((full.height() - ruler_h - tempo_h - 6.0) / MIX_LANES as f32).clamp(90.0, 300.0);
+        let lane_h = ((full.height() - ruler_h - 21.0 - tempo_h - 8.0) / MIX_LANES as f32).clamp(80.0, 300.0);
         let canvas = Rect::from_min_max(pos2(full.left() + HEADER_W + 4.0, full.top()), full.max);
         let ruler = Rect::from_min_size(canvas.min, vec2(canvas.width(), ruler_h));
-        let lanes: Vec<Rect> = (0..MIX_LANES).map(|l| Rect::from_min_size(pos2(canvas.left(), ruler.bottom() + 2.0 + l as f32 * (lane_h + 2.0)), vec2(canvas.width(), lane_h))).collect();
+        let strip_h = 20.0;
+        let tstrip = Rect::from_min_size(pos2(canvas.left(), ruler.bottom() + 1.0), vec2(canvas.width(), strip_h));
+        let lanes: Vec<Rect> = (0..MIX_LANES).map(|l| Rect::from_min_size(pos2(canvas.left(), tstrip.bottom() + 2.0 + l as f32 * (lane_h + 2.0)), vec2(canvas.width(), lane_h))).collect();
         let tempo = Rect::from_min_size(pos2(canvas.left(), lanes[MIX_LANES - 1].bottom() + 4.0), vec2(canvas.width(), tempo_h));
 
         // ----- lane headers
@@ -114,22 +116,32 @@ impl StudioView {
             self.add_tracks(sh, &p.0);
         }
         let total = self.timeline.total_secs.max(1.0) as f32;
-        if resp.hovered() || ui.rect_contains_pointer(canvas) {
+        if self.fit_request && self.timeline.total_secs > 0.0 {
+            self.zoom = (canvas.width() / total).clamp(0.2, 160.0);
+            self.scroll = 0.0;
+            self.fit_request = false;
+        }
+        if ui.rect_contains_pointer(canvas) {
             let (scroll, zoom_d, cmd) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta(), i.modifiers.command));
             if (cmd && scroll.y != 0.0) || zoom_d != 1.0 {
                 let f = if zoom_d != 1.0 { zoom_d } else { 1.0 + scroll.y / 300.0 };
                 let mouse_x = ui.input(|i| i.pointer.hover_pos()).map(|p| p.x - canvas.left()).unwrap_or(canvas.width() / 2.0);
                 let t_at = (self.scroll + mouse_x) / self.zoom;
-                self.zoom = (self.zoom * f).clamp(canvas.width() / total.max(1.0) * 0.9, 160.0);
+                self.zoom = (self.zoom * f).clamp(0.2, 160.0);
                 self.scroll = t_at * self.zoom - mouse_x;
             } else if scroll != egui::Vec2::ZERO {
+                // Manual scrolling takes over from "follow playhead" (press F or Follow to resume).
                 self.scroll -= scroll.x + scroll.y;
+                if self.playing {
+                    self.follow = false;
+                }
             }
         }
         if self.follow && self.playing {
+            // keep the playhead between 20 % and 80 % of the view; page smoothly when it leaves
             let x = self.position as f32 * self.zoom - self.scroll;
-            if x > canvas.width() * 0.85 || x < 0.0 {
-                self.scroll = self.position as f32 * self.zoom - canvas.width() * 0.25;
+            if x > canvas.width() * 0.8 || x < canvas.width() * 0.05 {
+                self.scroll = self.position as f32 * self.zoom - canvas.width() * 0.2;
             }
         }
         self.scroll = self.scroll.clamp(0.0, (total * self.zoom - canvas.width() * 0.5).max(0.0));
@@ -163,6 +175,7 @@ impl StudioView {
                 bar += if every >= 8.0 { every / 4.0 } else { 1.0 };
             }
         }
+        p.rect_filled(tstrip, 0.0, Color32::from_rgb(20, 22, 27));
         // lane backgrounds
         for (l, r) in lanes.iter().enumerate() {
             let audible = self.mix.lanes.get(l).map(|x| !x.mute).unwrap_or(true);
@@ -225,11 +238,11 @@ impl StudioView {
             let col = if sel { theme::ACCENT } else { Color32::from_rgb(80, 110, 255) };
             p.rect_filled(Rect::from_min_max(pos2(xs, lane_top), pos2(xe, lane_bottom)), 0.0, col.linear_multiply(if sel { 0.10 } else { 0.05 }));
             for xx in [xs, xe] {
-                p.line_segment([pos2(xx, ruler.bottom()), pos2(xx, lane_bottom)], Stroke::new(if sel { 2.0 } else { 1.5 }, col.linear_multiply(0.85)));
+                p.line_segment([pos2(xx, tstrip.bottom()), pos2(xx, lane_bottom)], Stroke::new(if sel { 2.0 } else { 1.0 }, col.linear_multiply(if sel { 0.9 } else { 0.5 })));
             }
             // label chip on the ruler
             let tr = &self.mix.transitions[k];
-            let chip = Rect::from_min_max(pos2(xs + 8.0, ruler.top() + 2.0), pos2((xe - 8.0).max(xs + 24.0), ruler.bottom() - 2.0));
+            let chip = Rect::from_min_max(pos2(xs + 7.0, tstrip.top() + 2.0), pos2((xe - 7.0).max(xs + 24.0), tstrip.bottom() - 2.0));
             if chip.width() > 30.0 {
                 p.rect_filled(chip, 4.0, col.linear_multiply(0.7));
                 let full = format!("{} · {} bars", tr.style.label(), tr.beats / 4);
@@ -243,7 +256,7 @@ impl StudioView {
             chip_r.on_hover_text("Click to edit this transition");
             // handles
             for (end, xx) in [(false, xs), (true, xe)] {
-                let hr = Rect::from_center_size(pos2(xx, ruler.center().y), vec2(12.0, ruler_h - 2.0));
+                let hr = Rect::from_center_size(pos2(xx, tstrip.center().y), vec2(10.0, strip_h - 2.0));
                 p.rect_filled(hr, 3.0, col);
                 p.line_segment([pos2(xx, hr.top() + 5.0), pos2(xx, hr.bottom() - 5.0)], Stroke::new(1.5, Color32::WHITE));
                 let id = Id::new(("thandle", k, end));
@@ -383,22 +396,25 @@ impl StudioView {
         });
         ui.horizontal(|ui| {
             let mut v = db_fader(ls.gain_db);
-            if widgets::hfader(ui, &mut v, false, vec2(130.0, 18.0), accent).changed() {
+            if widgets::hfader_with_default(ui, &mut v, false, 0.8, Some(0.8), vec2(130.0, 18.0), accent).on_hover_text("Lane volume · double-click: 0 dB").changed() {
                 ls.gain_db = fader_db(v);
+                if ls.gain_db.abs() < 0.3 {
+                    ls.gain_db = 0.0;
+                }
             }
             ui.label(RichText::new(format!("{:+.1} dB", ls.gain_db)).size(10.5).color(theme::TEXT_DIM));
         });
-        if r.height() >= 120.0 {
+        if r.height() >= 92.0 {
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.spacing_mut().item_spacing.x = 6.0;
                 for (b, name) in [(2usize, "High"), (1, "Mid"), (0, "Low")] {
                     let col = if ls.eq[b] < 0.02 { Color32::from_rgb(255, 70, 70) } else { EQ_COLORS[b] };
-                    widgets::knob(ui, &mut ls.eq[b], 0.0..=1.0, 0.5, name, col, 30.0);
+                    widgets::knob(ui, &mut ls.eq[b], 0.0..=1.0, 0.5, name, col, 26.0);
                 }
-                widgets::knob(ui, &mut ls.filter, 0.0..=1.0, 0.5, "Filter", FILTER_COLOR, 30.0);
+                widgets::knob(ui, &mut ls.filter, 0.0..=1.0, 0.5, "Filter", FILTER_COLOR, 26.0);
             });
         }
-        if r.height() >= 120.0 {
+        if r.height() >= 128.0 {
             let mut show = self.lane_show[l];
             egui::ComboBox::from_id_salt(("show", l)).width(150.0).selected_text(show.label()).show_ui(ui, |ui| {
                 for m in ShowMode::ALL {
@@ -506,7 +522,7 @@ impl StudioView {
         if matches!(show, ShowMode::All | ShowMode::Volume) && has(Param::Volume) {
             curve(Param::Volume, VOLUME_COLOR, false);
         }
-        if matches!(show, ShowMode::All | ShowMode::Eq) {
+        if matches!(show, ShowMode::Eq) {
             for (b, param) in [Param::EqLow, Param::EqMid, Param::EqHigh].into_iter().enumerate() {
                 if has(param) {
                     curve(param, EQ_COLORS[b], true);

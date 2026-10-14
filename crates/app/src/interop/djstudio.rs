@@ -227,7 +227,9 @@ pub fn project_to_mix(root: &Path, project_key: &str, tracks: &HashMap<String, T
             mt.mix_in = time(0).unwrap_or(0.0).max(0.0);
             mt.mix_out = time(1).unwrap_or(0.0);
             mt.key_shift = md.get("pitch").and_then(|p| p.as_f64()).unwrap_or(0.0).round() as i32;
-            mt.gain_db = md.get("trackOutputGain").and_then(|g| g.as_f64()).unwrap_or(0.0) as f32;
+            // DJ.Studio's trackOutputGain is its own loudness matching; ClubCraft normalises
+            // loudness itself (auto-gain), so importing it would attenuate tracks twice.
+            mt.gain_db = 0.0;
         }
         mix.tracks.push(mt);
         item_keys.push(ik.to_string());

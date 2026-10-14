@@ -363,6 +363,9 @@ impl App {
         use crate::studio::StudioAction as A;
         match a {
             A::PlayPause => {
+                if !self.studio.playing {
+                    self.studio.follow = true;
+                }
                 if self.eng.studio_player.is_none() {
                     if self.eng.loading_mix.is_none() && !self.studio.mix.tracks.is_empty() {
                         self.eng.stop_mix(LIVE_DECKS);

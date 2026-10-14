@@ -82,6 +82,11 @@ pub fn vfader(ui: &mut Ui, value: &mut f32, default: f32, size: egui::Vec2, colo
 
 /// Horizontal fader (crossfader / pitch). `value` in -1..1 when `bipolar`, else 0..1.
 pub fn hfader(ui: &mut Ui, value: &mut f32, bipolar: bool, size: egui::Vec2, color: Color32) -> Response {
+    hfader_with_default(ui, value, bipolar, if bipolar { 0.0 } else { 0.5 }, None, size, color)
+}
+
+/// Horizontal fader with a double-click `default` and an optional tick mark (e.g. 0 dB).
+pub fn hfader_with_default(ui: &mut Ui, value: &mut f32, bipolar: bool, default: f32, tick: Option<f32>, size: egui::Vec2, color: Color32) -> Response {
     let (rect, mut resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
     let track = Rect::from_center_size(rect.center(), vec2(rect.width() - 16.0, 4.0));
     let (lo, hi) = if bipolar { (-1.0, 1.0) } else { (0.0, 1.0) };
@@ -91,11 +96,15 @@ pub fn hfader(ui: &mut Ui, value: &mut f32, bipolar: bool, size: egui::Vec2, col
         resp.mark_changed();
     }
     if resp.double_clicked() {
-        *value = if bipolar { 0.0 } else { 0.5 };
+        *value = default;
         resp.mark_changed();
     }
     let p = ui.painter();
     p.rect_filled(track, 2.0, theme::BG);
+    if let Some(tk) = tick {
+        let tx = track.left() + (tk - lo) / (hi - lo) * track.width();
+        p.line_segment([pos2(tx, track.top() - 5.0), pos2(tx, track.bottom() + 5.0)], Stroke::new(1.0, theme::TEXT_DIM));
+    }
     let t = (*value - lo) / (hi - lo);
     let x = track.left() + t * track.width();
     if bipolar {
