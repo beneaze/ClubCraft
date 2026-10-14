@@ -13,6 +13,7 @@
 
 use crate::Stems;
 use anyhow::{anyhow, bail, Context, Result};
+use clubcraft_core::stems::StemChunk;
 use clubcraft_core::{StemTrack, SAMPLE_RATE, STEM_CHANNELS, STEM_CHUNK_FRAMES};
 use flacenc::component::{BitRepr, MetadataBlockData};
 use flacenc::error::Verify;
@@ -223,15 +224,15 @@ pub fn save_stems_with_model(path: &Path, stems: &Stems, model: &str) -> Result<
 pub fn save_stem_track(path: &Path, t: &StemTrack) -> Result<()> {
     let peak = (0..t.num_chunks())
         .filter_map(|c| t.chunk(c))
-        .flat_map(|c| c.data.iter())
-        .fold(0f32, |m, v| m.max(v.abs()));
+        .map(|c| c.peak())
+        .fold(0f32, f32::max);
     write_flac(path, t.frames, &t.model, peak, &|a, b, k, out| {
         // Blocks never straddle chunks: BLOCK divides STEM_CHUNK_FRAMES.
         let c = a / STEM_CHUNK_FRAMES;
         let o = (a - c * STEM_CHUNK_FRAMES) * STEM_CHANNELS;
         let n = (b - a) * STEM_CHANNELS;
         match t.chunk(c) {
-            Some(ch) => out.extend(ch.data[o..o + n].iter().map(|v| q(*v, k))),
+            Some(ch) => out.extend((o..o + n).map(|i| q(ch.sample(i), k))),
             None => out.resize(out.len() + n, 0),
         }
     })
@@ -240,7 +241,7 @@ pub fn save_stem_track(path: &Path, t: &StemTrack) -> Result<()> {
 /// Decode a stem cache file into interleaved 8-channel chunks of `STEM_CHUNK_FRAMES` frames
 /// (already scaled). FLAC frames are independent, so chunks are decoded on several threads.
 /// Returns (frames, model, chunks).
-fn decode(path: &Path) -> Result<(usize, String, Vec<Vec<f32>>)> {
+fn decode(path: &Path) -> Result<(usize, String, Vec<StemChunk>)> {
     use symphonia::core::codecs::audio::AudioDecoderOptions;
     use symphonia::core::errors::Error;
     use symphonia::core::formats::probe::Hint;
@@ -294,7 +295,9 @@ fn decode(path: &Path) -> Result<(usize, String, Vec<Vec<f32>>)> {
         bail!("stem file has {} FLAC frames, expected {expect}", packets.len());
     }
     let chunk_len = |c: usize| (total - c * STEM_CHUNK_FRAMES).min(STEM_CHUNK_FRAMES) * STEM_CHANNELS;
-    let mut chunks: Vec<Vec<f32>> = (0..nchunks).map(|_| Vec::new()).collect();
+    // Each chunk is decoded to f32 in a reusable buffer and immediately quantised to a 16-bit
+    // StemChunk, so a whole track never exists as f32 in memory.
+    let mut chunks: Vec<Option<StemChunk>> = (0..nchunks).map(|_| None).collect();
     let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 8).min(nchunks.max(1));
     let per_worker = nchunks.div_ceil(workers.max(1)).max(1);
     let packets = &packets;
@@ -305,9 +308,12 @@ fn decode(path: &Path) -> Result<(usize, String, Vec<Vec<f32>>)> {
             handles.push(s.spawn(move || -> Result<()> {
                 let mut decoder =
                     symphonia::default::get_codecs().make_audio_decoder(params, &AudioDecoderOptions::default())?;
-                for (gi, out) in group.iter_mut().enumerate() {
+                let mut buf: Vec<f32> = Vec::new();
+                for (gi, slot) in group.iter_mut().enumerate() {
                     let c = w * per_worker + gi;
                     let want = chunk_len(c);
+                    let out = &mut buf;
+                    out.clear();
                     out.reserve_exact(want);
                     for pk in &packets[c * per_chunk..((c + 1) * per_chunk).min(packets.len())] {
                         let audio = decoder.decode(pk).context("decode stem file")?;
@@ -324,6 +330,7 @@ fn decode(path: &Path) -> Result<(usize, String, Vec<Vec<f32>>)> {
                     if scale != 1.0 {
                         out.iter_mut().for_each(|v| *v *= scale);
                     }
+                    *slot = Some(StemChunk::from_f32(out));
                 }
                 Ok(())
             }));
@@ -333,6 +340,7 @@ fn decode(path: &Path) -> Result<(usize, String, Vec<Vec<f32>>)> {
         }
         Ok(())
     })?;
+    let chunks = chunks.into_iter().map(|c| c.ok_or_else(|| anyhow!("missing chunk"))).collect::<Result<Vec<_>>>()?;
     Ok((total, model, chunks))
 }
 
@@ -347,9 +355,9 @@ pub fn load_stems(path: &Path) -> Result<Stems> {
                 l.reserve_exact(frames);
                 r.reserve_exact(frames);
                 for c in chunks {
-                    for f in c.chunks_exact(STEM_CHANNELS) {
-                        l.push(f[2 * k]);
-                        r.push(f[2 * k + 1]);
+                    for j in 0..c.frames() {
+                        l.push(c.sample(j * STEM_CHANNELS + 2 * k));
+                        r.push(c.sample(j * STEM_CHANNELS + 2 * k + 1));
                     }
                 }
             });
@@ -363,7 +371,7 @@ pub fn load_stem_track(path: &Path) -> Result<StemTrack> {
     let (frames, model, chunks) = decode(path)?;
     let t = StemTrack::new(frames, model);
     for (i, c) in chunks.into_iter().enumerate() {
-        t.set_chunk(i, c);
+        t.set_stem_chunk(i, c);
     }
     Ok(t)
 }

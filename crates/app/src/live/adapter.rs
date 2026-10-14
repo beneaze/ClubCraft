@@ -75,7 +75,7 @@ impl TrackCache {
         let lib = Library::open_default()?;
         let t = lib.track(id)?.context("unknown track")?;
         if lib.analysis(id)?.is_none_or(|a| a.version < clubcraft_core::Analysis::CURRENT_VERSION) {
-            crate::pipeline::analyze(&lib, id, &Default::default(), &mut |_, _| {})?;
+            crate::pipeline::analyze_quick(&lib, id)?;
         }
         let analysis = lib.analysis(id)?.unwrap_or_default();
         let audio = Arc::new(clubcraft_audio::decode_file(&t.path, clubcraft_core::SAMPLE_RATE)?);
@@ -134,7 +134,18 @@ impl LiveSeparator {
             .name("cc-live-stems".into())
             .spawn(move || {
                 let mut sep: Option<clubcraft_stems::Separator> = None;
-                while let Ok(job) = rx.recv() {
+                loop {
+                    // free the model while nothing is waiting
+                    let job = match rx.try_recv() {
+                        Ok(j) => j,
+                        Err(_) => {
+                            sep = None;
+                            match rx.recv() {
+                                Ok(j) => j,
+                                Err(_) => break,
+                            }
+                        }
+                    };
                     if job.cancel.load(Ordering::Relaxed) || Arc::strong_count(&job.target) <= 1 {
                         continue;
                     }

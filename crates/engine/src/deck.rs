@@ -198,8 +198,7 @@ impl Source {
                         let target = if look_ok { 1.0 } else { 0.0 };
                         let base = ci * STEM_CHUNK_FRAMES;
                         for q in 0..k {
-                            let off = (fi + q - base) * STEM_CHANNELS;
-                            let s = &chunk.data[off..off + STEM_CHANNELS];
+                            let s = chunk.frame(fi + q - base);
                             if self.amt != target {
                                 self.amt = if self.amt < target { (self.amt + STEM_RAMP).min(1.0) } else { (self.amt - STEM_RAMP).max(0.0) };
                             }
@@ -1763,7 +1762,8 @@ mod tests {
         let out = render(&mut deck, 1000);
         for i in 0..1000 {
             let e = l[start + i] - stems[3].0[start + i];
-            assert!((out[i * 2] - e).abs() < 1e-6);
+            // stems are held as 16-bit with a per-stem scale: error ≤ peak / 32767
+            assert!((out[i * 2] - e).abs() < 1e-4);
         }
     }
 

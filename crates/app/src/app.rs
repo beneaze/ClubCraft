@@ -108,6 +108,9 @@ impl App {
         if let Some(a) = cc.storage.and_then(|s| eframe::get_value::<bool>(s, "auto_stems")) {
             job_settings.separate_stems = a;
         }
+        if let Some(a) = cc.storage.and_then(|s| eframe::get_value::<bool>(s, "deep_structure")) {
+            job_settings.deep_structure = a;
+        }
         let jobs = Jobs::new(job_settings);
         // Always start on the home page (unless `--view` says otherwise).
         let mut view = View::Home;
@@ -521,6 +524,13 @@ impl App {
                 let _ = std::fs::create_dir_all(clubcraft_core::paths::exports_dir());
                 self.eng.export_mix(&self.studio.mix, out, &self.sh);
             }
+            "process" => {
+                let q = arg.to_lowercase();
+                if let Some(t) = self.sh.tracks.iter().find(|t| t.display_name().to_lowercase().contains(&q)) {
+                    let id = t.id;
+                    self.jobs.process(id, true);
+                }
+            }
             "process-all" => {
                 for t in &self.sh.tracks {
                     self.jobs.process(t.id, false);
@@ -635,7 +645,11 @@ impl eframe::App for App {
         self.handle_library_actions(actions);
         self.handle_home_actions(home_actions);
         let mut sa = Vec::new();
-        self.settings.ui(&ctx, self.eng.handle.as_ref(), &mut sa);
+        {
+            let mut js = self.jobs.settings.lock().clone();
+            self.settings.ui(&ctx, self.eng.handle.as_ref(), &mut sa, &mut js);
+            *self.jobs.settings.lock() = js;
+        }
         for a in sa {
             match a {
                 crate::settings::SettingsAction::ProcessAll => {
@@ -663,6 +677,7 @@ impl eframe::App for App {
             let js = self.jobs.settings.lock();
             eframe::set_value(storage, "stems_quality", &js.quality);
             eframe::set_value(storage, "auto_stems", &js.separate_stems);
+            eframe::set_value(storage, "deep_structure", &js.deep_structure);
         }
         self.save_mix();
         if self.studio.mix.id > 0 {

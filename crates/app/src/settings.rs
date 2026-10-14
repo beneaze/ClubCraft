@@ -111,7 +111,7 @@ impl Settings {
         }
     }
 
-    pub fn ui(&mut self, ctx: &egui::Context, handle: Option<&EngineHandle>, actions: &mut Vec<SettingsAction>) {
+    pub fn ui(&mut self, ctx: &egui::Context, handle: Option<&EngineHandle>, actions: &mut Vec<SettingsAction>, jobs: &mut crate::pipeline::Settings) {
         if !self.open {
             return;
         }
@@ -121,6 +121,10 @@ impl Settings {
                 self.audio_ui(ui, handle);
                 ui.separator();
                 self.midi_ui(ui, handle);
+                ui.separator();
+                ui.heading("Analysis");
+                ui.checkbox(&mut jobs.separate_stems, "Separate stems automatically for analysed tracks");
+                ui.checkbox(&mut jobs.deep_structure, "Deep structure analysis (All-In-One model: slightly better sections and cues, ~1 min and +1.5 GB per track)");
                 ui.separator();
                 ui.heading("Library");
                 ui.horizontal(|ui| {

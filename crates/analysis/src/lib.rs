@@ -156,7 +156,8 @@ impl OwnedStems {
                 continue;
             };
             let start = c * clubcraft_core::STEM_CHUNK_FRAMES;
-            for (j, fr) in chunk.data.as_chunks::<STEM_CHANNELS>().0.iter().enumerate() {
+            let data = chunk.to_f32();
+            for (j, fr) in data.as_chunks::<STEM_CHANNELS>().0.iter().enumerate() {
                 let f = start + j;
                 if f >= n {
                     break;

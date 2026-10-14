@@ -13,11 +13,14 @@ pub struct Settings {
     pub separate_stems: bool,
     /// "fast" | "high" | "ultra" | "best".
     pub quality: String,
+    /// Use the All-In-One structure model (needs stems; ~1 min and +1.5 GB per track) for
+    /// slightly better sections and cues. Off by default.
+    pub deep_structure: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { separate_stems: true, quality: "best".into() }
+        Settings { separate_stems: true, quality: "best".into(), deep_structure: false }
     }
 }
 
@@ -34,6 +37,10 @@ pub struct WorkerContext {
 }
 
 impl WorkerContext {
+    pub fn release(&mut self) {
+        self.separator = None;
+    }
+
     pub fn separator(&mut self, q: Quality) -> Result<&Separator> {
         if self.separator.as_ref().map(|s| s.0) != Some(q) {
             self.separator = None; // free the old models first
@@ -95,7 +102,18 @@ pub fn separate(
     Ok(())
 }
 
-pub fn analyze(lib: &Library, id: TrackId, _s: &Settings, progress: &mut dyn FnMut(f32, &str)) -> Result<()> {
+/// Full analysis (uses the structure model when stems exist; can take ~20 s).
+pub fn analyze(lib: &Library, id: TrackId, s: &Settings, progress: &mut dyn FnMut(f32, &str)) -> Result<()> {
+    let src = if s.deep_structure { clubcraft_analysis::StructureSource::Auto } else { clubcraft_analysis::StructureSource::Rules };
+    analyze_with(lib, id, s, src, progress)
+}
+
+/// Quick analysis (rule-based structure, ~1 s) for tracks loaded on a deck before analysis.
+pub fn analyze_quick(lib: &Library, id: TrackId) -> Result<()> {
+    analyze_with(lib, id, &Settings::default(), clubcraft_analysis::StructureSource::Rules, &mut |_, _| {})
+}
+
+fn analyze_with(lib: &Library, id: TrackId, _s: &Settings, structure: clubcraft_analysis::StructureSource, progress: &mut dyn FnMut(f32, &str)) -> Result<()> {
     let t = lib.track(id)?.context("unknown track")?;
     progress(0.1, "Decoding");
     let audio = clubcraft_audio::decode_file(&t.path, clubcraft_core::SAMPLE_RATE)?;
@@ -118,7 +136,7 @@ pub fn analyze(lib: &Library, id: TrackId, _s: &Settings, progress: &mut dyn FnM
     };
     progress(0.5, "Analysing");
     let owned = stems.as_ref().map(OwnedStems::from_stem_track_partial);
-    let opts = AnalyzeOptions { stems_model: stems.as_ref().map(|s| s.model.clone()), ..Default::default() };
+    let opts = AnalyzeOptions { stems_model: stems.as_ref().map(|s| s.model.clone()), structure, ..Default::default() };
     let sref = owned.as_ref().map(|o| o.as_ref());
     let (analysis, wf) = rayon::join(|| clubcraft_analysis::analyze(&audio, sref.as_ref(), &opts), || clubcraft_analysis::waveform(&audio, sref));
     progress(0.9, "Saving");

@@ -94,8 +94,9 @@ impl Jobs {
         let settings = Arc::new(Mutex::new(settings));
         let cancel = Arc::new(AtomicBool::new(false));
         // Analysis / import workers.
-        let n_cpu = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(2, 6) / 2;
-        for i in 0..n_cpu.max(1) {
+        // One analysis worker: with stems and the structure model an analysis holds ~1-3 GB.
+        // Separation and analysis additionally share HEAVY so they never run at the same time.
+        for i in 0..1 {
             let (q, g, tx, st, cn) = (cpu.clone(), gpu.clone(), tx.clone(), settings.clone(), cancel.clone());
             std::thread::Builder::new()
                 .name(format!("cc-analysis-{i}"))
@@ -171,6 +172,10 @@ impl Jobs {
     }
 }
 
+/// Serialises memory-heavy work (stem separation, full analysis) across all workers. Peak use of
+/// one job is up to ~3 GB; running several at once ran a 16 GB Mac out of memory.
+pub static HEAVY: Mutex<()> = parking_lot::const_mutex(());
+
 fn worker(q: Arc<Queue>, other: Arc<Queue>, tx: Sender<Event>, settings: Arc<Mutex<pipeline::Settings>>, cancel: Arc<AtomicBool>, gpu: bool) {
     let lib = match clubcraft_core::Library::open_default() {
         Ok(l) => l,
@@ -181,6 +186,10 @@ fn worker(q: Arc<Queue>, other: Arc<Queue>, tx: Sender<Event>, settings: Arc<Mut
     };
     let mut ctx = pipeline::WorkerContext::default();
     loop {
+        if q.len() == 0 {
+            // Idle: free the stem models (~1 GB+) until the next job.
+            ctx.release();
+        }
         let job = q.pop();
         let s = settings.lock().clone();
         match job {
@@ -219,6 +228,7 @@ fn worker(q: Arc<Queue>, other: Arc<Queue>, tx: Sender<Event>, settings: Arc<Mut
                 let _ = tx.send(Event::Finished { track: None, stage: Stage::Import });
             }
             Job::Separate(id) => {
+                let _heavy = HEAVY.lock();
                 let r = pipeline::separate(&lib, &mut ctx, id, &s, &cancel, &mut |frac, label| {
                     let _ = tx.send(Event::Progress { track: Some(id), stage: Stage::Separate, frac, label: label.to_string() });
                 });
@@ -235,6 +245,7 @@ fn worker(q: Arc<Queue>, other: Arc<Queue>, tx: Sender<Event>, settings: Arc<Mut
                 other_or_self(&q, &other, gpu, false).push(Job::Analyze(id), true);
             }
             Job::Analyze(id) => {
+                let _heavy = HEAVY.lock();
                 let r = pipeline::analyze(&lib, id, &s, &mut |frac, label| {
                     let _ = tx.send(Event::Progress { track: Some(id), stage: Stage::Analyze, frac, label: label.to_string() });
                 });

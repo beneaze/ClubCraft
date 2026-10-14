@@ -191,7 +191,8 @@ impl Stems {
             let n = t.chunk_frames(c);
             match t.chunk(c) {
                 Some(ch) => {
-                    for f in ch.data.chunks_exact(clubcraft_core::STEM_CHANNELS) {
+                    let data = ch.to_f32();
+                    for f in data.chunks_exact(clubcraft_core::STEM_CHANNELS) {
                         for (s, (l, r)) in stems.iter_mut().enumerate() {
                             l.push(f[2 * s]);
                             r.push(f[2 * s + 1]);

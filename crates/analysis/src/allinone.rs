@@ -292,7 +292,8 @@ impl Model {
             .unwrap_or(4);
         let session = ort::session::Session::builder()?
             .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)?
-            .with_intra_threads(threads)?
+            .with_intra_threads(threads.min(6))?
+            .with_memory_pattern(false)?
             .commit_from_file(path)
             .with_context(|| format!("load {}", path.display()))?;
         Ok(Model { session })
@@ -324,17 +325,21 @@ pub fn shared_activations(stems: &StemsRef) -> Option<Activations> {
         if stems.frames().div_ceil(HOP) < MIN_FRAMES {
             return None;
         }
-        static MODEL: std::sync::OnceLock<Option<Model>> = std::sync::OnceLock::new();
-        let model = MODEL.get_or_init(|| match Model::load_default() {
-            Ok(m) => Some(m),
+        // Loaded per call (the model is small) and dropped afterwards: ONNX Runtime's memory
+        // arena never shrinks, so a cached session would keep its peak allocation forever.
+        static MISSING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if MISSING.load(std::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
+        let model = match Model::load_default() {
+            Ok(m) => m,
             Err(e) => {
-                log::info!(
-                    "All-In-One structure model unavailable ({e:#}); using rule-based structure"
-                );
-                None
+                log::info!("All-In-One structure model unavailable ({e:#}); using rule-based structure");
+                MISSING.store(true, std::sync::atomic::Ordering::Relaxed);
+                return None;
             }
-        });
-        let m = model.as_ref()?;
+        };
+        let m = &model;
         let t = std::time::Instant::now();
         match m.activations(stems) {
             Ok(a) => {
