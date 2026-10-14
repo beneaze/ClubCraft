@@ -199,7 +199,7 @@ The cue generator places Mix In at least 32 beats before the first drop or vocal
 - **Real-time engine:** a lock-free command queue in, a triple-buffered state snapshot out, and nothing allocated or locked on the audio thread. Stems are mixed before the stretcher, so each deck needs only one time-stretcher.
 - **One conductor:** the studio preview, live automix and offline render all run the same code path, so what you hear in the preview is exactly what you export.
 - **Exact timing:** tempo is piecewise linear in mix beats and integrated analytically, which keeps overlapping tracks beat-locked to within a millisecond.
-- **Clean-room:** behaviour and file formats were studied from the installed apps, for interoperability only (notes in [`docs/research`](docs/research)). No code, models or assets from DJ.Studio or VirtualDJ are used.
+- **Clean-room:** ClubCraft is independent. Behaviour and file formats of DJ.Studio and VirtualDJ were only studied for interoperability (importing projects, exporting cues). No code, models or assets from either product are used.
 - **Tested:** 74 unit and integration tests, plus evaluations against Python Demucs and a 137-track analysis corpus.
 
 ## Get started
@@ -232,4 +232,4 @@ Development builds: `tools/bundle-macos.sh` (macOS), and the `ClubCraft-windows-
 
 ## License
 
-ClubCraft is dual-licensed under MIT or Apache-2.0. The Demucs weights are MIT (Meta Platforms). The Mel-Band RoFormer checkpoint (Kimberley Jensen) and ZFTurbo's implementation are MIT, and so is Signalsmith Stretch. DJ.Studio and VirtualDJ are trademarks of their respective owners, and ClubCraft is not affiliated with either.
+ClubCraft is dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE). The Demucs weights are MIT (Meta Platforms). The Mel-Band RoFormer checkpoint (Kimberley Jensen) and ZFTurbo's implementation are MIT, and so is Signalsmith Stretch. DJ.Studio and VirtualDJ are trademarks of their respective owners, and ClubCraft is not affiliated with either.

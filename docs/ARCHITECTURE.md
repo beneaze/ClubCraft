@@ -41,8 +41,9 @@ Dependency direction: `core` ← `audio` ← (`stems`, `analysis`, `engine`) ←
   STFT; outputs `spec_out [1,S,4,2048,336]` and `wave_out [1,S,2,343980]`; final stems =
   iSTFT(spec_out) + wave_out. See the Python `Core` module for the exact semantics.
 
-## Research
+## Interoperability
 
-`docs/research/` holds behaviour/format notes about DJ.Studio and VirtualDJ gathered from the
-installed apps (used for interoperability: importing DJ.Studio projects and analysis, exporting
-cues to VirtualDJ). No code or assets from either product are used.
+The DJ.Studio importer (`crates/app/src/interop/djstudio.rs`) reads DJ.Studio's local project and
+library JSON read-only; the VirtualDJ exporter (`interop/virtualdj.rs`) merges cues into a
+`database.xml`. Both are written from observed file formats only; no code or assets from either
+product are used.
