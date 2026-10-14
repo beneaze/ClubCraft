@@ -432,7 +432,7 @@ impl App {
             let pe = self.pending_export.take().unwrap();
             self.studio.render_label.clear();
             self.eng.export_mix(&self.studio.mix, pe.out, &self.sh);
-            self.status = if missing == 0 { "Stems ready, rendering mix…".into() } else { format!("Rendering mix ({missing} track(s) without stems play EQ blends)…") };
+            self.status = if missing == 0 { "Stems ready, rendering mix…".into() } else { format!("Rendering mix ({missing} track(s) without stems imitate them with volume and EQ)…") };
         }
     }
 
@@ -575,18 +575,8 @@ impl App {
                 let _ = std::fs::create_dir_all(&dir);
                 let name: String = self.studio.mix.name.chars().map(|c| if c == '/' || c == ':' { '-' } else { c }).collect();
                 if let Some(out) = rfd::FileDialog::new().set_directory(&dir).set_file_name(format!("{name}.wav")).add_filter("WAV", &["wav"]).save_file() {
-                    // the heavy part happens here: stems for the stem transitions that lack them
-                    let mut need: Vec<TrackId> = Vec::new();
-                    for (k, tr) in self.studio.mix.transitions.iter().enumerate() {
-                        if !tr.uses_stems() {
-                            continue;
-                        }
-                        for t in self.studio.mix.tracks.iter().skip(k).take(2) {
-                            if !self.sh.analyses.get(&t.track_id).is_some_and(|a| a.stems_model.is_some()) && !need.contains(&t.track_id) {
-                                need.push(t.track_id);
-                            }
-                        }
-                    }
+                    // the heavy part happens here: stems for the tracks whose stem automation lacks them
+                    let need = self.studio.tracks_missing_stems(&self.sh);
                     if need.is_empty() {
                         self.eng.export_mix(&self.studio.mix, out, &self.sh);
                         self.status = "Rendering mix…".into();

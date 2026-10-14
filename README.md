@@ -94,7 +94,7 @@ Every screenshot here is the real app at work on a mix imported from DJ.Studio. 
       <h3>A library that analyses itself</h3>
       Drop a folder in and every track is analysed within about a second. Stems are separated on demand: when a transition needs them, when you export a mix, or for the whole library in the background if you switch that on. Sort and search by artist, title, BPM, key or energy, and drag tracks onto a deck or into a mix.
       <br><br>
-      Imports your <b>DJ.Studio</b> projects, with their mix points, transitions and cues, and exports beat grids, keys, hot cues and automix points to <b>VirtualDJ</b>.
+      Imports your <b>DJ.Studio</b> projects, with their mix points, cues, transitions (every effect and drawn curve) and the stem automation on the tracks, and exports beat grids, keys, hot cues and automix points to <b>VirtualDJ</b>.
     </td>
     <td width="50%" valign="top">
       <img src="docs/images/home.jpg" alt="The home page: a New mix card (start empty, from selected tracks, a playlist or auto-built from the library), library statistics with quick actions, and recent mixes shown as cards with a strip of key colours" width="100%">
@@ -116,7 +116,7 @@ Every screenshot here is the real app at work on a mix imported from DJ.Studio. 
       <h3>Transitions you can read</h3>
       Pick a preset (Stem blend, Bass swap, Crossfade, Vocal over, Mashup, Filter out, Echo out, Cut), then adjust it the way DJ.Studio does it: for every stem <b>Off · Swap · Crossfade · Full</b>, the same for each EQ band, plus volume, filter and echo choices. When a transition is selected, the timeline splits both tracks into stem rows with their level lines. <b>Curves</b> lets you draw any parameter by hand. Lock a transition and harmonizing or recomputing mix points leaves it alone.
       <br><br>
-      Until both tracks have stems, a stem transition plays as an EQ blend with the same timing. The timeline shows exactly that, marked "no stems", with a one-click button to separate them. The editor also warns when the outgoing track fades out before its transition ends, or when the incoming track comes in much quieter.
+      Until a track has stems, its stem curves are imitated with volume and EQ: each transition keeps its own shape, and the timeline shows it marked "no stems". <b>Stems missing</b> in the transport bar separates them for the whole mix in one click, and an export separates the ones it needs first. The editor also warns when the outgoing track fades out before its transition ends, or when the incoming track comes in much quieter.
       <h3>Keyboard first</h3>
       <b>Studio:</b> Space play · ← → bar (⇧ 8 bars) · [ ] transitions · F follow · + − zoom · ⌘Z / ⇧⌘Z undo / redo · ⌘S save.<br>
       <b>Live:</b> Z X C and M , . cue/play/sync · 1–8 hot cues (⇧ deck B) · ← → crossfader.<br>

@@ -1,7 +1,7 @@
 //! Offline engine tests: sync, render alignment, limiter, automix, CPU budget.
 
 use clubcraft_audio::AudioBuffer;
-use clubcraft_core::{BeatGrid, Cue, CueKind, Mix, MixTrack, StemKind, StemTrack, TempoMode, Transition, TransitionStyle};
+use clubcraft_core::{BeatGrid, Cue, CueKind, Mix, MixTrack, StemKind, StemLane, StemTrack, TempoMode, Transition, TransitionStyle};
 use clubcraft_engine::*;
 use std::sync::Arc;
 
@@ -111,8 +111,8 @@ fn sync_phase_locks_124_to_126_within_1ms() {
 
 fn two_track_mix(style: TransitionStyle, keylock: bool) -> Mix {
     let mut mix = Mix { keylock, tempo: TempoMode::Glide, ..Default::default() };
-    mix.tracks.push(MixTrack { track_id: 1, mix_in: 0.0, mix_out: 20.0, key_shift: 0, gain_db: 0.0 });
-    mix.tracks.push(MixTrack { track_id: 2, mix_in: 8.0 * 60.0 / 126.0, mix_out: 30.0, key_shift: 0, gain_db: 0.0 });
+    mix.tracks.push(MixTrack { track_id: 1, mix_in: 0.0, mix_out: 20.0, key_shift: 0, gain_db: 0.0, stems: Vec::new() });
+    mix.tracks.push(MixTrack { track_id: 2, mix_in: 8.0 * 60.0 / 126.0, mix_out: 30.0, key_shift: 0, gain_db: 0.0, stems: Vec::new() });
     mix.normalize();
     mix.transitions[0] = Transition::new(style, 16);
     mix
@@ -520,8 +520,8 @@ fn rms(x: &[f32], t0: f64, t1: f64) -> f64 {
 /// Two 120 BPM tracks, transition of 16 beats starting at 20 s (track 2 mixed in at beat 8).
 fn lane_mix(style: TransitionStyle, lanes: [clubcraft_core::LaneSettings; 2]) -> Mix {
     let mut mix = Mix { keylock: false, tempo: TempoMode::Glide, ..Default::default() };
-    mix.tracks.push(MixTrack { track_id: 1, mix_in: 0.0, mix_out: 20.0, key_shift: 0, gain_db: 0.0 });
-    mix.tracks.push(MixTrack { track_id: 2, mix_in: 4.0, mix_out: 30.0, key_shift: 0, gain_db: 0.0 });
+    mix.tracks.push(MixTrack { track_id: 1, mix_in: 0.0, mix_out: 20.0, key_shift: 0, gain_db: 0.0, stems: Vec::new() });
+    mix.tracks.push(MixTrack { track_id: 2, mix_in: 4.0, mix_out: 30.0, key_shift: 0, gain_db: 0.0, stems: Vec::new() });
     mix.normalize();
     mix.transitions[0] = Transition::new(style, 16);
     mix.lanes = lanes.to_vec();
@@ -658,7 +658,7 @@ fn live_lane_edits_apply_immediately_without_clicks() {
 fn six_track_mix() -> Mix {
     let mut mix = Mix { keylock: false, tempo: TempoMode::Glide, ..Default::default() };
     for i in 0..6 {
-        mix.tracks.push(MixTrack { track_id: 1 + i, mix_in: if i == 0 { 0.0 } else { 2.0 }, mix_out: 20.0, key_shift: 0, gain_db: 0.0 });
+        mix.tracks.push(MixTrack { track_id: 1 + i, mix_in: if i == 0 { 0.0 } else { 2.0 }, mix_out: 20.0, key_shift: 0, gain_db: 0.0, stems: Vec::new() });
     }
     mix.normalize();
     for t in mix.transitions.iter_mut() {
@@ -869,4 +869,27 @@ fn structural_edit_during_lazy_preview_reuses_resident_tracks() {
     assert_eq!(st.mix.resident_count(), 3, "resident tracks carried over");
     assert_eq!(calls.lock().len(), 3, "no reload after the edit: {:?}", calls.lock());
     assert!(st.decks[0].playing && !st.mix.waiting);
+}
+
+#[test]
+fn track_stem_lanes_play_without_stems() {
+    // track 1 has no stems; its own lane mutes everything but the vocals from 5 to 10 s
+    let a = click_track(120.0, 30.0, 0.0);
+    let b = click_track(126.0, 40.0, 0.0);
+    let mut mix = two_track_mix(TransitionStyle::Crossfade, true);
+    for st in [StemKind::Drums, StemKind::Bass, StemKind::Other] {
+        mix.tracks[0].stems.push(StemLane { stem: st, points: vec![(5.0, 1.0), (5.0, 0.0), (10.0, 0.0), (10.0, 1.0)] });
+    }
+    let tr = |id: i64| Some(if id == 1 { track(&a, 120.0, 0.0) } else { track(&b, 126.0, 0.0) });
+    let opts = RenderOptions { limiter: false, tail_secs: 0.5, ..Default::default() };
+    let (r, _) = render_mix_to_vec(&mix, &|id| tr(id).map(|t| t.analysis()), &tr, &opts).unwrap();
+    let rms = |t0: f64, t1: f64| {
+        let s = &r[(t0 * SR as f64) as usize * 2..(t1 * SR as f64) as usize * 2];
+        (s.iter().map(|x| x * x).sum::<f32>() / s.len() as f32).sqrt()
+    };
+    let (full, vocals_only) = (rms(1.0, 4.0), rms(6.0, 9.0));
+    eprintln!("track stem lane: full {full:.4}, vocals only {vocals_only:.4}");
+    assert!(vocals_only < full * 0.8, "the lane should take the level down ({full} → {vocals_only})");
+    assert!(vocals_only > full * 0.2, "vocals stay audible");
+    assert!((rms(11.0, 14.0) / full - 1.0).abs() < 0.1, "back to full after the lane");
 }

@@ -356,7 +356,7 @@ impl StudioView {
             .exact_size(48.0)
             .resizable(false)
             .frame(egui::Frame::new().fill(theme::blend(theme::PANEL, theme::BG, 0.4)).inner_margin(egui::Margin::symmetric(12, 4)))
-            .show(ui, |ui| self.transport(ui, mixes, out, load_mix, new_mix));
+            .show(ui, |ui| self.transport(ui, sh, mixes, out, load_mix, new_mix));
         if let Some(tab) = self.tab {
             let (default, min) = match tab {
                 Tab::Zoom => (54.0, 50.0),
@@ -856,7 +856,20 @@ impl StudioView {
     }
 
     /// Transport row: mixes / edit menus on the left, transport centred, output on the right.
-    fn transport(&mut self, ui: &mut Ui, mixes: &[(i64, String, i64)], out: &mut Vec<StudioAction>, load_mix: &mut Option<i64>, new_mix: &mut bool) {
+    /// Tracks whose stem automation (transition stem lanes or their own lanes) plays without stems.
+    pub(crate) fn tracks_missing_stems(&self, sh: &Shared) -> Vec<TrackId> {
+        let mut ids: Vec<TrackId> = Vec::new();
+        for (i, t) in self.mix.tracks.iter().enumerate() {
+            let uses = !t.stems.is_empty() || (i > 0 && self.mix.transitions.get(i - 1).is_some_and(|x| x.uses_stems())) || self.mix.transitions.get(i).is_some_and(|x| x.uses_stems());
+            let has = sh.analyses.get(&t.track_id).is_some_and(|a| a.stems_model.is_some());
+            if uses && !has && !ids.contains(&t.track_id) {
+                ids.push(t.track_id);
+            }
+        }
+        ids
+    }
+
+    fn transport(&mut self, ui: &mut Ui, sh: &Shared, mixes: &[(i64, String, i64)], out: &mut Vec<StudioAction>, load_mix: &mut Option<i64>, new_mix: &mut bool) {
         let full = ui.available_rect_before_wrap();
         let has = !self.mix.tracks.is_empty();
         // ---- left: mixes, name, edit menu, undo / redo
@@ -935,6 +948,13 @@ impl StudioView {
         }
         if right.add_enabled(has, egui::Button::new("Play live ▶")).on_hover_text("Play this mix on the live decks").clicked() {
             out.push(StudioAction::SendToLive);
+        }
+        let missing = self.tracks_missing_stems(sh);
+        if !missing.is_empty() {
+            let b = egui::Button::new(RichText::new(format!("Stems missing ({})", missing.len())).color(theme::WARN).size(12.0));
+            if right.add(b).on_hover_text("These tracks have stem automation (in transitions or on the track) but no stems yet, so it is imitated with volume and EQ. Click to separate their stems for the real sound.").clicked() {
+                out.push(StudioAction::SeparateStems(missing));
+            }
         }
         if !self.message.is_empty() {
             right.label(RichText::new(&self.message).color(theme::TEXT_DIM).size(11.0));
@@ -1221,7 +1241,7 @@ mod tests {
     use clubcraft_core::MixTrack;
 
     fn mix() -> Mix {
-        let t = |id| MixTrack { track_id: id, mix_in: 0.0, mix_out: 60.0, key_shift: 0, gain_db: 0.0 };
+        let t = |id| MixTrack { track_id: id, mix_in: 0.0, mix_out: 60.0, key_shift: 0, gain_db: 0.0, stems: Vec::new() };
         Mix { tracks: vec![t(1), t(2)], transitions: vec![Transition::new(TransitionStyle::StemBlend, 32)], ..Default::default() }
     }
 

@@ -242,7 +242,7 @@ impl StudioView {
             let missing: Vec<TrackId> = [ia, ib].into_iter().filter(|id| !sh.analyses.get(id).is_some_and(|a| a.stems_model.is_some())).collect();
             ui.horizontal(|ui| {
                 let names: Vec<String> = missing.iter().map(|id| crate::studio::truncate(&title(*id), 28)).collect();
-                ui.label(RichText::new(format!("No stems yet for {}: this plays as an EQ blend with the same timing (bass swap at the midpoint, the old track stays up until ¾).", names.join(" and "))).color(theme::WARN).size(12.0));
+                ui.label(RichText::new(format!("No stems yet for {}: its stem curves are imitated with volume and EQ, which only approximates the sound.", names.join(" and "))).color(theme::WARN).size(12.0));
                 if ui.button("Separate stems now").on_hover_text("Queue stem separation for these tracks first").clicked() {
                     self.pending.push(crate::studio::StudioAction::SeparateStems(missing.clone()));
                 }

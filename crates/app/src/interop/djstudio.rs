@@ -1,13 +1,13 @@
 //! Import from DJ.Studio (`~/Music/DJ.Studio/Database`): library tracks with their hot cues, and
 //! projects as ClubCraft mixes (track order, mix-in/out points, transition lengths and styles,
-//! key shifts and gains). Read-only: DJ.Studio's files are never modified.
+//! key shifts, the tracks' own stem automation). Read-only: DJ.Studio's files are never modified.
 //!
 //! Format notes: every table is a folder of JSON files named by record key;
 //! `audio-library` and `track-structures` records sit in hash buckets = (sum of the key's char
 //! codes) % 256 as unpadded lowercase hex.
 
 use anyhow::{Context, Result};
-use clubcraft_core::{Cue, CueKind, CueSource, Lane, Library, Mix, MixTrack, Param, Side, StemKind, TempoMode, TrackId, Transition, TransitionStyle};
+use clubcraft_core::{Cue, CueKind, CueSource, Lane, Library, Mix, MixTrack, Param, Side, StemKind, StemLane, TempoMode, TrackId, Transition, TransitionStyle};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -192,6 +192,54 @@ fn lane_points(root: &Path, ae_key: &str, side: usize, control: &str) -> Option<
     let v = read_json(&root.join("automation-data-table").join(format!("{ae_key}_{side}")).join(control))?;
     let pts: Vec<(f32, f32)> = v.get("points")?.as_array()?.iter().filter_map(|p| Some((p.get("time")?.as_f64()? as f32, p.get("value")?.as_f64()? as f32))).collect();
     (!pts.is_empty()).then_some(pts)
+}
+
+/// A track's own stem lanes (`<proj>/<item>/virtual-stems-*`, in local track beats = `mixMap`
+/// indices) in track seconds. Only lanes that do something are kept; the 4-stem lanes win over
+/// the HQ vocals / instrumental ones.
+fn track_stem_lanes(root: &Path, item_key: &str, md: &Value) -> Vec<StemLane> {
+    let map: Vec<(f64, f64)> = md.get("mixMap").and_then(|m| m.as_array()).map(|m| m.iter().map(|b| (b.get("time").and_then(|t| t.as_f64()).unwrap_or(0.0), b.get("duration").and_then(|d| d.as_f64()).unwrap_or(0.0))).collect()).unwrap_or_default();
+    if map.is_empty() {
+        return Vec::new();
+    }
+    let secs = |beat: f64| {
+        let i = (beat.floor().max(0.0) as usize).min(map.len() - 1);
+        let (t, d) = map[i];
+        t + (beat - i as f64).max(0.0) * d
+    };
+    let points = |control: &str| -> Option<Vec<(f32, f32)>> {
+        let v = read_json(&root.join("automation-data-table").join(item_key).join(control))?;
+        Some(v.get("points")?.as_array()?.iter().filter_map(|p| Some((secs(p.get("time")?.as_f64()?) as f32, p.get("value")?.as_f64()?.clamp(0.0, 1.0) as f32))).collect())
+    };
+    // the lanes only play while the track's stems are switched on
+    if !points("virtual-stems-on").is_some_and(|p| p.iter().any(|q| q.1 > 0.5)) {
+        return Vec::new();
+    }
+    let read = |control: &str| points(control).filter(|p| p.iter().any(|q| (q.1 - 1.0).abs() > 1e-3));
+    let mut lanes: Vec<StemLane> = Vec::new();
+    let mut put = |stem: StemKind, points: Vec<(f32, f32)>| {
+        if !lanes.iter().any(|l| l.stem == stem) {
+            lanes.push(StemLane { stem, points });
+        }
+    };
+    for (control, stem) in [("virtual-stems-drums", StemKind::Drums), ("virtual-stems-bass", StemKind::Bass), ("virtual-stems-melody", StemKind::Other), ("virtual-stems-vocals", StemKind::Vocals)] {
+        if let Some(p) = read(control) {
+            put(stem, p);
+        }
+    }
+    for control in ["virtual-stems-vocals-hq"] {
+        if let Some(p) = read(control) {
+            put(StemKind::Vocals, p);
+        }
+    }
+    for control in ["virtual-stems-instrumental", "virtual-stems-instrumental-hq"] {
+        if let Some(p) = read(control) {
+            for stem in [StemKind::Drums, StemKind::Bass, StemKind::Other] {
+                put(stem, p.clone());
+            }
+        }
+    }
+    lanes
 }
 
 /// Convert a DJ.Studio transition ("autoEffect") into ClubCraft lanes: every effect with its
@@ -426,7 +474,7 @@ pub fn project_to_mix(root: &Path, project_key: &str, tracks: &HashMap<String, T
         let lk = item.get("libraryKey").and_then(|k| k.as_str()).unwrap_or_default();
         let ik = item.get("key").and_then(|k| k.as_str()).unwrap_or_default();
         let Some(&tid) = tracks.get(lk) else { continue }; // jingles and missing files are skipped
-        let mut mt = MixTrack { track_id: tid, mix_in: 0.0, mix_out: 0.0, key_shift: 0, gain_db: 0.0 };
+        let mut mt = MixTrack { track_id: tid, mix_in: 0.0, mix_out: 0.0, key_shift: 0, gain_db: 0.0, stems: Vec::new() };
         if let Some(md) = read_json(&root.join("mix-data-table").join(ik)) {
             let sys = md.pointer("/cueData/systemCuePoints").and_then(|c| c.as_array()).cloned().unwrap_or_default();
             let time = |i: usize| sys.get(i).and_then(|c| c.get("time")).and_then(|t| t.as_f64());
@@ -436,6 +484,7 @@ pub fn project_to_mix(root: &Path, project_key: &str, tracks: &HashMap<String, T
             // DJ.Studio's trackOutputGain is its own loudness matching; ClubCraft normalises
             // loudness itself (auto-gain), so importing it would attenuate tracks twice.
             mt.gain_db = 0.0;
+            mt.stems = track_stem_lanes(root, ik, &md);
         }
         mix.tracks.push(mt);
         item_keys.push(ik.to_string());
@@ -528,14 +577,52 @@ mod real_transitions {
         let root = super::default_root();
         for p in super::read_projects(&root).into_iter().filter(|p| p.name.contains("Harvard-Square")).take(1) {
             let pv = super::read_json(&root.join("projects-table").join(&p.key)).unwrap();
-            for ae in pv["autoEffects"].as_array().unwrap().iter().take(6) {
+            let only: Option<usize> = std::env::var("DJS_T").ok().and_then(|v| v.parse().ok());
+            let order: Vec<String> = pv["mixList"].as_array().unwrap().iter().filter_map(|i| i["key"].as_str().map(String::from)).collect();
+            for (n, k) in order.iter().enumerate().filter(|(n, _)| only.is_none_or(|o| o == *n)) {
+                let Some(ae) = pv["autoEffects"].as_array().unwrap().iter().find(|e| e["mixTrackKey"].as_str() == Some(k.as_str())) else { continue };
+                println!("## transition {n}: {:?}", ae["effects"].as_array().unwrap().iter().map(|e| e["effectName"].as_str().unwrap_or("")).collect::<Vec<_>>());
                 let t = super::transition_from(&root, ae);
                 println!("== {} beats {} style {:?} locked {}", &ae["key"].as_str().unwrap()[37..45], t.beats, t.style, t.locked);
                 for l in &t.lanes {
                     let pts: Vec<String> = l.points.iter().map(|(x, y)| format!("({x:.1},{y:.2})")).collect();
                     println!("   {:?} {:?}: {}", l.side, l.param, pts.join(" "));
                 }
+                if t.uses_stems() {
+                    let f = t.without_stems();
+                    for side in [clubcraft_core::Side::Out, clubcraft_core::Side::In] {
+                        let v: Vec<String> = (0..=8).map(|i| t.beats as f32 * i as f32 / 8.0).map(|x| format!("{:.2}", f.value(side, clubcraft_core::Param::Volume, x).powi(2))).collect();
+                        println!("   without stems {side:?} volume gain: {}", v.join(" "));
+                    }
+                }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod real_render {
+    /// Import the DJ.Studio projects into `CLUBCRAFT_HOME` (use a copy of the library!) and render
+    /// the mix named `DJS_MIX` to `DJS_OUT` (16-bit WAV), printing the transition start times:
+    /// `CLUBCRAFT_HOME=… DJS_MIX=Harvard-Square-Mix DJS_OUT=/tmp/x.wav cargo test -p clubcraft real_djstudio_render -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn real_djstudio_render() {
+        let home = std::env::var("CLUBCRAFT_HOME").expect("CLUBCRAFT_HOME (a copy)");
+        assert!(!home.contains("Music/ClubCraft"), "use a copy of the library");
+        let lib = clubcraft_core::Library::open_default().unwrap();
+        let rep = super::import_all(&lib, &super::default_root()).unwrap();
+        let name = std::env::var("DJS_MIX").unwrap();
+        let (id, _) = rep.mixes.iter().find(|m| m.1.starts_with(&name)).expect("mix").clone();
+        let mix = lib.mix(id).unwrap().unwrap();
+        let all = lib.all_analyses().unwrap();
+        let missing = mix.tracks.iter().filter(|t| all.get(&t.track_id).is_none_or(|a| a.stems_model.is_none())).count();
+        println!("{} tracks, {} without stems, {} with own stem lanes", mix.tracks.len(), missing, mix.tracks.iter().filter(|t| !t.stems.is_empty()).count());
+        let out = std::path::PathBuf::from(std::env::var("DJS_OUT").unwrap());
+        let opts = clubcraft_engine::RenderOptions { format: clubcraft_engine::WavFormat::Pcm16, ..Default::default() };
+        let r = clubcraft_engine::render_mix(&mix, &|id| all.get(&id).cloned(), &|id| crate::live::adapter::load_uncached(id).ok(), &out, &opts, &mut |_| true).unwrap();
+        for (k, x) in r.timeline.transitions.iter().enumerate() {
+            println!("transition {k}: {:.2} .. {:.2} s ({} beats)", x.start_sec, x.end_sec, x.beats);
         }
     }
 }

@@ -67,23 +67,28 @@ impl Lane {
     }
 
     pub fn value_at(&self, x: f32) -> f32 {
-        let p = &self.points;
-        match p.len() {
-            0 => self.param.neutral(),
-            1 => p[0].1,
-            _ => {
-                if x <= p[0].0 {
-                    return p[0].1;
-                }
-                for w in p.windows(2) {
-                    let (a, b) = (w[0], w[1]);
-                    if x <= b.0 {
-                        let t = if b.0 > a.0 { (x - a.0) / (b.0 - a.0) } else { 1.0 };
-                        return a.1 + (b.1 - a.1) * t;
-                    }
-                }
-                p[p.len() - 1].1
+        interpolate(&self.points, x, self.param.neutral())
+    }
+}
+
+/// Piecewise-linear value of `p` at `x` (`neutral` without points; held before the first and after
+/// the last point; two points at the same `x` make a step).
+fn interpolate(p: &[(f32, f32)], x: f32, neutral: f32) -> f32 {
+    match p.len() {
+        0 => neutral,
+        1 => p[0].1,
+        _ => {
+            if x <= p[0].0 {
+                return p[0].1;
             }
+            for w in p.windows(2) {
+                let (a, b) = (w[0], w[1]);
+                if x <= b.0 {
+                    let t = if b.0 > a.0 { (x - a.0) / (b.0 - a.0) } else { 1.0 };
+                    return a.1 + (b.1 - a.1) * t;
+                }
+            }
+            p[p.len() - 1].1
         }
     }
 }
@@ -246,39 +251,133 @@ impl Transition {
         self.lanes.iter().any(|l| matches!(l.param, Param::Stem(_)))
     }
 
-    /// What plays while a track of this transition has no stems yet. Stem blends become an EQ
-    /// blend with the same timing: the outgoing track stays at full level until three quarters
-    /// in (where the stem version still has its drums), the low end swaps at the midpoint and its
-    /// highs fade; the incoming track comes up over the first quarter. Other stem styles become a
-    /// bass swap.
+    /// What plays while a track of this transition has no stems yet: each side's stem curves are
+    /// emulated with its volume and EQ. Every band (low, mid, high) gets the level of the stems
+    /// that play in it (energy-weighted: the bass stem drives the lows, drums the highs, melody and
+    /// vocals the mids); the loudest band sets the volume and the EQ cuts the others. A drum
+    /// slope, a bass swap or a vocal drop of an imported DJ.Studio transition thus keeps its own
+    /// timing and shape. The transition's own volume and EQ lanes (crossfade, bass swap) still
+    /// apply on top, as in DJ.Studio.
     pub fn without_stems(&self) -> Transition {
+        self.without_stems_on(true, true)
+    }
+
+    /// [`Self::without_stems`] for the outgoing and/or the incoming side only (the other side
+    /// keeps its stem lanes).
+    pub fn without_stems_on(&self, out: bool, inn: bool) -> Transition {
         use Param::*;
-        use Side::*;
         if !self.uses_stems() {
             return self.clone();
         }
-        // Transitions with their own volume curve (e.g. imported from DJ.Studio: crossfade + bass
-        // swap + stems) keep everything but the stem lanes.
-        let has_volume = self.lanes.iter().any(|l| l.param == Param::Volume && l.points.iter().any(|p| (p.1 - 1.0).abs() > 1e-3));
-        if has_volume {
-            let lanes = self.lanes.iter().filter(|l| !matches!(l.param, Param::Stem(_))).cloned().collect();
-            return Transition { style: self.style, beats: self.beats, lanes, locked: self.locked };
-        }
         let len = self.beats as f32;
-        let (q, h) = (len * 0.25, len * 0.5);
-        let lanes = match self.style {
-            TransitionStyle::StemBlend => vec![
-                Lane::new(In, Volume, &[(0.0, 0.0), (q, 0.85), (h, 1.0)]),
-                Lane::new(In, EqLow, &[(0.0, 0.0), (h - 0.01, 0.0), (h, 0.5)]),
-                Lane::new(In, EqHigh, &[(0.0, 0.3), (h, 0.5)]),
-                Lane::new(Out, EqLow, &[(0.0, 0.5), (h - 0.01, 0.5), (h, 0.0)]),
-                Lane::new(Out, EqHigh, &[(0.0, 0.5), (len, 0.25)]),
-                Lane::new(Out, Volume, &[(0.0, 1.0), (len * 0.75, 1.0), (len, 0.0)]),
-            ],
-            _ => TransitionStyle::BassSwap.lanes(len),
-        };
+        let emulated = |side: Side| if side == Side::Out { out } else { inn };
+        let mut lanes: Vec<Lane> = self.lanes.iter().filter(|l| !(matches!(l.param, Stem(_)) && emulated(l.side))).cloned().collect();
+        for side in [Side::Out, Side::In].into_iter().filter(|&sd| emulated(sd)) {
+            let stems: Vec<&Lane> = self.lanes.iter().filter(|l| l.side == side && matches!(l.param, Stem(_))).collect();
+            if stems.is_empty() {
+                continue;
+            }
+            let params = [Volume, EqLow, EqMid, EqHigh];
+            let own = |p: Param| self.lanes.iter().find(|l| l.side == side && l.param == p);
+            // sample every breakpoint (both sides of a step) and points in between on ramps
+            let mut keys: Vec<f32> = vec![0.0, len];
+            for l in stems.iter().copied().chain(params.iter().filter_map(|&p| own(p))) {
+                for &(x, _) in &l.points {
+                    keys.extend([x - 1e-3, x, x + 1e-3]);
+                }
+            }
+            keys.retain(|x| (0.0..=len).contains(x));
+            keys.sort_by(|a, b| a.total_cmp(b));
+            keys.dedup_by(|a, b| (*a - *b).abs() < 1e-4);
+            let mut xs = Vec::with_capacity(keys.len() * 8);
+            for w in keys.windows(2) {
+                for i in 0..8 {
+                    xs.push(w[0] + (w[1] - w[0]) * i as f32 / 8.0);
+                }
+            }
+            xs.push(len);
+            let stem = |k: usize, x: f32| stems.iter().find(|l| l.param == Stem(StemKind::ALL[k])).map_or(1.0, |l| l.value_at(x)).clamp(0.0, 1.0);
+            let value = |p: Param, x: f32| own(p).map_or(p.neutral(), |l| l.value_at(x));
+            let mut out: [Vec<(f32, f32)>; 4] = Default::default();
+            for &x in &xs {
+                let (v, g) = stem_emulation([stem(0, x), stem(1, x), stem(2, x), stem(3, x)]);
+                // volume gain = value², EQ gain = (2·knob)² below flat
+                out[0].push((x, value(Volume, x) * v.sqrt()));
+                for b in 0..3 {
+                    let k = value(params[b + 1], x);
+                    out[b + 1].push((x, eq_knob(eq_gain(k) * g[b])));
+                }
+            }
+            for (p, pts) in params.into_iter().zip(out) {
+                let pts = simplify(&pts, 2e-3);
+                lanes.retain(|l| !(l.side == side && l.param == p));
+                if pts.iter().any(|q| (q.1 - p.neutral()).abs() > 1e-3) {
+                    lanes.push(Lane { side, param: p, points: pts });
+                }
+            }
+        }
         Transition { style: self.style, beats: self.beats, lanes, locked: self.locked }
     }
+}
+
+/// How stem gains (drums, bass, melody, vocals; 0..1) sound on a track without stems: returns the
+/// volume gain and the low, mid and high EQ gains (≤ 1). Each band gets the energy-weighted level
+/// of the stems that play in it; the loudest band sets the volume and the EQ cuts the others.
+pub fn stem_emulation(s: [f32; 4]) -> (f32, [f32; 3]) {
+    let band = |w: [f32; 4]| (0..4).map(|k| w[k] * s[k].clamp(0.0, 1.0).powi(2)).sum::<f32>().sqrt();
+    let g = [band(STEM_BAND_LOW), band(STEM_BAND_MID), band(STEM_BAND_HIGH)];
+    let v = g.iter().copied().fold(0.0, f32::max);
+    if v <= 1e-6 {
+        return (0.0, [1.0; 3]);
+    }
+    (v, g.map(|b| b / v))
+}
+
+/// Share of each stem (drums, bass, melody, vocals) in the low, mid and high EQ band.
+const STEM_BAND_LOW: [f32; 4] = [0.25, 0.7, 0.05, 0.0];
+const STEM_BAND_MID: [f32; 4] = [0.2, 0.1, 0.4, 0.3];
+const STEM_BAND_HIGH: [f32; 4] = [0.5, 0.0, 0.25, 0.25];
+
+/// EQ knob (0.5 flat) → gain, `(2k)²` below flat, +12 dB per knob unit above.
+fn eq_gain(k: f32) -> f32 {
+    if k <= 0.5 {
+        (2.0 * k).powi(2)
+    } else {
+        10f32.powf(12.0 * (k - 0.5) / 20.0)
+    }
+}
+
+fn eq_knob(g: f32) -> f32 {
+    if g <= 0.0 {
+        0.0
+    } else if g <= 1.0 {
+        0.5 * g.sqrt()
+    } else {
+        0.5 + 20.0 * g.log10() / 12.0
+    }
+}
+
+/// Drop the points that lie on the line between the points kept around them (within `tol`).
+fn simplify(p: &[(f32, f32)], tol: f32) -> Vec<(f32, f32)> {
+    if p.len() <= 2 {
+        return p.to_vec();
+    }
+    let on_line = |a: (f32, f32), c: (f32, f32), mid: &[(f32, f32)]| {
+        mid.iter().all(|b| {
+            let t = if c.0 > a.0 { (b.0 - a.0) / (c.0 - a.0) } else { 0.0 };
+            (a.1 + (c.1 - a.1) * t - b.1).abs() <= tol
+        })
+    };
+    let mut out = vec![p[0]];
+    let mut a = 0;
+    for i in 1..p.len() - 1 {
+        if !on_line(p[a], p[i + 1], &p[a + 1..=i]) {
+            out.push(p[i]);
+            a = i;
+        }
+    }
+    out.push(p[p.len() - 1]);
+    out
 }
 
 impl Default for Transition {
@@ -299,6 +398,28 @@ pub struct MixTrack {
     /// Semitone shift applied on top of the track's key (harmonic correction).
     pub key_shift: i32,
     pub gain_db: f32,
+    /// Stem automation of the track itself (e.g. imported from DJ.Studio). It plays outside the
+    /// transitions; inside one, the transition's own lane for that stem wins.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stems: Vec<StemLane>,
+}
+
+impl MixTrack {
+    pub fn new(track_id: TrackId, mix_in: f64, mix_out: f64) -> Self {
+        MixTrack { track_id, mix_in, mix_out, key_shift: 0, gain_db: 0.0, stems: Vec::new() }
+    }
+
+    /// Gain of `stem` from the track's own stem lanes at track time `t` (s), if it has one.
+    pub fn stem_at(&self, stem: StemKind, t: f64) -> Option<f32> {
+        self.stems.iter().find(|l| l.stem == stem).map(|l| interpolate(&l.points, t as f32, 1.0))
+    }
+}
+
+/// Stem lane of a whole track: points (track seconds, gain 0..1).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StemLane {
+    pub stem: StemKind,
+    pub points: Vec<(f32, f32)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -448,18 +569,52 @@ mod stemless_tests {
     use super::*;
 
     #[test]
-    fn stem_blend_without_stems_keeps_the_outgoing_track_up() {
+    fn stem_blend_without_stems_follows_the_stems() {
         let t = Transition::new(TransitionStyle::StemBlend, 32);
         assert!(t.uses_stems());
         let f = t.without_stems();
         assert!(!f.uses_stems());
-        // outgoing at full level until three quarters, gone at the end; low end swapped at the midpoint
-        assert!((f.value(Side::Out, Param::Volume, 20.0) - 1.0).abs() < 1e-6);
-        assert!(f.value(Side::Out, Param::Volume, 32.0) < 1e-6);
-        assert!(f.value(Side::Out, Param::EqLow, 15.0) > 0.4 && f.value(Side::Out, Param::EqLow, 17.0) < 0.1);
+        // outgoing: mostly up while its drums play, gone at the end; lows cut when the bass leaves
+        assert!(f.value(Side::Out, Param::Volume, 4.0) > 0.9);
+        assert!(f.value(Side::Out, Param::Volume, 20.0) > 0.75);
+        assert!(f.value(Side::Out, Param::Volume, 32.0) < 1e-3);
+        assert!(f.value(Side::Out, Param::EqLow, 15.0) > f.value(Side::Out, Param::EqLow, 17.0) + 0.05);
+        // incoming: silent at the start, full at the end
+        assert!(f.value(Side::In, Param::Volume, 0.0) < 1e-3);
+        assert!((f.value(Side::In, Param::Volume, 32.0) - 1.0).abs() < 1e-3);
+        assert!((f.value(Side::In, Param::EqLow, 32.0) - 0.5).abs() < 1e-3);
         // styles without stems are unchanged
         let b = Transition::new(TransitionStyle::BassSwap, 32);
         assert_eq!(b.without_stems(), b);
+    }
+
+    #[test]
+    fn each_stem_transition_keeps_its_own_shape() {
+        use StemKind::*;
+        let side = |d: &[(f32, f32)], rest: f32| {
+            let mut t = Transition { style: TransitionStyle::StemBlend, beats: 32, lanes: vec![], locked: false };
+            t.lanes.push(Lane::new(Side::Out, Param::Stem(Drums), d));
+            for k in [Bass, Other, Vocals] {
+                t.lanes.push(Lane::new(Side::Out, Param::Stem(k), &[(0.0, rest)]));
+            }
+            t.without_stems()
+        };
+        // drums sloping out over the window, the rest muted: the level follows the drums
+        let a = side(&[(0.0, 1.0), (32.0, 0.0)], 0.0);
+        let (v0, v16, v32) = (a.value(Side::Out, Param::Volume, 0.0), a.value(Side::Out, Param::Volume, 16.0), a.value(Side::Out, Param::Volume, 32.0));
+        assert!(v0 > v16 && v16 > v32 && v32 < 1e-3, "{v0} {v16} {v32}");
+        assert!(v0 < 0.95, "only the drums play: quieter than the full track");
+        // drums held, the rest playing: full level until the end
+        let b = side(&[(0.0, 1.0)], 1.0);
+        assert!((b.value(Side::Out, Param::Volume, 16.0) - 1.0).abs() < 1e-3);
+        // a crossfade lane still applies on top
+        let mut c = Transition::new(TransitionStyle::StemBlend, 32);
+        c.lanes.retain(|l| l.side == Side::In);
+        c.lanes.push(Lane::new(Side::Out, Param::Volume, &[(0.0, 1.0), (16.0, 1.0), (32.0, 0.0)]));
+        c.lanes.push(Lane::new(Side::Out, Param::Stem(Vocals), &[(0.0, 1.0)]));
+        let c = c.without_stems();
+        assert!((c.value(Side::Out, Param::Volume, 8.0) - 1.0).abs() < 1e-3);
+        assert!((c.value(Side::Out, Param::Volume, 24.0) - 0.5).abs() < 1e-2);
     }
 }
 

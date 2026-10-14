@@ -55,8 +55,9 @@ fn check(opts: Options, frames: usize, start: usize, tol: f32) {
     let mut per = [0f32; 4];
     let mut worst_frame = [0usize; 4];
     for c in 0..target.num_chunks() {
-        let data = &target.chunk(c).unwrap().data;
-        for (k, f) in data.chunks_exact(STEM_CHANNELS).enumerate() {
+        let chunk = target.chunk(c).unwrap();
+        for k in 0..chunk.frames() {
+            let f = chunk.frame(k);
             let i = c * STEM_CHUNK_FRAMES + k;
             for s in 0..4 {
                 let (dl, dr) = (f[2 * s] - full.stems[s].0[i], f[2 * s + 1] - full.stems[s].1[i]);

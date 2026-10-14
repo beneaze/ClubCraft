@@ -231,8 +231,8 @@ pub fn mashup_mix(name: &str, m: &Match, analyses: &HashMap<TrackId, Analysis>, 
     let gv = analyses.get(&m.vocal_track)?.grid?;
     let start = gv.time_of_bar((m.vocal_bar - lead_bars).max(0) as f64).max(0.0);
     let mut mix = Mix { name: name.to_string(), tempo: TempoMode::Glide, ..Default::default() };
-    mix.tracks.push(MixTrack { track_id: m.vocal_track, mix_in: start.min(tv), mix_out: tv, key_shift: m.key_shift, gain_db: 0.0 });
-    mix.tracks.push(MixTrack { track_id: m.inst_track, mix_in: ti, mix_out: analyses.get(&m.inst_track).map(|a| a.duration).unwrap_or(ti + 60.0).max(ti + 1.0), key_shift: 0, gain_db: 0.0 });
+    mix.tracks.push(MixTrack { track_id: m.vocal_track, mix_in: start.min(tv), mix_out: tv, key_shift: m.key_shift, gain_db: 0.0, stems: Vec::new() });
+    mix.tracks.push(MixTrack { track_id: m.inst_track, mix_in: ti, mix_out: analyses.get(&m.inst_track).map(|a| a.duration).unwrap_or(ti + 60.0).max(ti + 1.0), key_shift: 0, gain_db: 0.0, stems: Vec::new() });
     mix.transitions.push(Transition::new(TransitionStyle::Mashup, m.bars as u32 * 4));
     mix.normalize();
     Some(mix)
@@ -265,7 +265,7 @@ pub fn insert_after(mix: &mut Mix, k: usize, m: &Match, analyses: &HashMap<Track
     let out = analyses.get(&m.inst_track).map(clubcraft_core::planner::default_mix_out).unwrap_or(dur).max(ti + 1.0);
     let shift = mix.tracks[k].key_shift - m.key_shift;
     mix.tracks[k].mix_out = tv.max(mix.tracks[k].mix_in + 1.0);
-    mix.tracks.insert(k + 1, MixTrack { track_id: m.inst_track, mix_in: ti, mix_out: out, key_shift: shift, gain_db: 0.0 });
+    mix.tracks.insert(k + 1, MixTrack { track_id: m.inst_track, mix_in: ti, mix_out: out, key_shift: shift, gain_db: 0.0, stems: Vec::new() });
     mix.transitions.insert(k, Transition::new(TransitionStyle::Mashup, m.bars as u32 * 4));
     mix.normalize();
     true

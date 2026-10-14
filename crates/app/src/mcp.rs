@@ -878,7 +878,6 @@ fn export_mix(lib: &Library, a: &Value, call: &Call) -> Result<Value> {
     }
     let all = lib.all_analyses()?;
     let analyses: HashMap<TrackId, Analysis> = mix.tracks.iter().filter_map(|t| all.get(&t.track_id).map(|a| (t.track_id, a.clone()))).collect();
-    let mix = crate::live::adapter::playable_mix(&mix, &|id| analyses.get(&id).is_some_and(|a| a.stems_model.is_some()));
     call.progress(0.0, 1.0, "Waiting for other heavy jobs");
     let _heavy = crate::jobs::heavy();
     let opts = clubcraft_engine::RenderOptions { format: format.wav(), tail_secs: prefs.export_tail_secs, ..Default::default() };

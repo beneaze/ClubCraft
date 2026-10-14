@@ -270,8 +270,8 @@ mod tests {
     #[test]
     fn glide_timeline() {
         let mut mix = Mix::default();
-        mix.tracks.push(MixTrack { track_id: 1, mix_in: 0.0, mix_out: 60.0, key_shift: 0, gain_db: 0.0 });
-        mix.tracks.push(MixTrack { track_id: 2, mix_in: 0.0, mix_out: 60.0, key_shift: 0, gain_db: 0.0 });
+        mix.tracks.push(MixTrack { track_id: 1, mix_in: 0.0, mix_out: 60.0, key_shift: 0, gain_db: 0.0, stems: Vec::new() });
+        mix.tracks.push(MixTrack { track_id: 2, mix_in: 0.0, mix_out: 60.0, key_shift: 0, gain_db: 0.0, stems: Vec::new() });
         mix.normalize();
         mix.transitions[0] = Transition::new(TransitionStyle::Crossfade, 32);
         let tl = MixTimeline::build(&mix, &|id| Some(if id == 1 { an(120.0, 120.0) } else { an(126.0, 180.0) }));

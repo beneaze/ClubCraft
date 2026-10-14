@@ -61,6 +61,8 @@ pub struct MixSchedule {
     pub samples: Vec<crate::samples::SchedSample>,
     /// A sample lane is soloed (silences the decks).
     pub sample_solo: bool,
+    /// The mix tracks, for their own stem lanes (`MixTrack::stems`).
+    pub mix_tracks: Vec<clubcraft_core::MixTrack>,
 }
 
 impl std::fmt::Debug for MixSchedule {
@@ -125,6 +127,7 @@ impl MixSchedule {
                 })
                 .collect(),
             sample_solo: mix.sample_lanes.iter().any(|l| l.solo),
+            mix_tracks: mix.tracks.clone(),
         }
     }
 
@@ -477,11 +480,22 @@ impl Conductor {
                 } else {
                     on_air = on_air.max(i);
                 }
+                let mut window = (i > 0 && b0 < tl.transitions[i - 1].start_beat + tl.transitions[i - 1].beats).then(|| (&s.transitions[i - 1], Side::In));
                 if let Some(x) = tl.transitions.get(i) {
                     if b0 >= x.start_beat {
                         let xb = (b0 - x.start_beat) as f32;
                         lanes = LaneValues::from_transition(&s.transitions[i], Side::Out, xb);
                         cur_transition = Some((i, xb));
+                        window = Some((&s.transitions[i], Side::Out));
+                    }
+                }
+                // the track's own stem lanes, where the transition has none for that stem
+                if let Some(mt) = s.mix_tracks.get(i).filter(|m| !m.stems.is_empty()) {
+                    for (k, st) in StemKind::ALL.iter().enumerate() {
+                        let driven = window.is_some_and(|(t, side)| t.lanes.iter().any(|l| l.side == side && l.param == Param::Stem(*st)));
+                        if let (false, Some(g)) = (driven, mt.stem_at(*st, p0)) {
+                            lanes.stems[k] = g;
+                        }
                     }
                 }
                 let mut vol = lanes.volume;
@@ -489,9 +503,13 @@ impl Conductor {
                     for (k, st) in StemKind::ALL.iter().enumerate() {
                         deck.set_stem_automation(*st, lanes.stems[k]);
                     }
-                } else {
-                    // no stems: approximate the stem lanes with the channel volume
-                    vol *= lanes.stems.iter().sum::<f32>() / 4.0;
+                } else if lanes.stems.iter().any(|g| (g - 1.0).abs() > 1e-4) {
+                    // no stems: emulate the stem gains with the volume and EQ
+                    let (v, eq) = clubcraft_core::stem_emulation(lanes.stems);
+                    vol *= v.sqrt();
+                    for b in 0..3 {
+                        lanes.eq[b] = eq_combine(lanes.eq[b], crate::dsp::eq_gain_to_knob(eq[b]));
+                    }
                 }
                 // studio lane mixer: gain adds to the track gain, mute/solo silence the lane
                 // (through the channel's gain smoothers: click free), lane EQ is a base the

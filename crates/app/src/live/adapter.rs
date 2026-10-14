@@ -286,8 +286,7 @@ impl LiveEngine {
         self.stop_preview();
         self.stop_mix(STUDIO_DECKS);
         self.stop_mix(LIVE_DECKS);
-        let mix = playable_mix(mix, &|id| sh.analyses.get(&id).is_some_and(|a| a.stems_model.is_some()));
-        let mut p = MixPlayer::lazy(&mix, &|id| sh.analyses.get(&id).cloned(), decks);
+        let mut p = MixPlayer::lazy(mix, &|id| sh.analyses.get(&id).cloned(), decks);
         if let Some(h) = self.handle.as_mut() {
             if let Err(e) = p.play(h, from) {
                 log::warn!("mix: {e:#}");
@@ -305,8 +304,7 @@ impl LiveEngine {
         self.stop_preview();
         self.stop_mix(STUDIO_DECKS);
         self.stop_mix(LIVE_DECKS);
-        let mix = playable_mix(mix, &|id| sh.analyses.get(&id).is_some_and(|a| a.stems_model.is_some()));
-        let mut p = MixPlayer::lazy(&mix, &|id| sh.analyses.get(&id).cloned(), STUDIO_DECKS);
+        let mut p = MixPlayer::lazy(mix, &|id| sh.analyses.get(&id).cloned(), STUDIO_DECKS);
         if let Some(h) = self.handle.as_mut() {
             if let Err(e) = p.play(h, from) {
                 log::warn!("preview: {e:#}");
@@ -355,9 +353,8 @@ impl LiveEngine {
     /// Push mix edits into a running studio preview.
     pub fn studio_update(&mut self, mix: &Mix, sh: &Shared) {
         let state = self.state();
-        let mix = playable_mix(mix, &|id| sh.analyses.get(&id).is_some_and(|a| a.stems_model.is_some()));
         if let (Some(p), Some(h)) = (self.studio_player.as_mut(), self.handle.as_mut()) {
-            if let Err(e) = p.update_lazy(&mix, &|id| sh.analyses.get(&id).cloned(), h, &state) {
+            if let Err(e) = p.update_lazy(mix, &|id| sh.analyses.get(&id).cloned(), h, &state) {
                 log::warn!("mix update: {e:#}");
             }
         }
@@ -368,7 +365,7 @@ impl LiveEngine {
         let done = Arc::new(Mutex::new(None));
         self.export = Some(Export { progress: progress.clone(), done: done.clone() });
         let analyses: HashMap<TrackId, clubcraft_core::Analysis> = mix.tracks.iter().filter_map(|t| sh.analyses.get(&t.track_id).map(|a| (t.track_id, a.clone()))).collect();
-        let mix = playable_mix(mix, &|id| analyses.get(&id).is_some_and(|a| a.stems_model.is_some()));
+        let mix = mix.clone();
         let cache = self.cache.clone();
         let (format, cue_sheet, tail) = (self.prefs.export_format.wav(), self.prefs.export_cue_sheet, self.prefs.export_tail_secs);
         std::thread::spawn(move || {
@@ -609,20 +606,6 @@ impl LiveEngine {
             A::AutomixQueue(ids) => self.automix_queue = ids,
         }
     }
-}
-
-/// Stem-based transition styles need stems on both tracks. For transitions where a track has
-/// none (yet), play a bass-swap blend instead so the tracks never just overlap at full volume.
-pub fn playable_mix(mix: &Mix, has_stems: &dyn Fn(TrackId) -> bool) -> Mix {
-    let mut m = mix.clone();
-    let has = |i: usize| m.tracks.get(i).is_some_and(|t| has_stems(t.track_id));
-    let flags: Vec<bool> = (0..m.tracks.len()).map(has).collect();
-    for (k, tr) in m.transitions.iter_mut().enumerate() {
-        if tr.uses_stems() && !(flags.get(k).copied().unwrap_or(false) && flags.get(k + 1).copied().unwrap_or(false)) {
-            *tr = tr.without_stems();
-        }
-    }
-    m
 }
 
 /// FX kinds selectable in the UI (index = `FxUi::kind`).

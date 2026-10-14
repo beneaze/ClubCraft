@@ -406,7 +406,7 @@ impl StudioView {
                 self.selection = Selection::Transition(k);
             }
             chip_r.on_hover_text(if tr.uses_stems() && !self.stems_ok(sh, k) {
-                "Click to edit this transition. One of the tracks has no stems yet, so this plays as an EQ blend with the same timing (shown in the clips)."
+                "Click to edit this transition. One of the tracks has no stems yet: its stem curves are imitated with volume and EQ (shown in the clips). Separate its stems for the real sound."
             } else {
                 "Click to edit this transition"
             });
@@ -658,11 +658,31 @@ impl StudioView {
             if let (Some(x), Some(tr)) = (self.timeline.transitions.get(i), self.effective_transition(sh, i)) {
                 regions.push((x.start_beat, x.start_beat + x.beats, tr, Side::Out, i));
             }
+            // the track's own stem lanes (outside transitions, and inside where the transition
+            // has no lane for that stem)
+            let own = self.mix.tracks.get(i).filter(|m| !m.stems.is_empty());
+            let own_gain = |b: f64, k: StemKind| own.and_then(|m| m.stem_at(k, self.timeline.track_pos(i, b))).unwrap_or(1.0).clamp(0.0, 1.0);
+            let paint_own = |b0: f64, b1: f64| {
+                if own.is_none() {
+                    return paint(b0, b1, [1.0; 4], 1.0);
+                }
+                let (x0, x1) = (x_of(self.timeline.sec_at_beat(b0)), x_of(self.timeline.sec_at_beat(b1)));
+                let (x0, x1) = (x0.max(clip.left() - 4.0), x1.min(clip.right() + 4.0));
+                if x1 <= x0 {
+                    return;
+                }
+                let (c0, c1) = (self.timeline.beat_at_sec(((x0 - x_of(0.0)) / self.zoom) as f64).max(b0), self.timeline.beat_at_sec(((x1 - x_of(0.0)) / self.zoom) as f64).min(b1));
+                let n = ((x1 - x0) / 4.0).clamp(1.0, 600.0) as usize;
+                for s in 0..n {
+                    let (s0, s1) = (c0 + (c1 - c0) * s as f64 / n as f64, c0 + (c1 - c0) * (s + 1) as f64 / n as f64);
+                    paint(s0, s1, StemKind::ALL.map(|k| own_gain((s0 + s1) * 0.5, k)), 1.0);
+                }
+            };
             let mut b = tt.start_beat;
             for (start, end, tr, side, k) in &regions {
                 let (start, r0, r1) = (*start, start.max(tt.start_beat), end.min(tt.end_beat));
                 if r0 > b {
-                    paint(b, r0, [1.0; 4], 1.0);
+                    paint_own(b, r0);
                 }
                 // the selected transition shows one row per stem (like DJ.Studio)
                 if self.selection == Selection::Transition(*k) && wf.stems.is_some() && audible {
@@ -676,13 +696,23 @@ impl StudioView {
                 for s in 0..n {
                     let (s0, s1) = (r0 + (r1 - r0) * s as f64 / n as f64, r0 + (r1 - r0) * (s + 1) as f64 / n as f64);
                     let xb = ((s0 + s1) * 0.5 - start) as f32;
-                    let gains = [StemKind::Drums, StemKind::Bass, StemKind::Other, StemKind::Vocals].map(|k| tr.value(*side, Param::Stem(k), xb).clamp(0.0, 1.0));
+                    let orig = &self.mix.transitions[*k];
+                    let has = |t: &Transition, st: StemKind| t.lanes.iter().any(|l| l.side == *side && l.param == Param::Stem(st));
+                    let gains = StemKind::ALL.map(|st| {
+                        if has(tr, st) {
+                            tr.value(*side, Param::Stem(st), xb).clamp(0.0, 1.0)
+                        } else if has(orig, st) {
+                            1.0 // emulated by the volume and EQ
+                        } else {
+                            own_gain((s0 + s1) * 0.5, st)
+                        }
+                    });
                     paint(s0, s1, gains, tr.value(*side, Param::Volume, xb).clamp(0.0, 1.0));
                 }
                 b = b.max(r1);
             }
             if b < tt.end_beat {
-                paint(b, tt.end_beat, [1.0; 4], 1.0);
+                paint_own(b, tt.end_beat);
             }
         }
         let bar_px = (tt.grid.bar_len() as f32 * self.zoom).max(0.1);
@@ -958,10 +988,12 @@ impl StudioView {
         has(k) && has(k + 1)
     }
 
-    /// Transition `k` as it plays (stem lanes fall back to an EQ blend without stems).
+    /// Transition `k` as it plays: on a track without stems, the stem lanes are emulated with its
+    /// volume and EQ.
     pub(crate) fn effective_transition(&self, sh: &Shared, k: usize) -> Option<Transition> {
         let tr = self.mix.transitions.get(k)?;
-        Some(if tr.uses_stems() && !self.stems_ok(sh, k) { tr.without_stems() } else { tr.clone() })
+        let has = |i: usize| self.mix.tracks.get(i).is_some_and(|t| sh.analyses.get(&t.track_id).is_some_and(|a| a.stems_model.is_some()));
+        Some(if tr.uses_stems() && !self.stems_ok(sh, k) { tr.without_stems_on(!has(k), !has(k + 1)) } else { tr.clone() })
     }
 
     /// Ruler strip at the top of a clip: bar numbers of the track (bar 1 = first downbeat), bar and
