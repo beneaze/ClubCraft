@@ -61,6 +61,23 @@ impl WorkerContext {
     }
 }
 
+/// How good the stems of a model are (higher is better; 0 = unknown).
+pub fn model_rank(model: &str) -> u8 {
+    match model {
+        "melroformer+htdemucs_ft" => 3,
+        "htdemucs_ft" => 2,
+        "htdemucs" | "htdemucs_6s" => 1,
+        _ => 0,
+    }
+}
+
+/// Whether stems from `model` are at least as good as `quality` ("fast" | "high" | "best" …).
+pub fn stems_meet(model: Option<&str>, quality: &str) -> bool {
+    let want = Quality::parse(quality).unwrap_or(Quality::Best).options().model;
+    let want = if Quality::parse(quality) == Some(Quality::Best) { "melroformer+htdemucs_ft".to_string() } else { want };
+    model.is_some_and(|m| model_rank(m) >= model_rank(&want))
+}
+
 /// Model name stored with the cached stems of a track, if any.
 pub fn cached_stems_model(hash: &str) -> Option<String> {
     let p = stems_path(hash);
@@ -80,17 +97,11 @@ pub fn separate(
 ) -> Result<()> {
     let t = lib.track(id)?.context("unknown track")?;
     let q = s.quality();
-    let want = q.options().model;
+    let want = if q == Quality::Best { "melroformer+htdemucs_ft".to_string() } else { q.options().model };
     let path = stems_path(&t.hash);
     if let Some(m) = cached_stems_model(&t.hash) {
         // Keep existing stems unless they came from a weaker model than requested.
-        let rank = |m: &str| match m {
-            "melroformer+htdemucs_ft" => 3,
-            "htdemucs_ft" => 2,
-            "htdemucs" | "htdemucs_6s" => 1,
-            _ => 0,
-        };
-        if rank(&m) >= rank(&want) {
+        if model_rank(&m) >= model_rank(&want) {
             return Ok(());
         }
     }

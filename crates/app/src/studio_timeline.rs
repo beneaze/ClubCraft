@@ -531,8 +531,9 @@ impl StudioView {
             }
             if chip_r.dragged() && self.drag == Some(Drag::TransitionMove(k)) {
                 self.drag_acc += chip_r.drag_delta().x;
+                // a beat (a quarter bar) per step; Shift: quarter beats
                 let fine = ui.input(|i| i.modifiers.shift);
-                if let Some(n) = self.take_beats(k, if fine { 1 } else { 4 }) {
+                if let Some(n) = self.take_beats(k, if fine { 0.25 } else { 1.0 }) {
                     self.move_transition(k, n);
                 }
             }
@@ -542,9 +543,9 @@ impl StudioView {
             chip_r.on_hover_text(if locked {
                 "Locked: unlock it in the transition editor to move it"
             } else if imitated {
-                "Drag to move (Shift: by beats) · drag an edge to change the length · click to edit. One of the tracks has no stems yet: its stem curves are imitated with volume and EQ."
+                "Drag to move by beats (Shift: quarter beats) · drag an edge to change the length · click to edit. One of the tracks has no stems yet: its stem curves are imitated with volume and EQ."
             } else {
-                "Drag to move (Shift: by beats) · drag an edge to change the length · click to edit"
+                "Drag to move by beats (Shift: quarter beats) · drag an edge to change the length · click to edit"
             });
             // edges
             for (end, xx) in [(false, xs), (true, xe)] {
@@ -569,11 +570,11 @@ impl StudioView {
                 if r.dragged() && self.drag == Some(which) {
                     self.drag_acc += r.drag_delta().x;
                     let fine = ui.input(|i| i.modifiers.shift);
-                    if let Some(n) = self.take_beats(k, if fine { 1 } else { 4 }) {
+                    if let Some(n) = self.take_beats(k, if fine { 1.0 } else { 4.0 }) {
                         if end {
-                            self.resize_transition_end(k, n);
+                            self.resize_transition_end(k, n as i32);
                         } else {
-                            self.resize_transition_start(k, n);
+                            self.resize_transition_start(k, n as i32);
                         }
                     }
                 }
@@ -747,12 +748,12 @@ impl StudioView {
                             changed = true;
                         }
                         // on / off per stem and side (DJ.Studio's stem toggles)
-                        let b = Rect::from_min_size(pos2(area.left() + 4.0, rr.center().y - 7.0), vec2(16.0, 14.0));
+                        let b = Rect::from_min_size(pos2(area.left() + 4.0, rr.center().y - 8.0), vec2(20.0, 16.0));
                         if b.right() < area.right() && rr.height() >= 12.0 {
                             let br = ui.interact(b, Id::new(("ttoggle", k, side == Side::In, row)), Sense::click());
                             painter.rect_filled(b, 4.0, if off { theme::PANEL } else { col });
                             painter.rect_stroke(b, 4.0, Stroke::new(1.0, col), StrokeKind::Inside);
-                            painter.text(b.center(), egui::Align2::CENTER_CENTER, &stem.label()[..1], egui::FontId::proportional(10.0), if off { col } else { Color32::BLACK });
+                            widgets::stem_icon(&painter, b.shrink2(vec2(3.0, 2.0)), stem, if off { col } else { Color32::BLACK });
                             if br.hovered() {
                                 ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
                             }
@@ -841,12 +842,12 @@ impl StudioView {
 
     /// Convert accumulated drag pixels into steps of `per` beats at the tempo of track `i`;
     /// returns the number of beats.
-    fn take_beats(&mut self, i: usize, per: i32) -> Option<i32> {
+    fn take_beats(&mut self, i: usize, per: f32) -> Option<f32> {
         let tt = self.timeline.tracks.get(i)?;
-        let px = (tt.grid.beat_len() as f32 * per as f32 * self.zoom).max(1.0);
-        let steps = (self.drag_acc / px).trunc() as i32;
-        if steps != 0 {
-            self.drag_acc -= steps as f32 * px;
+        let px = (tt.grid.beat_len() as f32 * per * self.zoom).max(1.0);
+        let steps = (self.drag_acc / px).trunc();
+        if steps != 0.0 {
+            self.drag_acc -= steps * px;
             Some(steps * per)
         } else {
             None
@@ -854,7 +855,7 @@ impl StudioView {
     }
 
     /// Move transition `k` by `beats` (the outgoing track's mix-out; the incoming track follows).
-    pub(crate) fn move_transition(&mut self, k: usize, beats: i32) {
+    pub(crate) fn move_transition(&mut self, k: usize, beats: f32) {
         let (bl, dur) = (self.timeline.tracks[k].grid.beat_len(), self.timeline.tracks[k].duration);
         let mt = &mut self.mix.tracks[k];
         let nv = mt.mix_out + beats as f64 * bl;

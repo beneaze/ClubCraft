@@ -163,8 +163,11 @@ pub struct Prefs {
     pub wave_zoom_secs: f64,
     // ------------------------------------------------------------ analysis & stems
     pub separate_stems: bool,
-    /// "fast" | "high" | "ultra" | "best".
+    /// Stem quality for playback: what decks, the studio and background separation use
+    /// ("fast" | "high" | "ultra" | "best").
     pub stem_quality: String,
+    /// Stem quality for exporting a mix: tracks with weaker stems are separated again first.
+    pub export_stem_quality: String,
     pub deep_structure: bool,
     pub bpm_min: f64,
     pub bpm_max: f64,
@@ -211,6 +214,7 @@ impl Default for Prefs {
             wave_zoom_secs: 8.0,
             separate_stems: false,
             stem_quality: if cfg!(target_os = "macos") { "best".into() } else { "high".into() },
+            export_stem_quality: if cfg!(target_os = "macos") { "best".into() } else { "high".into() },
             deep_structure: false,
             bpm_min: 70.0,
             bpm_max: 180.0,

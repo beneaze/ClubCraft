@@ -77,6 +77,8 @@ struct PendingExport {
     out: std::path::PathBuf,
     tracks: Vec<TrackId>,
     total: usize,
+    /// Stem quality the export waits for.
+    quality: String,
 }
 
 pub struct App {
@@ -338,6 +340,7 @@ impl App {
             has_stems: true,
         };
         self.eng.prefs = p.clone();
+        *self.eng.sep.quality.lock() = p.stem_quality.clone();
         if !first {
             p.save();
         }
@@ -425,7 +428,7 @@ impl App {
     /// Start a waiting export once its stems are separated (or the jobs ended / were stopped).
     fn tick_pending_export(&mut self) {
         let Some(pe) = &self.pending_export else { return };
-        let missing = pe.tracks.iter().filter(|id| !self.sh.analyses.get(id).is_some_and(|a| a.stems_model.is_some())).count();
+        let missing = pe.tracks.iter().filter(|id| !crate::pipeline::stems_meet(self.sh.analyses.get(id).and_then(|a| a.stems_model.as_deref()), &pe.quality)).count();
         self.studio.render_progress = Some((pe.total - missing) as f32 / pe.total.max(1) as f32);
         self.studio.render_label = format!("Stems {}/{}", pe.total - missing, pe.total);
         if missing == 0 || self.jobs.pending() == 0 {
@@ -576,16 +579,17 @@ impl App {
                 let name: String = self.studio.mix.name.chars().map(|c| if c == '/' || c == ':' { '-' } else { c }).collect();
                 if let Some(out) = rfd::FileDialog::new().set_directory(&dir).set_file_name(format!("{name}.wav")).add_filter("WAV", &["wav"]).save_file() {
                     // the heavy part happens here: stems for the tracks whose stem automation lacks them
-                    let need = self.studio.tracks_missing_stems(&self.sh);
+                    let quality = self.prefs.export_stem_quality.clone();
+                    let need = self.studio.tracks_needing_stems(&self.sh, Some(&quality));
                     if need.is_empty() {
                         self.eng.export_mix(&self.studio.mix, out, &self.sh);
                         self.status = "Rendering mix…".into();
                     } else {
                         for id in &need {
-                            self.jobs.separate_now(*id);
+                            self.jobs.separate_at(*id, &quality);
                         }
-                        self.status = format!("Separating stems for {} track(s), then rendering…", need.len());
-                        self.pending_export = Some(PendingExport { out, total: need.len(), tracks: need });
+                        self.status = format!("Separating stems ({quality}) for {} track(s), then rendering…", need.len());
+                        self.pending_export = Some(PendingExport { out, total: need.len(), tracks: need, quality });
                     }
                 }
             }
@@ -951,13 +955,27 @@ impl App {
             "high" => "High",
             _ => "Fast",
         };
-        let label = RichText::new(format!("Stems · {q}{}", if p2.separate_stems { " · auto" } else { "" })).size(12.5).color(theme::TEXT_DIM);
+        let name = |q: &str| match q {
+            "best" => "Best",
+            "high" => "High",
+            _ => "Fast",
+        };
+        let qe = name(&p2.export_stem_quality);
+        let both = if qe == q { q.to_string() } else { format!("{q} · export {qe}") };
+        let label = RichText::new(format!("Stems · {both}{}", if p2.separate_stems { " · auto" } else { "" })).size(12.5).color(theme::TEXT_DIM);
         ui.menu_button(label, |ui| {
             ui.set_min_width(300.0);
-            ui.label(RichText::new("Stem quality").size(11.5).color(theme::TEXT_DIM));
+            ui.label(RichText::new("Stem quality for playback").size(11.5).color(theme::TEXT_DIM));
             ui.selectable_value(&mut p2.stem_quality, "best".to_string(), "Best: RoFormer vocals + htdemucs_ft (~2.5 min/track)");
             ui.selectable_value(&mut p2.stem_quality, "high".to_string(), "High: htdemucs_ft (~80 s/track)");
             ui.selectable_value(&mut p2.stem_quality, "fast".to_string(), "Fast: htdemucs (~17 s/track)");
+            ui.separator();
+            ui.label(RichText::new("Stem quality for export").size(11.5).color(theme::TEXT_DIM));
+            ui.horizontal(|ui| {
+                for (q, l) in [("best", "Best"), ("high", "High"), ("fast", "Fast")] {
+                    ui.selectable_value(&mut p2.export_stem_quality, q.to_string(), l);
+                }
+            });
             ui.separator();
             ui.checkbox(&mut p2.separate_stems, "Separate in the background").on_hover_text("Separate stems for every imported and opened track in the background (uses a lot of CPU / GPU for a while). Off: stems are separated on demand, e.g. when you export a mix or press 'Stems missing' in the studio.");
         });

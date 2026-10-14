@@ -32,7 +32,8 @@ pub enum Event {
 #[derive(Debug, Clone)]
 enum Job {
     Import(Vec<PathBuf>, bool),
-    Separate(TrackId),
+    /// Separate stems; `Some(quality)` overrides the playback quality (export).
+    Separate(TrackId, Option<String>),
     Analyze(TrackId),
 }
 
@@ -125,13 +126,18 @@ impl Jobs {
     /// separation job re-analyses with the stems when it is done.
     /// Separate stems now (front of the queue), then re-analyse.
     pub fn separate_now(&self, id: TrackId) {
-        self.gpu.push(Job::Separate(id), true);
+        self.gpu.push(Job::Separate(id, None), true);
+    }
+
+    /// Separate now at `quality` (e.g. the export quality), unless the cached stems are as good.
+    pub fn separate_at(&self, id: TrackId, quality: &str) {
+        self.gpu.push(Job::Separate(id, Some(quality.to_string())), true);
     }
 
     pub fn process(&self, id: TrackId, priority: bool) {
         self.cpu.push(Job::Analyze(id), priority);
         if self.settings.lock().separate_stems {
-            self.gpu.push(Job::Separate(id), priority);
+            self.gpu.push(Job::Separate(id, None), priority);
         }
     }
 
@@ -236,7 +242,7 @@ fn worker(q: Arc<Queue>, other: Arc<Queue>, tx: Sender<Event>, settings: Arc<Mut
                                     // later; analysis is redone with the stems afterwards.
                                     other_or_self(&q, &other, gpu, false).push(Job::Analyze(id), false);
                                     if s.separate_stems {
-                                        other_or_self(&q, &other, gpu, true).push(Job::Separate(id), false);
+                                        other_or_self(&q, &other, gpu, true).push(Job::Separate(id, None), false);
                                     }
                                 }
                             }
@@ -252,8 +258,12 @@ fn worker(q: Arc<Queue>, other: Arc<Queue>, tx: Sender<Event>, settings: Arc<Mut
                 let _ = tx.send(Event::LibraryChanged);
                 let _ = tx.send(Event::Finished { track: None, stage: Stage::Import });
             }
-            Job::Separate(id) => {
+            Job::Separate(id, quality) => {
                 let _heavy = heavy();
+                let s = match quality {
+                    Some(q) => pipeline::Settings { quality: q, ..s.clone() },
+                    None => s.clone(),
+                };
                 let r = pipeline::separate(&lib, &mut ctx, id, &s, &cancel, &mut |frac, label| {
                     let _ = tx.send(Event::Progress { track: Some(id), stage: Stage::Separate, frac, label: label.to_string() });
                 });

@@ -222,11 +222,16 @@ pub fn save_stems_with_model(path: &Path, stems: &Stems, model: &str) -> Result<
 
 /// Save a (complete) [`StemTrack`]; missing chunks are written as silence.
 pub fn save_stem_track(path: &Path, t: &StemTrack) -> Result<()> {
+    save_stem_track_as(path, t, &t.model)
+}
+
+/// [`save_stem_track`], recording `model` as the model that produced the stems.
+pub fn save_stem_track_as(path: &Path, t: &StemTrack, model: &str) -> Result<()> {
     let peak = (0..t.num_chunks())
         .filter_map(|c| t.chunk(c))
         .map(|c| c.peak())
         .fold(0f32, f32::max);
-    write_flac(path, t.frames, &t.model, peak, &|a, b, k, out| {
+    write_flac(path, t.frames, model, peak, &|a, b, k, out| {
         // Blocks never straddle chunks: BLOCK divides STEM_CHUNK_FRAMES.
         let c = a / STEM_CHUNK_FRAMES;
         let o = (a - c * STEM_CHUNK_FRAMES) * STEM_CHANNELS;

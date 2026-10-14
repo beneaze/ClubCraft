@@ -228,3 +228,49 @@ pub fn logo_mark(ui: &mut Ui, size: f32, color: Color32) -> Response {
     p.rect_filled(Rect::from_center_size(at(0.5, 0.715), vec2(0.05 * k, 0.085 * k)), 0.012 * k, color);
     resp
 }
+
+/// A small symbol for a stem, drawn into `r` (about 14 × 12 px): a drum, a bass guitar, a note
+/// or a microphone.
+pub fn stem_icon(p: &egui::Painter, r: Rect, stem: clubcraft_core::StemKind, color: Color32) {
+    use clubcraft_core::StemKind::*;
+    let s = r.height().min(r.width()) / 12.0;
+    let c = r.center();
+    let at = |x: f32, y: f32| c + vec2(x * s, y * s);
+    let line = Stroke::new((1.3 * s).max(1.0), color);
+    match stem {
+        Drums => {
+            // snare: shell with its top skin (a lighter ellipse), two crossed sticks above
+            p.rect_filled(Rect::from_min_max(at(-5.5, 0.5), at(5.5, 5.0)), egui::CornerRadius { nw: 0, ne: 0, sw: (2.0 * s) as u8, se: (2.0 * s) as u8 }, color);
+            p.add(egui::Shape::ellipse_filled(at(0.0, 0.5), vec2(5.5 * s, 2.0 * s), color));
+            p.add(egui::Shape::ellipse_stroke(at(0.0, 0.5), vec2(4.3 * s, 1.1 * s), Stroke::new((0.9 * s).max(0.8), color.gamma_multiply(0.45))));
+            p.line_segment([at(-5.0, -6.0), at(2.5, -1.4)], line);
+            p.line_segment([at(5.0, -6.0), at(-2.5, -1.4)], line);
+        }
+        Bass => {
+            // bass guitar: body low left, long neck to the upper right, headstock
+            p.circle_filled(at(-2.6, 3.0), 2.9 * s, color);
+            p.circle_filled(at(-0.6, 0.9), 2.0 * s, color);
+            p.line_segment([at(-0.5, 1.0), at(4.4, -4.2)], Stroke::new((1.6 * s).max(1.0), color));
+            p.line_segment([at(4.0, -4.6), at(5.6, -6.0)], Stroke::new((2.4 * s).max(1.2), color));
+        }
+        Other => {
+            // beamed eighth notes
+            p.add(egui::Shape::ellipse_filled(at(-3.3, 3.6), vec2(2.1 * s, 1.6 * s), color));
+            p.add(egui::Shape::ellipse_filled(at(3.0, 2.4), vec2(2.1 * s, 1.6 * s), color));
+            p.line_segment([at(-1.4, 3.4), at(-1.4, -4.6)], line);
+            p.line_segment([at(4.9, 2.2), at(4.9, -5.8)], line);
+            p.line_segment([at(-1.4, -4.6), at(4.9, -5.8)], Stroke::new((2.0 * s).max(1.2), color));
+        }
+        Vocals => {
+            // microphone: capsule, holder and stand
+            p.rect_filled(Rect::from_min_max(at(-2.2, -6.0), at(2.2, 0.8)), 2.2 * s, color);
+            let holder: Vec<egui::Pos2> = (0..=12).map(|i| {
+                let a = std::f32::consts::PI * i as f32 / 12.0;
+                at(-3.6 * a.cos(), -1.4 + 3.6 * a.sin())
+            }).collect();
+            p.add(egui::Shape::line(holder, line));
+            p.line_segment([at(0.0, 2.2), at(0.0, 5.0)], line);
+            p.line_segment([at(-2.4, 5.4), at(2.4, 5.4)], line);
+        }
+    }
+}

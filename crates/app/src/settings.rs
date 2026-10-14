@@ -469,16 +469,23 @@ fn analysis_ui(ui: &mut Ui, p: &mut Prefs, actions: &mut Vec<SettingsAction>) {
     row(ui, "Separate automatically", |ui| {
         ui.checkbox(&mut p.separate_stems, "For every imported track (in the background)");
     });
-    row(ui, "Quality", |ui| {
-        for (q, l, h) in [
-            ("best", "Best", "Mel-Band RoFormer vocals + htdemucs_ft: cleanest vocals, ~2.5 min per track"),
-            ("high", "High", "htdemucs_ft, ~80 s per track"),
-            ("fast", "Fast", "htdemucs, ~17 s per track"),
-        ] {
+    let qualities = [
+        ("best", "Best", "Mel-Band RoFormer vocals + htdemucs_ft: cleanest vocals, ~2.5 min per track"),
+        ("high", "High", "htdemucs_ft, ~80 s per track"),
+        ("fast", "Fast", "htdemucs, ~17 s per track"),
+    ];
+    row(ui, "Quality for playback", |ui| {
+        for (q, l, h) in qualities {
             ui.selectable_value(&mut p.stem_quality, q.to_string(), l).on_hover_text(h);
         }
     });
-    hint(ui, "Decks always get fast stems within seconds when a track was not separated yet.");
+    hint(ui, "Used for the decks, the studio and background separation. A deck plays a track while its stems are separated: with Fast the part under the playhead has stems within a second, with Best after about 15 s.");
+    row(ui, "Quality for export", |ui| {
+        for (q, l, h) in qualities {
+            ui.selectable_value(&mut p.export_stem_quality, q.to_string(), l).on_hover_text(h);
+        }
+    });
+    hint(ui, "Before a mix is rendered, tracks whose stems are weaker than this are separated again. The better stems are kept for playback too.");
     ui.add_space(6.0);
     section(ui, "Library");
     ui.horizontal(|ui| {

@@ -133,6 +133,8 @@ pub(crate) fn load_uncached(id: TrackId) -> Result<Arc<LoadedTrack>> {
 pub struct LiveSeparator {
     tx: Sender<SepJob>,
     pub done: Receiver<TrackId>,
+    /// Playback stem quality ("fast" | "high" | "best"), set from the preferences.
+    pub quality: Arc<parking_lot::Mutex<String>>,
 }
 
 struct SepJob {
@@ -148,10 +150,12 @@ impl LiveSeparator {
     pub fn new() -> LiveSeparator {
         let (tx, rx) = unbounded::<SepJob>();
         let (dtx, drx) = unbounded();
+        let quality = Arc::new(parking_lot::Mutex::new("fast".to_string()));
+        let q_shared = quality.clone();
         std::thread::Builder::new()
             .name("cc-live-stems".into())
             .spawn(move || {
-                let mut sep: Option<clubcraft_stems::Separator> = None;
+                let mut sep: Option<(clubcraft_stems::Quality, clubcraft_stems::Separator)> = None;
                 loop {
                     // free the model while nothing is waiting
                     let job = match rx.try_recv() {
@@ -167,16 +171,27 @@ impl LiveSeparator {
                     if job.cancel.load(Ordering::Relaxed) || Arc::strong_count(&job.target) <= 1 {
                         continue;
                     }
-                    if sep.is_none() {
-                        match clubcraft_stems::Separator::new(clubcraft_stems::Quality::Fast) {
-                            Ok(s) => sep = Some(s),
+                    let q = clubcraft_stems::Quality::parse(&q_shared.lock()).unwrap_or(clubcraft_stems::Quality::Fast);
+                    if sep.as_ref().is_none_or(|s| s.0 != q) {
+                        sep = None;
+                        let loaded = clubcraft_stems::Separator::new(q).and_then(|s| {
+                            // without a GPU the large models are far too slow for a deck
+                            if s.backend_name() == "onnxruntime-cpu" && q != clubcraft_stems::Quality::Fast {
+                                drop(s);
+                                clubcraft_stems::Separator::new(clubcraft_stems::Quality::Fast)
+                            } else {
+                                Ok(s)
+                            }
+                        });
+                        match loaded {
+                            Ok(s) => sep = Some((q, s)),
                             Err(e) => {
                                 log::error!("live stems: {e:#}");
                                 continue;
                             }
                         }
                     }
-                    let s = sep.as_ref().unwrap();
+                    let s = &sep.as_ref().unwrap().1;
                     // stop early when the deck unloads the track (only our Arc is left)
                     let target = job.target.clone();
                     let cancel = job.cancel.clone();
@@ -187,7 +202,7 @@ impl LiveSeparator {
                     }, &cancel);
                     match r {
                         Ok(()) if target.is_complete() => {
-                            if let Err(e) = clubcraft_stems::save_stem_track(&stems_path(&job.hash), &target) {
+                            if let Err(e) = clubcraft_stems::save_stem_track_as(&stems_path(&job.hash), &target, s.model_name()) {
                                 log::warn!("saving live stems: {e:#}");
                             }
                             let _ = dtx.send(job.id);
@@ -198,7 +213,7 @@ impl LiveSeparator {
                 }
             })
             .expect("spawn live separator");
-        LiveSeparator { tx, done: drx }
+        LiveSeparator { tx, done: drx, quality }
     }
 
     fn submit(&self, id: TrackId, hash: String, audio: Arc<clubcraft_audio::AudioBuffer>, target: Arc<StemTrack>, start: usize) {

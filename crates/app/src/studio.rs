@@ -865,10 +865,20 @@ impl StudioView {
     /// Transport row: mixes / edit menus on the left, transport centred, output on the right.
     /// Tracks whose stem automation (transition stem lanes or their own lanes) plays without stems.
     pub(crate) fn tracks_missing_stems(&self, sh: &Shared) -> Vec<TrackId> {
+        self.tracks_needing_stems(sh, None)
+    }
+
+    /// Tracks whose stem automation needs stems they don't have: none at all, or (with
+    /// `quality`) only weaker ones than that quality.
+    pub(crate) fn tracks_needing_stems(&self, sh: &Shared, quality: Option<&str>) -> Vec<TrackId> {
         let mut ids: Vec<TrackId> = Vec::new();
         for (i, t) in self.mix.tracks.iter().enumerate() {
             let uses = !t.stems.is_empty() || (i > 0 && self.mix.transitions.get(i - 1).is_some_and(|x| x.uses_stems())) || self.mix.transitions.get(i).is_some_and(|x| x.uses_stems());
-            let has = sh.analyses.get(&t.track_id).is_some_and(|a| a.stems_model.is_some());
+            let model = sh.analyses.get(&t.track_id).and_then(|a| a.stems_model.as_deref());
+            let has = match quality {
+                Some(q) => crate::pipeline::stems_meet(model, q),
+                None => model.is_some(),
+            };
             if uses && !has && !ids.contains(&t.track_id) {
                 ids.push(t.track_id);
             }
@@ -1301,7 +1311,7 @@ mod tests {
         s.resize_transition_end(0, 4);
         assert_eq!(s.mix.transitions[0].beats, 40);
         // move a bar earlier
-        s.move_transition(0, -4);
+        s.move_transition(0, -4.0);
         assert!((s.mix.tracks[0].mix_out - 56.0).abs() < 1e-9);
     }
 }
