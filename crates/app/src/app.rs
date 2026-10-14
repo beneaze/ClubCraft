@@ -96,7 +96,6 @@ pub struct App {
     applied_prefs: Option<crate::prefs::Prefs>,
     pub mix_summaries: Vec<crate::home::MixSummary>,
     prepared: (i64, usize),
-    pub mashup: crate::mashup_view::MashupView,
     /// Last seen change from `clubcraft mcp` (marker mtime) and when it was checked.
     external: (Option<std::time::SystemTime>, f64),
     queued: std::collections::HashSet<TrackId>,
@@ -131,7 +130,7 @@ impl App {
         }
         let audio_cfg: clubcraft_engine::AudioConfig = cc.storage.and_then(|s| eframe::get_value(s, "audio")).unwrap_or_default();
         let midi_port: Option<String> = cc.storage.and_then(|s| eframe::get_value(s, "midi_port"));
-        let mut app = App { lib, sh, jobs, view, library: LibraryView::default(), status: String::new(), devctl: crate::devctl::DevCtl::from_env(), live: Default::default(), decks: vec![Default::default(); 2], mixer: Default::default(), browser: LibraryView::default(), studio: Default::default(), mixes: Vec::new(), eng: crate::live::adapter::LiveEngine::start(audio_cfg.clone()), settings: crate::settings::Settings::new(audio_cfg, midi_port), home: Default::default(), prefs, applied_prefs: None, menu: crate::menu::AppMenu::install(&cc.egui_ctx), ui_ctx_cmd: None, mix_summaries: Vec::new(), prepared: (-1, 0), mashup: Default::default(), queued: Default::default(), external: (std::fs::metadata(crate::mcp::change_marker()).and_then(|m| m.modified()).ok(), 0.0) };
+        let mut app = App { lib, sh, jobs, view, library: LibraryView::default(), status: String::new(), devctl: crate::devctl::DevCtl::from_env(), live: Default::default(), decks: vec![Default::default(); 2], mixer: Default::default(), browser: LibraryView::default(), studio: Default::default(), mixes: Vec::new(), eng: crate::live::adapter::LiveEngine::start(audio_cfg.clone()), settings: crate::settings::Settings::new(audio_cfg, midi_port), home: Default::default(), prefs, applied_prefs: None, menu: crate::menu::AppMenu::install(&cc.egui_ctx), ui_ctx_cmd: None, mix_summaries: Vec::new(), prepared: (-1, 0), queued: Default::default(), external: (std::fs::metadata(crate::mcp::change_marker()).and_then(|m| m.modified()).ok(), 0.0) };
         app.settings.connect_midi(app.eng.handle.as_ref());
         if let Some(e) = &app.eng.error {
             app.status = e.clone();
@@ -246,7 +245,10 @@ impl App {
                     }
                     self.sh.reload(&self.lib);
                 }
-                LibraryAction::FindMashups(id) => self.mashup.open_for(Some(id), &self.sh),
+                LibraryAction::FindMashups(id) => {
+                    self.studio.mashup.open_for(Some(id), &self.sh);
+                    self.view = View::Studio;
+                }
                 LibraryAction::Reveal(id) => {
                     if let Some(t) = self.sh.track(id) {
                         crate::platform::reveal(&t.path);
@@ -269,7 +271,8 @@ impl App {
             M::Settings => self.settings.open = true,
             M::MashupFinder => {
                 let id = self.studio.mix.tracks.first().map(|t| t.track_id);
-                self.mashup.open_for(id, &self.sh);
+                self.studio.mashup.open_for(id, &self.sh);
+                self.view = View::Studio;
             }
             M::NewMix => self.handle_home_actions(vec![H::NewMix { name: "New mix".into(), tracks: vec![], harmonize: false }]),
             M::AddMusic => self.handle_home_actions(vec![H::AddMusic]),
@@ -434,7 +437,7 @@ impl App {
                         self.studio.selection = crate::studio::Selection::Transition(0);
                         self.refresh_mixes();
                         self.view = View::Studio;
-                        self.mashup.open = false;
+                        self.studio.mashup.open = false;
                     }
                 }
                 M::Insert(m) => {
@@ -443,7 +446,7 @@ impl App {
                             self.studio.changed();
                             self.studio.selection = crate::studio::Selection::Transition(k);
                             self.view = View::Studio;
-                            self.mashup.open = false;
+                            self.studio.mashup.open = false;
                             self.eng.stop_preview();
                             self.status = "Mashup inserted into the mix".into();
                         }
@@ -454,7 +457,7 @@ impl App {
                         self.studio.changed();
                         self.studio.selection = crate::studio::Selection::Transition(k);
                         self.status = "Transition set to the mashup".into();
-                        self.mashup.open = false;
+                        self.studio.mashup.open = false;
                         self.eng.stop_preview();
                     }
                 }
@@ -467,10 +470,10 @@ impl App {
         for a in actions {
             match a {
                 A::SaveMix => self.save_mix(),
-                A::FindMashups(id) => self.mashup.open_for(id, &self.sh),
+                A::FindMashups(id) => self.studio.mashup.open_for(id, &self.sh),
                 A::FindVocalOver(k) => {
                     let mix = self.studio.mix.clone();
-                    self.mashup.open_for_transition(&mix, k, &self.sh);
+                    self.studio.mashup.open_for_transition(&mix, k, &self.sh);
                 }
                 A::ImportDjStudio => {
                     let tx = self.jobs.sender();
@@ -634,16 +637,17 @@ impl App {
                 // `mashup <track query>`: open the finder for that track's vocals
                 let q = arg.to_lowercase();
                 let id = self.sh.tracks.iter().find(|t| t.display_name().to_lowercase().contains(&q)).map(|t| t.id);
-                self.mashup.open_for(id, &self.sh);
+                self.studio.mashup.open_for(id, &self.sh);
+                self.view = View::Studio;
             }
             "mashup-preview" | "mashup-newmix" | "mashup-use" => {
                 // act on result `arg` of the finder (tests)
                 use crate::mashup_view::MashupAction as M;
-                if let Some(m) = self.mashup.result(arg.trim().parse().unwrap_or(0)) {
+                if let Some(m) = self.studio.mashup.result(arg.trim().parse().unwrap_or(0)) {
                     let a = match c {
                         "mashup-preview" => M::Preview(m),
                         "mashup-newmix" => M::NewMix(m),
-                        _ => M::Apply(m, self.mashup.transition_index().unwrap_or(0)),
+                        _ => M::Apply(m, self.studio.mashup.transition_index().unwrap_or(0)),
                     };
                     self.handle_mashup_actions(vec![a]);
                 }
@@ -655,7 +659,7 @@ impl App {
             "mashup-transition" => {
                 let k: usize = arg.trim().parse().unwrap_or(0);
                 let mix = self.studio.mix.clone();
-                self.mashup.open_for_transition(&mix, k, &self.sh);
+                self.studio.mashup.open_for_transition(&mix, k, &self.sh);
             }
             "view" => {
                 self.view = match arg.trim() {
@@ -873,8 +877,11 @@ impl eframe::App for App {
                 let mut sa = Vec::new();
                 let (mut load, mut new) = (None, false);
                 let mixes = self.mixes.clone();
+                self.studio.preview_playing = self.eng.preview_player.is_some();
                 self.studio.ui(ui, &self.sh, &mixes, &mut sa, &mut load, &mut new);
                 sa.append(&mut self.studio.pending);
+                let ma = std::mem::take(&mut self.studio.mashup_actions);
+                self.handle_mashup_actions(ma);
                 if new {
                     self.save_mix();
                     self.studio.set_mix(clubcraft_core::Mix::default());
@@ -898,10 +905,6 @@ impl eframe::App for App {
         self.handle_home_actions(home_actions);
         let mut sa = Vec::new();
         self.settings.ui(&ctx, self.eng.handle.as_ref(), &mut sa, &mut self.prefs);
-        let mut ma = Vec::new();
-        let previewing = self.eng.preview_player.is_some();
-        self.mashup.ui(&ctx, &self.sh, &self.studio.mix, previewing, &mut ma);
-        self.handle_mashup_actions(ma);
         self.apply_prefs(&ctx);
         for a in sa {
             match a {

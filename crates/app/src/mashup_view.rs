@@ -190,10 +190,19 @@ impl MashupView {
         self.message.clear();
     }
 
-    pub fn ui(&mut self, ctx: &egui::Context, sh: &Shared, mix: &Mix, preview_playing: bool, out: &mut Vec<MashupAction>) {
-        if !self.open {
-            return;
+    /// Close the finder (cancels a running search and stops a preview).
+    pub fn close(&mut self, out: &mut Vec<MashupAction>) {
+        self.open = false;
+        if let Some(j) = self.job.take() {
+            j.cancel.store(true, Ordering::Relaxed);
         }
+        if self.previewing.take().is_some() {
+            out.push(MashupAction::StopPreview);
+        }
+    }
+
+    /// The finder in the studio's bottom section.
+    pub fn panel(&mut self, ui: &mut Ui, sh: &Shared, mix: &Mix, preview_playing: bool, out: &mut Vec<MashupAction>) {
         if self.run_next_frame {
             self.run_next_frame = false;
             self.start(mix);
@@ -209,34 +218,22 @@ impl MashupView {
                 }
                 self.job = None;
             } else {
-                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
             }
         }
         if !preview_playing {
             self.previewing = None;
         }
-        let mut open = self.open;
-        egui::Window::new("🎤 Mashup finder")
-            .open(&mut open)
-            .default_size([980.0, 560.0])
-            .min_width(760.0)
-            .collapsible(false)
-            .show(ctx, |ui| self.contents(ui, sh, mix, out));
-        if !open {
-            self.open = false;
-            if let Some(j) = self.job.take() {
-                j.cancel.store(true, Ordering::Relaxed);
-            }
-            if self.previewing.is_some() {
-                out.push(MashupAction::StopPreview);
-            }
-        }
+        self.contents(ui, sh, mix, out);
     }
 
     fn contents(&mut self, ui: &mut Ui, sh: &Shared, mix: &Mix, out: &mut Vec<MashupAction>) {
         let with_stems: Vec<TrackId> = sh.tracks.iter().filter(|t| sh.analyses.get(&t.id).is_some_and(|a| a.stems_model.is_some() && a.grid.is_some())).map(|t| t.id).collect();
         // ------------------------------------------------ query
+        let mut close = false;
         ui.horizontal(|ui| {
+            ui.label(RichText::new("🎤 Mashup finder").size(15.0).strong());
+            ui.add_space(10.0);
             ui.label(RichText::new("Vocals from").color(theme::TEXT_DIM));
             let sel = self.vocal.map(|id| track_label(sh, id)).unwrap_or_else(|| "choose a track…".into());
             egui::ComboBox::from_id_salt("mashup-vocal").width(420.0).selected_text(crate::studio::truncate(&sel, 60)).show_ui(ui, |ui| {
@@ -266,7 +263,14 @@ impl MashupView {
             if let Target::Transition { index, .. } = self.target {
                 ui.label(RichText::new(format!("over track {} (transition {} ▶ {})", index + 2, index + 1, index + 2)).color(theme::accent()));
             }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                close = ui.button("Close").on_hover_text("Back to the track / transition editor").clicked();
+            });
         });
+        if close {
+            self.close(out);
+            return;
+        }
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             ui.label(RichText::new("Phrase").color(theme::TEXT_DIM));
@@ -292,11 +296,10 @@ impl MashupView {
             for t in [3u32, 6, 10] {
                 ui.selectable_value(&mut self.tempo_pct, t, format!("±{t} %"));
             }
-        });
-        ui.horizontal(|ui| {
+            ui.separator();
             if self.inst_only.is_none() {
                 ui.label(RichText::new("Search in").color(theme::TEXT_DIM));
-                ui.selectable_value(&mut self.scope_mix, false, format!("Library ({} with stems)", with_stems.len()));
+                ui.selectable_value(&mut self.scope_mix, false, format!("Library ({})", with_stems.len())).on_hover_text("Tracks with stems");
                 ui.add_enabled_ui(!mix.tracks.is_empty(), |ui| {
                     ui.selectable_value(&mut self.scope_mix, true, "This mix");
                 });

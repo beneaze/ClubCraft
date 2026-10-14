@@ -129,9 +129,9 @@ Every screenshot here is the real app at work on a mix imported from DJ.Studio. 
 
 ## Find mashups
 
-<p align="center"><img src="docs/images/mashups.jpg" alt="The mashup finder: the vocals of Gorgon City's Mitsubishi matched against the library; every row shows the instrumental's bars, the vocal phrase, the key shift and tempo change, a strip with the fit of every bar, the rule score and the AI score, with preview, new mix and insert buttons" width="100%"></p>
+<p align="center"><img src="docs/images/mashups.jpg" alt="The mashup finder in the studio's bottom section: the vocals of Gorgon City's Mitsubishi matched against the library; every row shows the instrumental's bars, the vocal phrase, the key shift and tempo change, a strip with the fit of every bar, the rule score and the AI score, with preview, new mix and insert buttons" width="100%"></p>
 
-Want the vocals of one track over another? **🎤 Mashups** (⇧⌘M, the studio toolbar, the track inspector or the library's context menu) searches your library for the instrumentals that carry them, and tells you where.
+Want the vocals of one track over another? **🎤 Mashups** opens the finder in the studio's bottom section, like the transition editor. It's on the studio toolbar, in the track inspector, in the library's context menu and under ⇧⌘M. It searches your library for the instrumentals that carry those vocals, and tells you where.
 
 - **Where it fits, bar by bar.** For every 16-bar placement it compares the vocal notes with the instrumental's bass and chords, using a consonance table that knows a vocal a major seventh above a chord is colour but a semitone above it clashes. It also weighs masking by a loud melody in the vocal range, leftover vocals of the backing track, and the tempo and key change needed. On real tracks the original pairing beats its own ±1–2 semitone shifts 93 % of the time, where plain key matching or chroma similarity (as in AutoMashUpper) manages 84 %.
 - **An AI second opinion.** The best 20 candidates are rendered as the mix would play them, with the vocals shifted and stretched, and [COCOLA](https://github.com/gladia-research-group/cocola) (ICASSP 2025), a network trained on separated stems, listens to each. Blending both scores ranks the right match higher than either alone (84 % against random placements, from 78 %).

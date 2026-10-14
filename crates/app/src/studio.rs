@@ -36,6 +36,12 @@ pub struct StudioView {
     pub dirty: bool,
     /// Actions raised outside `ui`'s `out` (inspector buttons), drained by the app.
     pub pending: Vec<StudioAction>,
+    /// The mashup finder, shown in the bottom section instead of the inspector while open.
+    pub mashup: crate::mashup_view::MashupView,
+    pub mashup_actions: Vec<crate::mashup_view::MashupAction>,
+    /// A mashup preview is playing (set by the app).
+    pub preview_playing: bool,
+    last_selection: Selection,
     pub selection: Selection,
     /// Pixels per second in the timeline.
     pub zoom: f32,
@@ -70,6 +76,10 @@ impl Default for StudioView {
             timeline: MixTimeline::default(),
             dirty: false,
             pending: Vec::new(),
+            mashup: Default::default(),
+            mashup_actions: Vec::new(),
+            preview_playing: false,
+            last_selection: Selection::None,
             selection: Selection::None,
             zoom: 6.0,
             scroll: 0.0,
@@ -177,10 +187,11 @@ impl StudioView {
         egui::Panel::top("studio-toolbar").frame(egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(10, 6))).show(ui, |ui| {
             self.toolbar(ui, sh, mixes, out, load_mix, new_mix);
         });
-        let none_selected = self.selection == Selection::None;
-        egui::Panel::bottom(if none_selected { "studio-inspector-empty" } else { "studio-inspector-v2" })
-            .default_size(if none_selected { 80.0 } else { 380.0 })
-            .min_size(if self.selection == Selection::None { 70.0 } else { (ui.available_height() * 0.40).clamp(220.0, 400.0) })
+        let finder = self.mashup.open;
+        let none_selected = self.selection == Selection::None && !finder;
+        egui::Panel::bottom(if finder { "studio-mashups" } else if none_selected { "studio-inspector-empty" } else { "studio-inspector-v2" })
+            .default_size(if none_selected { 80.0 } else if finder { 430.0 } else { 380.0 })
+            .min_size(if none_selected { 70.0 } else { (ui.available_height() * 0.40).clamp(220.0, 400.0) })
             .max_size((ui.available_height() * 0.65).max(260.0))
             .resizable(true)
             .frame(egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(12, 8)))
@@ -190,6 +201,11 @@ impl StudioView {
             ui.add_space(6.0);
             self.timeline_ui(ui, sh, out);
         });
+        // picking a track or transition closes the finder, like any other inspector
+        if self.selection != self.last_selection && self.mashup.open {
+            self.mashup.close(&mut self.mashup_actions);
+        }
+        self.last_selection = self.selection;
     }
 
     /// Studio keyboard shortcuts (ignored while typing in a text field).
@@ -524,6 +540,11 @@ impl StudioView {
     }
 
     fn inspector(&mut self, ui: &mut Ui, sh: &Shared) {
+        if self.mashup.open {
+            let playing = self.preview_playing;
+            self.mashup.panel(ui, sh, &self.mix, playing, &mut self.mashup_actions);
+            return;
+        }
         match self.selection {
             Selection::None => {
                 ui.add_space(8.0);
