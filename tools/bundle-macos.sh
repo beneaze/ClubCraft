@@ -6,6 +6,7 @@ cd "$(dirname "$0")/.."
 . "$HOME/.cargo/env" 2>/dev/null || true
 cargo build --release -j 4 -p clubcraft
 APP=target/ClubCraft.app
+VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/models"
 cp target/release/clubcraft "$APP/Contents/MacOS/ClubCraft"
@@ -30,8 +31,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleName</key><string>ClubCraft</string>
   <key>CFBundleDisplayName</key><string>ClubCraft</string>
   <key>CFBundleIdentifier</key><string>org.clubcraft.app</string>
-  <key>CFBundleVersion</key><string>0.1.0</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
+  <key>CFBundleVersion</key><string>$VERSION</string>
+  <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundleExecutable</key><string>ClubCraft</string>
   <key>CFBundleIconFile</key><string>ClubCraft</string>
   <key>CFBundlePackageType</key><string>APPL</string>
