@@ -614,14 +614,12 @@ impl LiveEngine {
 /// Stem-based transition styles need stems on both tracks. For transitions where a track has
 /// none (yet), play a bass-swap blend instead so the tracks never just overlap at full volume.
 pub fn playable_mix(mix: &Mix, has_stems: &dyn Fn(TrackId) -> bool) -> Mix {
-    use clubcraft_core::{Param, TransitionStyle};
     let mut m = mix.clone();
     let has = |i: usize| m.tracks.get(i).is_some_and(|t| has_stems(t.track_id));
     let flags: Vec<bool> = (0..m.tracks.len()).map(has).collect();
     for (k, tr) in m.transitions.iter_mut().enumerate() {
-        let uses_stems = tr.lanes.iter().any(|l| matches!(l.param, Param::Stem(_)));
-        if uses_stems && !(flags.get(k).copied().unwrap_or(false) && flags.get(k + 1).copied().unwrap_or(false)) {
-            *tr = clubcraft_core::Transition::new(TransitionStyle::BassSwap, tr.beats);
+        if tr.uses_stems() && !(flags.get(k).copied().unwrap_or(false) && flags.get(k + 1).copied().unwrap_or(false)) {
+            *tr = tr.without_stems();
         }
     }
     m

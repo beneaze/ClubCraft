@@ -121,6 +121,7 @@ impl LiveView {
                     stem_gains: d.stem_gains,
                     loop_region: d.loop_region.filter(|_| d.loop_active),
                     accent: theme::deck_color(i),
+                    volume: 1.0,
                 };
                 waveform::scrolling(&p, r, &wp, d.position, self.zoom);
             } else {
@@ -197,7 +198,7 @@ impl LiveView {
         });
         // ---- overview + time
         if let Some(wf) = &d.waveform {
-            let wp = WaveParams { wf, grid: d.grid, cues: &d.cues, sections: &d.sections, style: self.wave_style, stem_gains: d.stem_gains, loop_region: None, accent };
+            let wp = WaveParams { wf, grid: d.grid, cues: &d.cues, sections: &d.sections, style: self.wave_style, stem_gains: d.stem_gains, loop_region: None, accent, volume: 1.0 };
             if let Some(t) = waveform::overview(ui, vec2(ui.available_width(), 34.0), &wp, d.position, d.duration) {
                 out.push(LiveAction::Seek(i, t));
             }

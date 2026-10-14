@@ -123,6 +123,11 @@ impl Jobs {
     /// Full processing of a track: stems (if enabled) then analysis.
     /// Analyse now (fast, without stems) and separate stems afterwards (if enabled); the
     /// separation job re-analyses with the stems when it is done.
+    /// Separate stems now (front of the queue), then re-analyse.
+    pub fn separate_now(&self, id: TrackId) {
+        self.gpu.push(Job::Separate(id), true);
+    }
+
     pub fn process(&self, id: TrackId, priority: bool) {
         self.cpu.push(Job::Analyze(id), priority);
         if self.settings.lock().separate_stems {

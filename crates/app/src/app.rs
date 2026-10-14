@@ -472,6 +472,12 @@ impl App {
                 A::SaveMix => self.save_mix(),
                 A::FindMashups(id) => self.studio.mashup.open_for(id, &self.sh),
                 A::Harmonize => self.studio.harmonize(&self.sh),
+                A::SeparateStems(ids) => {
+                    for id in &ids {
+                        self.jobs.separate_now(*id);
+                    }
+                    self.status = format!("Separating stems for {} track(s)", ids.len());
+                }
                 A::AutoMixPoints => {
                     let order: Vec<TrackId> = self.studio.mix.tracks.iter().map(|t| t.track_id).collect();
                     self.studio.replan(&self.sh, &order);

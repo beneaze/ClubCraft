@@ -116,7 +116,9 @@ impl MixTimeline {
             };
             let b_in = grid.beat_at(mt.mix_in);
             let b_out = grid.beat_at(mt.mix_out.max(mt.mix_in));
-            let b_end = grid.beat_at(duration.max(mt.mix_out));
+            // Unknown length (no analysis yet): assume the track plays through its transition
+            // instead of ending where the transition starts.
+            let b_end = if duration > 0.0 { grid.beat_at(duration.max(mt.mix_out)) } else { b_out + mix.transitions.get(i).map(|t| t.beats as f64).unwrap_or(64.0) };
             let start_beat = beat;
             let end_beat = if i + 1 < n {
                 let tb = mix.transitions.get(i).map(|t| t.beats as f64).unwrap_or(32.0);

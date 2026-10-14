@@ -7,7 +7,7 @@ use crate::studio::StudioView;
 use crate::studio_timeline::{EQ_COLORS, FILTER_COLOR, VOLUME_COLOR};
 use crate::theme;
 use crate::waveform::{self, WaveParams, WaveStyle};
-use clubcraft_core::{Param, Side, StemKind, Transition, TransitionStyle};
+use clubcraft_core::{Param, Side, StemKind, TrackId, Transition, TransitionStyle};
 use eframe::egui::{self, pos2, vec2, Color32, Id, Rect, RichText, Sense, Stroke, StrokeKind, Ui};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -58,6 +58,28 @@ const BAND_H: f32 = 21.0;
 const WAVE_H: f32 = 22.0;
 
 impl StudioView {
+    /// Level of the incoming track for 8 bars after transition `k` minus the outgoing track's level
+    /// for 8 bars before it (dB, from the waveform summaries, loudness-normalised).
+    fn level_jump_db(&self, sh: &Shared, k: usize) -> Option<f32> {
+        let (a, b) = (self.mix.tracks.get(k)?, self.mix.tracks.get(k + 1)?);
+        let x = self.timeline.transitions.get(k)?;
+        let level = |id: TrackId, t0: f64, t1: f64| -> Option<f32> {
+            let wf = sh.waveforms.get(&id)?;
+            let (i0, i1) = ((t0.max(0.0) * wf.rate) as usize, ((t1 * wf.rate) as usize).min(wf.peak.len()));
+            if i1 <= i0 + 4 {
+                return None;
+            }
+            // summaries store 255·√peak: square back to amplitude, then the RMS of the peaks
+            let ms = wf.peak[i0..i1].iter().map(|&v| (v as f32 / 255.0).powi(4)).sum::<f32>() / (i1 - i0) as f32;
+            Some(10.0 * ms.max(1e-8).log10() + sh.analyses.get(&id).and_then(|an| an.gain_db).unwrap_or(0.0))
+        };
+        let (ga, gb) = (sh.analyses.get(&a.track_id)?.grid?, sh.analyses.get(&b.track_id)?.grid?);
+        let out = level(a.track_id, a.mix_out - 8.0 * ga.bar_len(), a.mix_out)?;
+        let inc_start = b.mix_in + x.beats * gb.beat_len();
+        let inc = level(b.track_id, inc_start, inc_start + 8.0 * gb.bar_len())?;
+        Some(inc + b.gain_db - (out + a.gain_db))
+    }
+
     pub(crate) fn transition_editor(&mut self, ui: &mut Ui, sh: &Shared, k: usize) {
         let (ia, ib) = (self.mix.tracks[k].track_id, self.mix.tracks[k + 1].track_id);
         let title = |id| sh.track(id).map(|t| t.title.clone()).unwrap_or_default();
@@ -88,6 +110,57 @@ impl StudioView {
                 self.pending.push(crate::studio::StudioAction::FindVocalOver(k));
             }
         });
+        // what you hear differs from the curves: no stems yet
+        if self.mix.transitions[k].uses_stems() && !self.stems_ok(sh, k) {
+            let missing: Vec<TrackId> = [ia, ib].into_iter().filter(|id| !sh.analyses.get(id).is_some_and(|a| a.stems_model.is_some())).collect();
+            ui.horizontal(|ui| {
+                let names: Vec<String> = missing.iter().map(|id| crate::studio::truncate(&title(*id), 28)).collect();
+                ui.label(RichText::new(format!("No stems yet for {}: this plays as an EQ blend with the same timing (bass swap at the midpoint, the old track stays up until ¾).", names.join(" and "))).color(theme::WARN).size(12.0));
+                if ui.button("Separate stems now").on_hover_text("Queue stem separation for these tracks first").clicked() {
+                    self.pending.push(crate::studio::StudioAction::SeparateStems(missing.clone()));
+                }
+            });
+        }
+        // the outgoing track must still be playing when the transition ends
+        if let (Some(a), Some(x)) = (sh.analyses.get(&ia), self.timeline.transitions.get(k)) {
+            let mt = &self.mix.tracks[k];
+            let bl = a.grid.map(|g| g.beat_len()).unwrap_or(0.5);
+            let needed = mt.mix_out + x.beats * bl;
+            // where the audio really ends: the last moment above −36 dB (files often end in a
+            // fade and silence), else the file length
+            let end = sh
+                .waveforms
+                .get(&ia)
+                .and_then(|wf| wf.peak.iter().rposition(|&v| v >= 32).map(|i| (i + 1) as f64 / wf.rate))
+                .map(|e| e.min(a.duration))
+                .unwrap_or(a.duration);
+            if end > 0.0 && needed > end + 0.25 {
+                let mut fit = false;
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("{} fades out {:.1} s before this transition ends, so it goes quiet early.", crate::studio::truncate(&title(ia), 30), needed - end)).color(Color32::from_rgb(255, 110, 100)).size(12.0));
+                    fit = ui.button("Fit").on_hover_text("Start the transition earlier (on a bar) so it ends before the track fades out").clicked();
+                });
+                if fit {
+                    let start = end - x.beats * bl;
+                    let start = a.grid.map(|g| g.time_of_bar(g.bar_at(start).floor())).unwrap_or(start).max(mt.mix_in + 1.0);
+                    self.mix.tracks[k].mix_out = start;
+                    changed = true;
+                }
+            }
+        }
+        // level jump: the incoming section is much quieter than the outgoing one (e.g. a soft intro)
+        if let Some(d) = self.level_jump_db(sh, k) {
+            if d <= -6.0 {
+                ui.label(RichText::new(format!(
+                    "{} is about {:.0} dB quieter after this transition than {} before it (its mix-in sits in a soft part), so the mix gets softer here. Move its mix-in to a fuller section if that's not what you want.",
+                    crate::studio::truncate(&title(ib), 30),
+                    -d,
+                    crate::studio::truncate(&title(ia), 30)
+                ))
+                .color(theme::TEXT_DIM)
+                .size(12.0));
+            }
+        }
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
@@ -196,7 +269,7 @@ impl StudioView {
             if let (Some(wf), Some(a)) = (sh.waveforms.get(&tid), sh.analyses.get(&tid)) {
                 let t0 = self.timeline.track_pos(ti, x.start_beat);
                 let t1 = self.timeline.track_pos(ti, x.start_beat + x.beats);
-                let wp = WaveParams { wf, grid: a.grid, cues: &[], sections: &[], style: WaveStyle::Stems, stem_gains: [0.8; 4], loop_region: None, accent };
+                let wp = WaveParams { wf, grid: a.grid, cues: &[], sections: &[], style: WaveStyle::Stems, stem_gains: [0.8; 4], loop_region: None, accent, volume: 1.0 };
                 waveform::paint_wave(&p, wave, &wp, t0, t1, true);
             }
             let mut by = y + WAVE_H + 4.0;

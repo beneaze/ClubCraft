@@ -116,7 +116,7 @@ Every screenshot here is the real app at work on a mix imported from DJ.Studio. 
       <h3>Transitions you can read</h3>
       Stem blend, Bass swap, Crossfade, Vocal over, Filter out, Echo out and Cut, from 2 to 32 bars. The editor lines up the outgoing and incoming track on a bar ruler, with one clearly labelled band per stem, EQ band, filter or echo. Draw a curve with the mouse and it plays back sample-accurately in the preview, the export and on the live decks.
       <br><br>
-      Tracks without stems yet automatically fall back to a bass-swap blend, so a transition never just piles two tracks on top of each other.
+      Until both tracks have stems, a stem transition plays as an EQ blend with the same timing. The timeline shows exactly that, marked "no stems", with a one-click button to separate them. The editor also warns when the outgoing track fades out before its transition ends, or when the incoming track comes in much quieter.
       <h3>Keyboard first</h3>
       <b>Studio:</b> Space play · ← → bar (⇧ 8 bars) · [ ] transitions · F follow · + − zoom · ⌘Z / ⇧⌘Z undo / redo · ⌘S save.<br>
       <b>Live:</b> Z X C and M , . cue/play/sync · 1–8 hot cues (⇧ deck B) · ← → crossfader.<br>

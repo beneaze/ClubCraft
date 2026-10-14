@@ -21,7 +21,7 @@ pub const DECK: [Color32; 4] = [
     Color32::from_rgb(60, 210, 170),
 ];
 
-static ACCENT_RGB: AtomicU32 = AtomicU32::new(0xFF5C8C);
+static ACCENT_RGB: AtomicU32 = AtomicU32::new(0xECEEF2);
 static SOFT_STEMS: AtomicBool = AtomicBool::new(true);
 
 /// The interface accent (chosen in Settings › General).
@@ -71,7 +71,7 @@ pub fn style_color(s: clubcraft_core::TransitionStyle) -> Color32 {
         T::FilterOut => Color32::from_rgb(96, 150, 232),
         T::EchoOut => Color32::from_rgb(232, 116, 100),
         T::Cut => Color32::from_rgb(176, 178, 186),
-        T::Mashup => Color32::from_rgb(236, 128, 196),
+        T::Mashup => Color32::from_rgb(170, 212, 84),
         T::Custom => Color32::from_rgb(210, 200, 120),
     }
 }

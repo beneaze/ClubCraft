@@ -17,6 +17,7 @@ pub enum KeyNotation {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Accent {
     #[default]
+    White,
     Pink,
     Blue,
     Green,
@@ -24,10 +25,11 @@ pub enum Accent {
 }
 
 impl Accent {
-    pub const ALL: [Accent; 4] = [Accent::Pink, Accent::Blue, Accent::Green, Accent::Amber];
+    pub const ALL: [Accent; 5] = [Accent::White, Accent::Pink, Accent::Blue, Accent::Green, Accent::Amber];
 
     pub fn rgb(self) -> [u8; 3] {
         match self {
+            Accent::White => [236, 238, 242],
             Accent::Pink => [255, 92, 140],
             Accent::Blue => [84, 148, 255],
             Accent::Green => [52, 208, 140],
@@ -37,6 +39,7 @@ impl Accent {
 
     pub fn label(self) -> &'static str {
         match self {
+            Accent::White => "White",
             Accent::Pink => "Pink",
             Accent::Blue => "Blue",
             Accent::Green => "Green",
@@ -128,6 +131,10 @@ pub struct Prefs {
     /// Open the home page on start (otherwise the last view).
     pub start_on_home: bool,
     pub accent: Accent,
+    /// Preferences format; files older than 2 used the pink accent by default. Missing in old
+    /// files, so it defaults to 0 there (not to `Prefs::default()`).
+    #[serde(default)]
+    pub version: u32,
     // ------------------------------------------------------------ decks
     pub cue_button: CueButton,
     pub hot_cue_press: HotCuePress,
@@ -181,7 +188,8 @@ impl Default for Prefs {
             key_notation: KeyNotation::Camelot,
             ui_scale: 1.0,
             start_on_home: true,
-            accent: Accent::Pink,
+            accent: Accent::White,
+            version: 2,
             cue_button: CueButton::Cdj,
             hot_cue_press: HotCuePress::Preview,
             load_position: LoadPosition::FirstBeat,
@@ -224,7 +232,13 @@ impl Prefs {
     }
 
     pub fn load() -> Prefs {
-        std::fs::read_to_string(Self::path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+        let mut p: Prefs = std::fs::read_to_string(Self::path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        if p.version < 2 {
+            // white is the new default accent (it used to be pink)
+            p.accent = Accent::White;
+            p.version = 2;
+        }
+        p
     }
 
     pub fn save(&self) {
@@ -300,5 +314,18 @@ impl Prefs {
             v.push(C::Sync(deck));
         }
         v
+    }
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    #[test]
+    fn old_files_get_the_white_accent() {
+        let old: Prefs = serde_json::from_str(r#"{"accent": "Pink", "ui_scale": 1.2}"#).unwrap();
+        assert_eq!(old.version, 0);
+        let new: Prefs = serde_json::from_str(r#"{"accent": "Pink", "version": 2}"#).unwrap();
+        assert_eq!(new.accent, Accent::Pink);
     }
 }

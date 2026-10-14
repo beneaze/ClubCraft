@@ -22,6 +22,8 @@ pub struct WaveParams<'a> {
     pub stem_gains: [f32; 4],
     pub loop_region: Option<(f64, f64)>,
     pub accent: Color32,
+    /// Overall level 0..1 (transition volume automation); scales the drawn height.
+    pub volume: f32,
 }
 
 #[inline]
@@ -78,7 +80,7 @@ pub fn paint_wave(p: &Painter, rect: Rect, w: &WaveParams, t0: f64, t1: f64, mir
     let col_w = rect.width() / cols as f32;
     let spp = (t1 - t0) / cols as f64;
     let cy = if mirrored { rect.center().y } else { rect.bottom() };
-    let hmax = if mirrored { rect.height() / 2.0 - 1.0 } else { rect.height() - 1.0 };
+    let hmax = (if mirrored { rect.height() / 2.0 - 1.0 } else { rect.height() - 1.0 }) * w.volume.clamp(0.0, 1.0);
     let mut mesh = Mesh::default();
     let stems = if w.style == WaveStyle::Stems { wf.stems.as_ref() } else { None };
     let wp_gains = w.stem_gains;

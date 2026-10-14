@@ -261,10 +261,10 @@ impl StudioView {
             let tr = &self.mix.transitions[k];
             let style_col = theme::style_color(tr.style);
             let col = if sel { theme::accent() } else { style_col };
-            p.rect_filled(Rect::from_min_max(pos2(xs, lane_top), pos2(xe, lane_bottom)), 0.0, col.linear_multiply(if sel { 0.10 } else { 0.05 }));
-            for xx in [xs, xe] {
-                p.line_segment([pos2(xx, tstrip.bottom()), pos2(xx, lane_bottom)], Stroke::new(if sel { 2.0 } else { 1.0 }, col.linear_multiply(if sel { 0.9 } else { 0.5 })));
-            }
+            // a frame around both tracks, its header is the chip on the strip (like DJ.Studio)
+            let frame = Rect::from_min_max(pos2(xs, tstrip.top() + 1.0), pos2(xe, lane_bottom));
+            p.rect_filled(Rect::from_min_max(pos2(xs, lane_top), pos2(xe, lane_bottom)), 0.0, col.linear_multiply(if sel { 0.07 } else { 0.03 }));
+            p.rect_stroke(frame, 6.0, Stroke::new(if sel { 2.0 } else { 1.0 }, if sel { Color32::WHITE } else { style_col.linear_multiply(0.55) }), StrokeKind::Inside);
             // label chip on the ruler, coloured by style: the longest label that fits
             let chip = Rect::from_min_max(pos2(xs + 7.0, tstrip.top() + 2.0), pos2((xe - 7.0).max(xs + 24.0), tstrip.bottom() - 2.0));
             if chip.width() > 22.0 {
@@ -275,7 +275,11 @@ impl StudioView {
                 let bars = tr.beats / 4;
                 let abbrev: String = tr.style.label().split_whitespace().filter_map(|w| w.chars().next()).collect::<String>().to_uppercase();
                 let font = egui::FontId::proportional(10.5);
-                let label = [format!("{} · {bars} bars", tr.style.label()), format!("{} · {bars}", tr.style.label()), format!("{abbrev} {bars}"), format!("{bars}")]
+                let key = |j: usize| self.mix.tracks.get(j).and_then(|t| sh.analyses.get(&t.track_id).and_then(|a| a.key).map(|kk| theme::key_label(kk.shifted(t.key_shift))));
+                let keys = key(k).zip(key(k + 1)).map(|(a, b)| format!(" · {a} ▶ {b}")).unwrap_or_default();
+                let no_stems = tr.uses_stems() && !self.stems_ok(sh, k);
+                let ns = if no_stems { " · no stems" } else { "" };
+                let label = [format!("{} · {bars} bars{keys}{ns}", tr.style.label()), format!("{} · {bars} bars{ns}", tr.style.label()), format!("{} · {bars}", tr.style.label()), format!("{abbrev} {bars}"), format!("{bars}")]
                     .into_iter()
                     .find(|l| ui.fonts_mut(|f| f.layout_no_wrap(l.clone(), font.clone(), Color32::WHITE).size().x) < chip.width() - 8.0)
                     .unwrap_or_default();
@@ -285,7 +289,11 @@ impl StudioView {
             if chip_r.clicked() {
                 self.selection = Selection::Transition(k);
             }
-            chip_r.on_hover_text("Click to edit this transition");
+            chip_r.on_hover_text(if tr.uses_stems() && !self.stems_ok(sh, k) {
+                "Click to edit this transition. One of the tracks has no stems yet, so this plays as an EQ blend with the same timing (shown in the clips)."
+            } else {
+                "Click to edit this transition"
+            });
             // handles
             for (end, xx) in [(false, xs), (true, xe)] {
                 let hr = Rect::from_center_size(pos2(xx, tstrip.center().y), vec2(10.0, strip_h - 2.0));
@@ -507,11 +515,48 @@ impl StudioView {
         let body = Rect::from_min_max(pos2(body.left(), ruler.bottom()), body.max);
         self.draw_clip_ruler(p, ruler, body, i, x_of);
         // waveform
-        let t0 = self.timeline.track_pos(i, tt.start_beat);
-        let t1 = self.timeline.track_pos(i, tt.end_beat);
+        // Waveform. Inside transitions it follows what plays: stems fade with their lanes and the
+        // height follows the volume, so both tracks stay visible through the whole transition.
         if let (Some(wf), Some(a)) = (sh.waveforms.get(&tt.track_id), a) {
-            let wp = WaveParams { wf, grid: a.grid, cues: &[], sections: &[], style: WaveStyle::Stems, stem_gains: if audible { [1.0; 4] } else { [0.0; 4] }, loop_region: None, accent };
-            waveform::paint_wave(p, body.shrink2(vec2(0.0, 3.0)), &wp, t0, t1, true);
+            let wrect = body.shrink2(vec2(0.0, 3.0));
+            let clip = p.clip_rect();
+            let paint = |b0: f64, b1: f64, gains: [f32; 4], volume: f32| {
+                let (x0, x1) = (x_of(self.timeline.sec_at_beat(b0)), x_of(self.timeline.sec_at_beat(b1)));
+                if x1 < clip.left() || x0 > clip.right() || x1 - x0 < 0.25 {
+                    return;
+                }
+                let wp = WaveParams { wf, grid: a.grid, cues: &[], sections: &[], style: WaveStyle::Stems, stem_gains: if audible { gains } else { [0.0; 4] }, loop_region: None, accent, volume };
+                let r = Rect::from_x_y_ranges(x0..=x1, wrect.y_range());
+                waveform::paint_wave(p, r, &wp, self.timeline.track_pos(i, b0), self.timeline.track_pos(i, b1), true);
+            };
+            let mut regions: Vec<(f64, f64, Transition, Side)> = Vec::new();
+            if i > 0 {
+                if let (Some(x), Some(tr)) = (self.timeline.transitions.get(i - 1), self.effective_transition(sh, i - 1)) {
+                    regions.push((x.start_beat, x.start_beat + x.beats, tr, Side::In));
+                }
+            }
+            if let (Some(x), Some(tr)) = (self.timeline.transitions.get(i), self.effective_transition(sh, i)) {
+                regions.push((x.start_beat, x.start_beat + x.beats, tr, Side::Out));
+            }
+            let mut b = tt.start_beat;
+            for (start, end, tr, side) in &regions {
+                let (start, r0, r1) = (*start, start.max(tt.start_beat), end.min(tt.end_beat));
+                if r0 > b {
+                    paint(b, r0, [1.0; 4], 1.0);
+                }
+                let (x0, x1) = (x_of(self.timeline.sec_at_beat(r0)), x_of(self.timeline.sec_at_beat(r1)));
+                let n = ((x1 - x0) / 4.0).clamp(4.0, 400.0) as usize;
+                for s in 0..n {
+                    let (s0, s1) = (r0 + (r1 - r0) * s as f64 / n as f64, r0 + (r1 - r0) * (s + 1) as f64 / n as f64);
+                    let xb = ((s0 + s1) * 0.5 - start) as f32;
+                    let gains = [StemKind::Drums, StemKind::Bass, StemKind::Other, StemKind::Vocals].map(|k| tr.value(*side, Param::Stem(k), xb).clamp(0.0, 1.0));
+                    paint(s0, s1, gains, tr.value(*side, Param::Volume, xb).clamp(0.0, 1.0));
+                }
+                b = b.max(r1);
+            }
+            if b < tt.end_beat {
+                paint(b, tt.end_beat, [1.0; 4], 1.0);
+            }
         }
         let bar_px = (tt.grid.bar_len() as f32 * self.zoom).max(0.1);
         if bar_px >= 60.0 {
@@ -541,18 +586,30 @@ impl StudioView {
         let show = self.lane_show[l];
         if show != ShowMode::None {
             if i > 0 {
-                if let (Some(x), Some(tr)) = (self.timeline.transitions.get(i - 1), self.mix.transitions.get(i - 1)) {
-                    self.draw_automation(p, body, tr, Side::In, x.start_beat, x.beats, show, x_of);
+                if let (Some(x), Some(tr)) = (self.timeline.transitions.get(i - 1), self.effective_transition(sh, i - 1)) {
+                    self.draw_automation(p, body, &tr, Side::In, x.start_beat, x.beats, show, x_of);
                 }
             }
-            if let (Some(x), Some(tr)) = (self.timeline.transitions.get(i), self.mix.transitions.get(i)) {
-                self.draw_automation(p, body, tr, Side::Out, x.start_beat, x.beats, show, x_of);
+            if let (Some(x), Some(tr)) = (self.timeline.transitions.get(i), self.effective_transition(sh, i)) {
+                self.draw_automation(p, body, &tr, Side::Out, x.start_beat, x.beats, show, x_of);
             }
         }
         if !audible {
             p.rect_filled(r, 4.0, Color32::from_black_alpha(110));
         }
         p.rect_stroke(r, 4.0, Stroke::new(if sel { 2.0 } else { 1.0 }, if sel { theme::accent() } else { accent.linear_multiply(0.5) }), StrokeKind::Inside);
+    }
+
+    /// Both tracks of transition `k` have stems.
+    pub(crate) fn stems_ok(&self, sh: &Shared, k: usize) -> bool {
+        let has = |i: usize| self.mix.tracks.get(i).is_some_and(|t| sh.analyses.get(&t.track_id).is_some_and(|a| a.stems_model.is_some()));
+        has(k) && has(k + 1)
+    }
+
+    /// Transition `k` as it plays (stem lanes fall back to an EQ blend without stems).
+    pub(crate) fn effective_transition(&self, sh: &Shared, k: usize) -> Option<Transition> {
+        let tr = self.mix.transitions.get(k)?;
+        Some(if tr.uses_stems() && !self.stems_ok(sh, k) { tr.without_stems() } else { tr.clone() })
     }
 
     /// Ruler strip at the top of a clip: bar numbers of the track (bar 1 = first downbeat), bar and
@@ -631,7 +688,7 @@ impl StudioView {
             p.add(egui::Shape::line(pts, Stroke::new(2.0, col)));
         };
         if matches!(show, ShowMode::All | ShowMode::Volume) && has(Param::Volume) {
-            curve(Param::Volume, VOLUME_COLOR, false);
+            curve(Param::Volume, Color32::from_white_alpha(235), false);
         }
         if matches!(show, ShowMode::Eq) {
             for (b, param) in [Param::EqLow, Param::EqMid, Param::EqHigh].into_iter().enumerate() {

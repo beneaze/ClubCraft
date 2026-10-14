@@ -23,6 +23,8 @@ pub enum StudioAction {
     FindVocalOver(usize),
     Harmonize,
     AutoMixPoints,
+    /// Separate stems for these tracks now.
+    SeparateStems(Vec<TrackId>),
 }
 
 /// Tabs of the bottom bar; each opens a panel above the transport.
@@ -431,30 +433,34 @@ impl StudioView {
     }
 
     fn tab_bar(&mut self, ui: &mut Ui) {
-        let (w, gap) = (116.0, 4.0);
-        let total = Tab::ALL.len() as f32 * (w + gap);
-        ui.horizontal_centered(|ui| {
-            ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
-            ui.spacing_mut().item_spacing.x = gap;
-            for t in Tab::ALL {
-                let active = self.tab == Some(t);
-                let (r, resp) = ui.allocate_exact_size(vec2(w, 30.0), Sense::click());
-                let p = ui.painter();
-                if active {
-                    p.rect_filled(r, 6.0, theme::SELECT);
-                    p.rect_stroke(r, 6.0, Stroke::new(1.5, theme::accent()), StrokeKind::Inside);
-                } else if resp.hovered() {
-                    p.rect_filled(r, 6.0, theme::PANEL_HI);
-                }
-                let (icon, name) = t.label();
-                let col = if active { theme::accent() } else if resp.hovered() { theme::TEXT } else { theme::TEXT_DIM };
-                p.text(egui::pos2(r.left() + 16.0, r.center().y), egui::Align2::LEFT_CENTER, icon, egui::FontId::proportional(14.0), col);
-                p.text(egui::pos2(r.left() + 38.0, r.center().y), egui::Align2::LEFT_CENTER, name, egui::FontId::proportional(14.0), col);
-                if resp.on_hover_text(if active { "Close this panel" } else { "Open this panel" }).clicked() {
-                    self.toggle_tab(t);
-                }
+        // tabs sized to their label, the group centred exactly
+        let full = ui.available_rect_before_wrap();
+        let font = egui::FontId::proportional(14.0);
+        let (pad, icon_w, gap) = (16.0, 18.0, 10.0);
+        let widths: Vec<f32> = Tab::ALL.iter().map(|t| pad + icon_w + 6.0 + ui.fonts_mut(|f| f.layout_no_wrap(t.label().1.to_string(), font.clone(), Color32::WHITE).size().x) + pad).collect();
+        let total = widths.iter().sum::<f32>() + gap * (widths.len() as f32 - 1.0);
+        let mut x = full.center().x - total / 2.0;
+        for (t, w) in Tab::ALL.into_iter().zip(widths) {
+            let r = egui::Rect::from_min_size(egui::pos2(x, full.center().y - 15.0), vec2(w, 30.0));
+            x += w + gap;
+            let resp = ui.interact(r, egui::Id::new(("studio-tab", t as u8)), Sense::click());
+            let active = self.tab == Some(t);
+            let p = ui.painter();
+            if active {
+                p.rect_filled(r, 6.0, theme::SELECT);
+                p.rect_stroke(r, 6.0, Stroke::new(1.5, theme::accent()), StrokeKind::Inside);
+            } else if resp.hovered() {
+                p.rect_filled(r, 6.0, theme::PANEL_HI);
             }
-        });
+            let (icon, name) = t.label();
+            let col = if active { theme::accent() } else if resp.hovered() { theme::TEXT } else { theme::TEXT_DIM };
+            p.text(egui::pos2(r.left() + pad + icon_w / 2.0, r.center().y), egui::Align2::CENTER_CENTER, icon, font.clone(), col);
+            p.text(egui::pos2(r.left() + pad + icon_w + 6.0, r.center().y), egui::Align2::LEFT_CENTER, name, font.clone(), col);
+            if resp.on_hover_text(if active { "Close this panel" } else { "Open this panel" }).clicked() {
+                self.toggle_tab(t);
+            }
+        }
+        ui.allocate_rect(full, Sense::hover());
     }
 
     /// Transport row: mixes / edit menus on the left, transport centred, output on the right.

@@ -236,6 +236,40 @@ impl Transition {
     }
 }
 
+impl Transition {
+    /// Whether the transition drives stems (it then needs stems on both tracks).
+    pub fn uses_stems(&self) -> bool {
+        self.lanes.iter().any(|l| matches!(l.param, Param::Stem(_)))
+    }
+
+    /// What plays while a track of this transition has no stems yet. Stem blends become an EQ
+    /// blend with the same timing: the outgoing track stays at full level until three quarters
+    /// in (where the stem version still has its drums), the low end swaps at the midpoint and its
+    /// highs fade; the incoming track comes up over the first quarter. Other stem styles become a
+    /// bass swap.
+    pub fn without_stems(&self) -> Transition {
+        use Param::*;
+        use Side::*;
+        if !self.uses_stems() {
+            return self.clone();
+        }
+        let len = self.beats as f32;
+        let (q, h) = (len * 0.25, len * 0.5);
+        let lanes = match self.style {
+            TransitionStyle::StemBlend => vec![
+                Lane::new(In, Volume, &[(0.0, 0.0), (q, 0.85), (h, 1.0)]),
+                Lane::new(In, EqLow, &[(0.0, 0.0), (h - 0.01, 0.0), (h, 0.5)]),
+                Lane::new(In, EqHigh, &[(0.0, 0.3), (h, 0.5)]),
+                Lane::new(Out, EqLow, &[(0.0, 0.5), (h - 0.01, 0.5), (h, 0.0)]),
+                Lane::new(Out, EqHigh, &[(0.0, 0.5), (len, 0.25)]),
+                Lane::new(Out, Volume, &[(0.0, 1.0), (len * 0.75, 1.0), (len, 0.0)]),
+            ],
+            _ => TransitionStyle::BassSwap.lanes(len),
+        };
+        Transition { style: self.style, beats: self.beats, lanes }
+    }
+}
+
 impl Default for Transition {
     fn default() -> Self {
         Transition::new(TransitionStyle::StemBlend, 32)
@@ -357,5 +391,25 @@ mod tests {
         assert_eq!(t.value(Side::Out, Param::EqMid, 3.0), 0.5);
         let l = Lane::new(Side::Out, Param::Volume, &[(0.0, 1.0), (10.0, 0.0)]);
         assert!((l.value_at(5.0) - 0.5).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod stemless_tests {
+    use super::*;
+
+    #[test]
+    fn stem_blend_without_stems_keeps_the_outgoing_track_up() {
+        let t = Transition::new(TransitionStyle::StemBlend, 32);
+        assert!(t.uses_stems());
+        let f = t.without_stems();
+        assert!(!f.uses_stems());
+        // outgoing at full level until three quarters, gone at the end; low end swapped at the midpoint
+        assert!((f.value(Side::Out, Param::Volume, 20.0) - 1.0).abs() < 1e-6);
+        assert!(f.value(Side::Out, Param::Volume, 32.0) < 1e-6);
+        assert!(f.value(Side::Out, Param::EqLow, 15.0) > 0.4 && f.value(Side::Out, Param::EqLow, 17.0) < 0.1);
+        // styles without stems are unchanged
+        let b = Transition::new(TransitionStyle::BassSwap, 32);
+        assert_eq!(b.without_stems(), b);
     }
 }
