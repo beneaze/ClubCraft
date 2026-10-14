@@ -314,6 +314,12 @@ fn seg_vector(b: &BarFeatures, i: usize) -> Vec<f32> {
 }
 
 /// Section boundaries (bar indices into `b`, including 0 and n) by phrase-aware DP.
+/// Raw rule-based section boundaries (bar indices into `b`, including 0 and `b.len()`), before
+/// labelling / merging.
+pub fn rule_boundaries(b: &BarFeatures) -> Vec<usize> {
+    boundaries(b, SEG_LAMBDA)
+}
+
 pub(crate) fn boundaries(b: &BarFeatures, lambda: f32) -> Vec<usize> {
     let n = b.len();
     if n == 0 {
@@ -442,23 +448,59 @@ pub fn sections(
 
 /// Segment and label bars into sections.
 pub fn segment(b: &BarFeatures, grid: &BeatGrid, duration: f64) -> Vec<Section> {
-    if b.len() < 4 {
-        return vec![];
-    }
-    let bounds = boundaries(b, SEG_LAMBDA);
-    finish(b, grid, bounds, duration, None)
+    segment_phrases(b, grid, duration, None).sections
 }
 
+/// Sections plus the phrase boundaries that were merged away because both sides got the same
+/// label (e.g. a vocal drop running into an instrumental drop). The cue generator turns them
+/// into slot-less "Phrase" markers.
+#[derive(Debug, Clone, Default)]
+pub struct Segmentation {
+    pub sections: Vec<Section>,
+    /// Start times (s) of merged-away phrases.
+    pub phrases: Vec<f64>,
+}
+
+/// Rule-based (`act = None`) or model-based segmentation with phrase markers.
+pub fn segment_phrases(
+    b: &BarFeatures,
+    grid: &BeatGrid,
+    duration: f64,
+    act: Option<&crate::allinone::Activations>,
+) -> Segmentation {
+    if b.len() < 4 {
+        return Segmentation::default();
+    }
+    match act {
+        Some(a) => {
+            let bounds = model_boundaries(b, grid, a);
+            finish(b, grid, bounds, duration, Some(a))
+        }
+        None => finish(b, grid, boundaries(b, SEG_LAMBDA), duration, None),
+    }
+}
+
+/// Minimum distance (bars) between two model boundaries (the stronger peak wins).
+pub const MODEL_MIN_BARS: usize = 4;
+
 /// Section boundaries from the All-In-One model: its boundary peaks snapped to the bar grid
-/// (to a 4-bar line when within one bar), at least 2 bars apart (stronger peak wins).
-pub fn model_boundaries(b: &BarFeatures, grid: &BeatGrid, act: &crate::allinone::Activations) -> Vec<usize> {
+/// (to a 4-bar line when within one bar), at least [`MODEL_MIN_BARS`] apart.
+pub fn model_boundaries(
+    b: &BarFeatures,
+    grid: &BeatGrid,
+    act: &crate::allinone::Activations,
+) -> Vec<usize> {
     let n = b.len();
     let mut cands: Vec<(usize, f32)> = Vec::new();
     for c in crate::allinone::boundaries(act) {
         let bar = grid.bar_at(c.time).round() as i32;
         let rel = bar - b.phrase_origin;
         let b4 = (rel as f64 / 4.0).round() as i32 * 4;
-        let snapped = if (rel - b4).abs() <= 1 { b4 + b.phrase_origin } else { bar };
+        let snapped = if (rel - b4).abs() <= 1 {
+            b4 + b.phrase_origin
+        } else {
+            bar
+        };
         let i = snapped - b.first_bar;
         if i > 0 && (i as usize) < n {
             cands.push((i as usize, c.strength));
@@ -467,7 +509,7 @@ pub fn model_boundaries(b: &BarFeatures, grid: &BeatGrid, act: &crate::allinone:
     cands.sort_by(|x, y| y.1.total_cmp(&x.1));
     let mut keep: Vec<usize> = Vec::new();
     for (i, _) in cands {
-        if keep.iter().all(|k| k.abs_diff(i) >= 2) {
+        if keep.iter().all(|k| k.abs_diff(i) >= MODEL_MIN_BARS) {
             keep.push(i);
         }
     }
@@ -480,12 +522,13 @@ pub fn model_boundaries(b: &BarFeatures, grid: &BeatGrid, act: &crate::allinone:
 
 /// Sections from model boundaries; labels from the activity rules, refined by the model's
 /// functional labels (break / bridge, chorus / inst / solo, intro, outro).
-pub fn segment_with_model(b: &BarFeatures, grid: &BeatGrid, duration: f64, act: &crate::allinone::Activations) -> Vec<Section> {
-    if b.len() < 4 {
-        return vec![];
-    }
-    let bounds = model_boundaries(b, grid, act);
-    finish(b, grid, bounds, duration, Some(act))
+pub fn segment_with_model(
+    b: &BarFeatures,
+    grid: &BeatGrid,
+    duration: f64,
+    act: &crate::allinone::Activations,
+) -> Vec<Section> {
+    segment_phrases(b, grid, duration, Some(act)).sections
 }
 
 fn finish(
@@ -494,7 +537,7 @@ fn finish(
     mut bounds: Vec<usize>,
     duration: f64,
     act: Option<&crate::allinone::Activations>,
-) -> Vec<Section> {
+) -> Segmentation {
     let _ = grid;
     let n = b.len();
     // A partial lead-in bar (starting well before t = 0) belongs to the first section.
@@ -518,6 +561,7 @@ fn finish(
         apply_model_labels(&segs, &mut kinds, emax, b, duration, act);
     }
     let mut out: Vec<Section> = Vec::new();
+    let mut phrases: Vec<f64> = Vec::new();
     for (s, k) in segs.iter().zip(kinds) {
         let start = b.start[s.a].max(0.0);
         let end = if s.e >= n { duration } else { b.start[s.e] };
@@ -544,12 +588,16 @@ fn finish(
                 }
                 last.end = sec.end;
                 last.bars += sec.bars;
+                phrases.push(sec.start);
                 continue;
             }
         }
         out.push(sec);
     }
-    out
+    Segmentation {
+        sections: out,
+        phrases,
+    }
 }
 
 /// Refine rule labels with the model's functional label distribution of each section.

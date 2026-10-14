@@ -139,6 +139,27 @@ def na1d(q, k, v, rpb, ks, d):
 
 
 def na2d(q, k, v, rpb, ks, d):
+    """2D NA. When the first axis has exactly `ks` rows and dilation 1 (always the case here:
+    4 stems padded to 5, kernel 5) every query attends to all rows, so only the second axis
+    needs a gather; scores / outputs are einsums (12x less memory than the generic gather)."""
+    B, Hh, X, Y, D = q.shape
+    if X == ks and d == 1:
+        _, pi = _window(X, ks, d)
+        nj, pj = _window(Y, ks, d)
+        kk = torch.arange(ks)
+        iy = nj[:, None] + kk[None, :]  # Y, ks
+        rx = pi[:, None] + kk[None, :]  # X, ks (row offsets)
+        ry = pj[:, None] + kk[None, :]  # Y, ks
+        bias = rpb[:, rx[:, None, :, None], ry[None, :, None, :]]  # H, X, Y, ks(z), ks(w)
+        kw = k[:, :, :, iy]  # B, H, Z, Y, W, D
+        vw = v[:, :, :, iy]
+        attn = torch.einsum("bhxyd,bhzywd->bhxyzw", q, kw) + bias.unsqueeze(0)
+        attn = attn.reshape(B, Hh, X, Y, ks * ks).softmax(-1).reshape(B, Hh, X, Y, ks, ks)
+        return torch.einsum("bhxyzw,bhzywd->bhxyd", attn, vw)
+    return na2d_generic(q, k, v, rpb, ks, d)
+
+
+def na2d_generic(q, k, v, rpb, ks, d):
     # q, k, v: B, H, X(height), Y(width), D ; rpb: H, 2k-1, 2k-1
     B, Hh, X, Y, D = q.shape
     ni, pi = _window(X, ks, d)

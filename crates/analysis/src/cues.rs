@@ -16,7 +16,8 @@
 //! | 7 | `MixOut` | Mix Out | start of the outro, otherwise 64 (short tracks: 32) beats before the end of the music |
 //!
 //! Cues that do not exist are skipped (the slot stays empty). Further drops / breakdowns /
-//! builds / the outro are returned as slot-less markers. `MixIn` and `MixOut` are on 16- or
+//! builds / the outro are returned as slot-less markers, as are "Phrase" markers (kind `Hot`)
+//! at phrase changes inside a section (where two equally labelled sections were merged). `MixIn` and `MixOut` are on 16- or
 //! 32-beat phrase lines from the anchor, because the studio aligns the incoming track's mix-in
 //! with the outgoing track's mix-out. Without structure, DJ.Studio's defaults are used (mix-in
 //! at beat 32 / mix-out at the last 32-beat line at least 32 beats before the end for tracks
@@ -29,10 +30,15 @@ const PHRASE: f64 = 32.0;
 
 /// Generate cues from a grid and sections, optionally refined with bar features (music end,
 /// drum and vocal entry). See the module docs for the slot layout.
-pub fn generate(grid: &BeatGrid, sections: &[Section], bars: Option<&BarFeatures>, duration: f64) -> Vec<Cue> {
+pub fn generate(
+    grid: &BeatGrid,
+    sections: &[Section],
+    bars: Option<&BarFeatures>,
+    duration: f64,
+) -> Vec<Cue> {
     match bars {
-        Some(b) => generate_from(grid, sections, b, duration),
-        None => generate_from(grid, sections, &BarFeatures::default(), duration),
+        Some(b) => generate_from(grid, sections, b, &[], duration),
+        None => generate_from(grid, sections, &BarFeatures::default(), &[], duration),
     }
 }
 
@@ -51,7 +57,13 @@ struct Run {
     bars: u32,
 }
 
-pub(crate) fn generate_from(grid: &BeatGrid, sections: &[Section], bars: &BarFeatures, duration: f64) -> Vec<Cue> {
+pub(crate) fn generate_from(
+    grid: &BeatGrid,
+    sections: &[Section],
+    bars: &BarFeatures,
+    phrases: &[f64],
+    duration: f64,
+) -> Vec<Cue> {
     let bpb = grid.beats_per_bar as f64;
     let at_beat = |b: f64| grid.time_of_beat(b);
     let bar_beat = |t: f64| round_to(grid.beat_at(t), bpb);
@@ -84,7 +96,11 @@ pub(crate) fn generate_from(grid: &BeatGrid, sections: &[Section], bars: &BarFea
     for s in sections {
         match runs.last_mut() {
             Some(r) if r.kind == s.kind => r.bars += s.bars,
-            _ => runs.push(Run { kind: s.kind, beat: bar_beat(s.start).max(0.0), bars: s.bars }),
+            _ => runs.push(Run {
+                kind: s.kind,
+                beat: bar_beat(s.start).max(0.0),
+                bars: s.bars,
+            }),
         }
     }
     let first_drop = runs.iter().position(|r| r.kind == SectionKind::Drop);
@@ -95,7 +111,9 @@ pub(crate) fn generate_from(grid: &BeatGrid, sections: &[Section], bars: &BarFea
     if bars.has_stems && has_bars {
         let n = bars.len();
         let v = |i: usize| bars.stems[i][3];
-        if let Some(mut i) = (0..n.saturating_sub(1)).find(|&i| bars.start[i] >= -0.03 && v(i) > 0.5 && v(i + 1) > 0.4) {
+        if let Some(mut i) = (0..n.saturating_sub(1))
+            .find(|&i| bars.start[i] >= -0.03 && v(i) > 0.5 && v(i + 1) > 0.4)
+        {
             // Snap to the 4-bar grid when within a bar: a vocal in the last bar of a group is a
             // pickup into the next phrase; one a bar late belongs to the line before it.
             match bars.bar_index(i).rem_euclid(4) {
@@ -110,11 +128,21 @@ pub(crate) fn generate_from(grid: &BeatGrid, sections: &[Section], bars: &BarFea
     // --- slot 1: mix-in. The 8-bar line where the drums are established, at least 32 beats
     // before the first drop and the first vocal so the blend happens over intro material.
     let mix_in = if !has_bars {
-        if duration > 180.0 { PHRASE } else { 0.0 }
+        if duration > 180.0 {
+            PHRASE
+        } else {
+            0.0
+        }
     } else {
-        let limit = [first_drop_beat, vocal_beat].iter().flatten().fold(f64::INFINITY, |a, b| a.min(*b)) - PHRASE;
+        let limit = [first_drop_beat, vocal_beat]
+            .iter()
+            .flatten()
+            .fold(f64::INFINITY, |a, b| a.min(*b))
+            - PHRASE;
         let drums_at = (0..bars.len().saturating_sub(1))
-            .find(|&i| bars.start[i] >= -0.03 && bars.stems[i][0] > 0.5 && bars.stems[i + 1][0] > 0.5)
+            .find(|&i| {
+                bars.start[i] >= -0.03 && bars.stems[i][0] > 0.5 && bars.stems[i + 1][0] > 0.5
+            })
             .map(|i| bars.bar_index(i).max(0) as f64 * bpb);
         let mut m = match drums_at {
             // Drums entering up to 2 bars after a phrase line count from that line.
@@ -157,7 +185,9 @@ pub(crate) fn generate_from(grid: &BeatGrid, sections: &[Section], bars: &BarFea
     let main_break = (after..runs.len())
         .filter(|&i| runs[i].kind == SectionKind::Breakdown && !used[i])
         .max_by_key(|&i| (runs[i].bars, usize::MAX - i));
-    let next_drop = |from: usize, used: &[bool]| (from..runs.len()).find(|&i| runs[i].kind == SectionKind::Drop && !used[i]);
+    let next_drop = |from: usize, used: &[bool]| {
+        (from..runs.len()).find(|&i| runs[i].kind == SectionKind::Drop && !used[i])
+    };
     let mut second_drop = None;
     if let Some(mb) = main_break {
         push(Some(5), CueKind::Breakdown, runs[mb].beat);
@@ -167,7 +197,9 @@ pub(crate) fn generate_from(grid: &BeatGrid, sections: &[Section], bars: &BarFea
     if second_drop.is_none() {
         second_drop = first_drop.and_then(|fd| next_drop(fd + 1, &used));
     }
-    let outro = runs.iter().position(|r| r.kind == SectionKind::Outro && at_beat(r.beat) > duration * 0.5);
+    let outro = runs
+        .iter()
+        .position(|r| r.kind == SectionKind::Outro && at_beat(r.beat) > duration * 0.5);
     match second_drop {
         Some(sd) => {
             push(Some(6), CueKind::Drop, runs[sd].beat);
@@ -185,7 +217,11 @@ pub(crate) fn generate_from(grid: &BeatGrid, sections: &[Section], bars: &BarFea
     // 64 / 32 beats before the end of the music.
     let end_line = round_to(music_end, 16.0);
     let mut mix_out = if !has_bars {
-        if duration > 180.0 { floor_to(total_beats - PHRASE, PHRASE) } else { floor_to(total_beats - 16.0, 16.0) }
+        if duration > 180.0 {
+            floor_to(total_beats - PHRASE, PHRASE)
+        } else {
+            floor_to(total_beats - 16.0, 16.0)
+        }
     } else if end_line - 64.0 >= mix_in + 4.0 * PHRASE {
         end_line - 64.0
     } else {
@@ -218,9 +254,34 @@ pub(crate) fn generate_from(grid: &BeatGrid, sections: &[Section], bars: &BarFea
         };
         push(None, kind, r.beat);
     }
+    // Phrase changes inside a merged section (e.g. vocal drop -> instrumental drop).
+    for &t in phrases {
+        let b = bar_beat(t);
+        let t = at_beat(b);
+        // Only phrase lines (8 bars) and not crowding other cues.
+        let crowded = cues
+            .iter()
+            .any(|c| (c.pos - t).abs() < 8.0 * grid.bar_len() * 0.99);
+        if (b / PHRASE).fract().abs() < 1e-6 && !crowded && t >= 0.0 && t < duration - 0.5 {
+            let mut c = Cue::auto(None, CueKind::Hot, t);
+            c.name = "Phrase".into();
+            cues.push(c);
+        }
+    }
     cues.sort_by(|a, b| a.pos.total_cmp(&b.pos));
-    // Drop slot-less markers at the position of a slotted cue.
-    let slotted: Vec<f64> = cues.iter().filter(|c| c.slot.is_some()).map(|c| c.pos).collect();
-    cues.retain(|c| c.slot.is_some() || !slotted.iter().any(|p| (p - c.pos).abs() < 0.05));
-    cues
+    // Drop slot-less markers at (or within a bar of) another cue; slotted cues win.
+    let mut kept: Vec<Cue> = Vec::new();
+    for c in cues.iter().filter(|c| c.slot.is_some()) {
+        kept.push(c.clone());
+    }
+    for c in cues.iter().filter(|c| c.slot.is_none()) {
+        if !kept
+            .iter()
+            .any(|k| (k.pos - c.pos).abs() < grid.bar_len() * 0.99)
+        {
+            kept.push(c.clone());
+        }
+    }
+    kept.sort_by(|a, b| a.pos.total_cmp(&b.pos));
+    kept
 }

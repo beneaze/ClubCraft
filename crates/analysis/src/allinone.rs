@@ -10,9 +10,19 @@
 //! verse, chorus).
 //!
 //! ClubCraft keeps its DSP beat grid (more precise for tempo / phase, see [`crate::beatgrid`])
-//! and uses the model for **section boundaries and labels** (and as evidence for the bar
-//! phase). The model needs stems; without stems or without `models/allin1.onnx` the rule-based
-//! structure is used.
+//! and uses the model for **section boundaries** (peaks snapped to bars / 4-bar lines) with
+//! the activity-based labelling refined by the model's functional labels
+//! ([`crate::structure::segment_with_model`]). The model needs stems and at least
+//! [`MIN_FRAMES`] frames (102.4 s); otherwise, or without `models/allin1.onnx` (or with the
+//! `allinone` cargo feature off), the rule-based structure is used.
+//!
+//! Against Mixed In Key's cue points on 31 tracks (Rust `htdemucs` stems), boundaries hit
+//! 85 % of MIK cues within one bar (rules: 72 %), and the final cue set 73 % (rules: 67 %).
+//!
+//! Cost (ONNX Runtime CPU, 8-fold ensemble): roughly 15–30 s and ~2 GB peak memory for a
+//! 5–6 minute track on an M1 Pro under load, so run it in the background after separation.
+//! Export: `tools/model-export/export_allin1.py` (NATTEN replaced by exact gather/einsum code;
+//! ONNX output equals the PyTorch reference to 4e-7).
 
 use crate::StemsRef;
 use rayon::prelude::*;
@@ -25,7 +35,9 @@ pub const N_BANDS: usize = 81;
 /// Shortest input the exported graph accepts (its longest attention window, 102.4 s).
 pub const MIN_FRAMES: usize = 10240;
 /// Functional labels in output order.
-pub const LABELS: [&str; 10] = ["start", "end", "intro", "outro", "break", "bridge", "inst", "solo", "verse", "chorus"];
+pub const LABELS: [&str; 10] = [
+    "start", "end", "intro", "outro", "break", "bridge", "inst", "solo", "verse", "chorus",
+];
 
 /// Sparse triangular log filterbank: per band (first bin, weights).
 fn filterbank() -> Vec<(usize, Vec<f32>)> {
@@ -77,19 +89,33 @@ pub fn spectrogram(x: &[f32]) -> Vec<f32> {
     let frames = x.len().div_ceil(HOP);
     let fb = filterbank();
     debug_assert_eq!(fb.len(), N_BANDS);
-    let win: Vec<f32> =
-        (0..N_FFT).map(|n| (0.5 - 0.5 * (2.0 * std::f64::consts::PI * n as f64 / (N_FFT - 1) as f64).cos()) as f32).collect();
+    let win: Vec<f32> = (0..N_FFT)
+        .map(|n| {
+            (0.5 - 0.5 * (2.0 * std::f64::consts::PI * n as f64 / (N_FFT - 1) as f64).cos()) as f32
+        })
+        .collect();
     let plan = RealFftPlanner::<f32>::new().plan_fft_forward(N_FFT);
     let half = (N_FFT / 2) as isize;
     let rows: Vec<[f32; N_BANDS]> = (0..frames)
         .into_par_iter()
         .map_init(
-            || (plan.make_input_vec(), plan.make_output_vec(), plan.make_scratch_vec(), vec![0.0f32; N_FFT / 2]),
+            || {
+                (
+                    plan.make_input_vec(),
+                    plan.make_output_vec(),
+                    plan.make_scratch_vec(),
+                    vec![0.0f32; N_FFT / 2],
+                )
+            },
             |(inp, out, scr, mag), i| {
                 let start = (i * HOP) as isize - half;
                 for (j, o) in inp.iter_mut().enumerate() {
                     let k = start + j as isize;
-                    *o = if k >= 0 && (k as usize) < x.len() { x[k as usize] * win[j] } else { 0.0 };
+                    *o = if k >= 0 && (k as usize) < x.len() {
+                        x[k as usize] * win[j]
+                    } else {
+                        0.0
+                    };
                 }
                 plan.process_with_scratch(inp, out, scr).expect("fft");
                 for (m, c) in mag.iter_mut().zip(out.iter()) {
@@ -115,7 +141,10 @@ pub fn spectrogram(x: &[f32]) -> Vec<f32> {
 pub fn stem_spectrograms(stems: &StemsRef) -> (usize, Vec<f32>) {
     use clubcraft_core::StemKind::*;
     let order = [Bass, Drums, Other, Vocals];
-    let specs: Vec<Vec<f32>> = order.par_iter().map(|k| spectrogram(&stems.mono(*k))).collect();
+    let specs: Vec<Vec<f32>> = order
+        .par_iter()
+        .map(|k| spectrogram(&stems.mono(*k)))
+        .collect();
     let t = specs.iter().map(|s| s.len() / N_BANDS).min().unwrap_or(0);
     let mut out = Vec::with_capacity(4 * t * N_BANDS);
     for s in &specs {
@@ -139,7 +168,7 @@ impl Activations {
     pub fn from_flat(data: &[f32]) -> Activations {
         let t = data.len() / 13;
         let mut a = Activations::default();
-        for r in data.chunks_exact(13).take(t) {
+        for r in data.as_chunks::<13>().0.iter().take(t) {
             a.beat.push(r[0]);
             a.downbeat.push(r[1]);
             a.section.push(r[2]);
@@ -177,7 +206,11 @@ pub fn boundaries(act: &Activations) -> Vec<Boundary> {
                 let a = i.saturating_sub(half);
                 let b = (i + half + 1).min(n);
                 let m = v[a..b].iter().cloned().fold(f32::MIN, f32::max);
-                if v[i] == m { v[i] } else { 0.0 }
+                if v[i] == m {
+                    v[i]
+                } else {
+                    0.0
+                }
             })
             .collect()
     };
@@ -208,7 +241,10 @@ pub fn boundaries(act: &Activations) -> Vec<Boundary> {
         let fut = sum(ii + 1, ii + 1 + w as isize) / w as f64;
         let s = v as f64 - 0.5 * (past + fut);
         if s > 0.0 {
-            out.push(Boundary { time: i as f64 / FPS, strength: s as f32 });
+            out.push(Boundary {
+                time: i as f64 / FPS,
+                strength: s as f32,
+            });
         }
     }
     out
@@ -251,7 +287,9 @@ impl Model {
         if !path.exists() {
             anyhow::bail!("missing {}", path.display());
         }
-        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
         let session = ort::session::Session::builder()?
             .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)?
             .with_intra_threads(threads)?
@@ -283,18 +321,20 @@ impl Model {
 pub fn shared_activations(stems: &StemsRef) -> Option<Activations> {
     #[cfg(feature = "allinone")]
     {
+        if stems.frames().div_ceil(HOP) < MIN_FRAMES {
+            return None;
+        }
         static MODEL: std::sync::OnceLock<Option<Model>> = std::sync::OnceLock::new();
         let model = MODEL.get_or_init(|| match Model::load_default() {
             Ok(m) => Some(m),
             Err(e) => {
-                log::info!("All-In-One structure model unavailable ({e:#}); using rule-based structure");
+                log::info!(
+                    "All-In-One structure model unavailable ({e:#}); using rule-based structure"
+                );
                 None
             }
         });
         let m = model.as_ref()?;
-        if stems.frames().div_ceil(HOP) < MIN_FRAMES {
-            return None;
-        }
         let t = std::time::Instant::now();
         match m.activations(stems) {
             Ok(a) => {

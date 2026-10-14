@@ -16,7 +16,13 @@
 //! * `--filter <text>`     only tracks whose file name contains the text
 //! * `--limit <n>`         at most n tracks
 //! * `--csv <file>`        write per-track results as CSV
-//! * `-v`                  per-track detail (cues)
+//! * `--only-mik`          only tracks with Mixed In Key cue points
+//! * `--make-stems`        separate missing stems with clubcraft-stems (`Quality::Fast`) into
+//!   `--stems-root` as `<file stem>.stems.flac` (one track at a time)
+//! * `--act-cache <dir>`   cache All-In-One activations (`<file stem>.act.npy`); with stems the
+//!   structure is evaluated with rules and with the model
+//! * `--jobs <n>`          tracks analysed in parallel (default 4; use 1-2 with stems / model)
+//! * `-v`                  per-track detail (cues; `*` = slot-less marker)
 
 #[path = "common/mod.rs"]
 mod common;
@@ -280,6 +286,8 @@ struct Res {
     mik_recall: Option<f64>,
     seg_recall: Option<f64>,
     seg_precision: Option<f64>,
+    /// Raw boundaries (before labelling / merging): (MIK segment recall, precision, MIK cue recall).
+    raw: Option<(f64, f64, f64)>,
     energy: u8,
     mik_energy: Option<u8>,
     lufs: f32,
@@ -415,7 +423,8 @@ fn evaluate(t: &Truth, a: &Analysis, stems: bool, secs: f64, verbose: bool) -> R
             let mut d = String::new();
             for c in &a.cues {
                 d += &format!(
-                    " {}@{:.0}",
+                    " {}{}@{:.0}",
+                    if c.slot.is_some() { "" } else { "*" },
                     c.name.replace(' ', ""),
                     g.beat_at(c.pos) + (g.downbeat - t.beat0) / gt_spb
                 );
@@ -452,6 +461,42 @@ fn evaluate(t: &Truth, a: &Analysis, stems: bool, secs: f64, verbose: bool) -> R
     r.lufs = a.loudness_lufs.unwrap_or(f32::NAN);
     r.dj_target = t.auto_gain.map(|g| r.lufs as f64 + 20.0 * g.log10());
     r
+}
+
+/// Recall / precision of boundary times against MIK segment starts, and MIK cue recall.
+fn raw_scores(t: &Truth, bounds: &[f64]) -> Option<(f64, f64, f64)> {
+    let spb = 60.0 / t.bpm;
+    let tol = 4.0 * spb * 1.01;
+    let near = |x: f64, set: &[f64]| set.iter().any(|y| (x - y).abs() < tol);
+    let segs: Vec<f64> = t
+        .mik_segments
+        .iter()
+        .filter(|b| **b > 0)
+        .map(|b| t.beat0 + *b as f64 * spb)
+        .collect();
+    let cues: Vec<f64> = t
+        .mik_cues
+        .iter()
+        .filter(|b| **b > 4)
+        .map(|b| t.beat0 + *b as f64 * spb)
+        .collect();
+    if segs.is_empty() || cues.is_empty() {
+        return None;
+    }
+    let last = segs.iter().cloned().fold(0.0, f64::max) + tol;
+    let ours: Vec<f64> = bounds
+        .iter()
+        .copied()
+        .filter(|b| *b > 1.0 && *b <= last)
+        .collect();
+    let rec = segs.iter().filter(|s| near(**s, bounds)).count() as f64 / segs.len() as f64;
+    let prec = if ours.is_empty() {
+        0.0
+    } else {
+        ours.iter().filter(|o| near(**o, &segs)).count() as f64 / ours.len() as f64
+    };
+    let crec = cues.iter().filter(|c| near(**c, bounds)).count() as f64 / cues.len() as f64;
+    Some((rec, prec, crec))
 }
 
 fn pct(n: usize, d: usize) -> String {
@@ -548,6 +593,17 @@ fn summarize(label: &str, all: &[Res]) {
             "MIK cue recall (±1 bar):     {:.2} over {} tracks",
             rec.iter().sum::<f64>() / rec.len() as f64,
             rec.len()
+        );
+    }
+    let raw: Vec<(f64, f64, f64)> = all.iter().filter_map(|r| r.raw).collect();
+    if !raw.is_empty() {
+        let m = |f: fn(&(f64, f64, f64)) -> f64| raw.iter().map(f).sum::<f64>() / raw.len() as f64;
+        println!(
+            "raw boundaries (before labels/merge): MIK segment recall {:.2} / precision {:.2}, MIK cue recall {:.2} over {} tracks",
+            m(|x| x.0),
+            m(|x| x.1),
+            m(|x| x.2),
+            raw.len()
         );
     }
     let sr: Vec<f64> = all.iter().filter_map(|r| r.seg_recall).collect();
@@ -653,7 +709,10 @@ fn main() -> anyhow::Result<()> {
     }
     let flac_path = |t: &Truth| -> Option<PathBuf> {
         let root = stems_root.as_ref()?;
-        Some(root.join(format!("{}.stems.flac", t.path.file_stem()?.to_string_lossy())))
+        Some(root.join(format!(
+            "{}.stems.flac",
+            t.path.file_stem()?.to_string_lossy()
+        )))
     };
     let stem_dir = |t: &Truth| -> Option<PathBuf> {
         let root = stems_root.as_ref()?;
@@ -684,7 +743,14 @@ fn main() -> anyhow::Result<()> {
                 let st = sep.separate(&audio, &mut |_| true)?;
                 std::fs::create_dir_all(dst.parent().unwrap())?;
                 clubcraft_stems::save_stems_with_model(&dst, &st, sep.model_name())?;
-                eprintln!("stems {}/{}: {} ({:.1?}, {})", i + 1, todo.len(), t.name, t0.elapsed(), sep.backend_name());
+                eprintln!(
+                    "stems {}/{}: {} ({:.1?}, {})",
+                    i + 1,
+                    todo.len(),
+                    t.name,
+                    t0.elapsed(),
+                    sep.backend_name()
+                );
             }
         }
     }
@@ -692,20 +758,39 @@ fn main() -> anyhow::Result<()> {
         truth.retain(|t| stem_dir(t).is_some());
     }
     println!("{} DJ.Studio-analysed tracks found locally", truth.len());
-    let model: std::sync::OnceLock<Option<clubcraft_analysis::allinone::Model>> = std::sync::OnceLock::new();
+    let model: std::sync::OnceLock<Option<clubcraft_analysis::allinone::Model>> =
+        std::sync::OnceLock::new();
     let model_lock = std::sync::Mutex::new(());
-    let get_act = |t: &Truth, st: &clubcraft_analysis::OwnedStems| -> Option<clubcraft_analysis::allinone::Activations> {
-        let cache = act_cache.as_ref().map(|d| d.join(format!("{}.act.npy", t.path.file_stem().unwrap().to_string_lossy())));
+    let get_act = |t: &Truth,
+                   st: &clubcraft_analysis::OwnedStems|
+     -> Option<clubcraft_analysis::allinone::Activations> {
+        let cache = act_cache.as_ref().map(|d| {
+            d.join(format!(
+                "{}.act.npy",
+                t.path.file_stem().unwrap().to_string_lossy()
+            ))
+        });
         if let Some(c) = &cache {
             if let Ok(a) = clubcraft_stems::npy::read_npy(c) {
-                return Some(clubcraft_analysis::allinone::Activations::from_flat(&a.data));
+                return Some(clubcraft_analysis::allinone::Activations::from_flat(
+                    &a.data,
+                ));
             }
         }
-        let m = model.get_or_init(|| clubcraft_analysis::allinone::Model::load_default().map_err(|e| eprintln!("model: {e:#}")).ok()).as_ref()?;
+        let m = model
+            .get_or_init(|| {
+                clubcraft_analysis::allinone::Model::load_default()
+                    .map_err(|e| eprintln!("model: {e:#}"))
+                    .ok()
+            })
+            .as_ref()?;
         // One model run at a time (memory).
         let _g = model_lock.lock().unwrap();
         let t0 = Instant::now();
-        let a = m.activations(&st.as_ref()).map_err(|e| eprintln!("model {}: {e:#}", t.name)).ok()?;
+        let a = m
+            .activations(&st.as_ref())
+            .map_err(|e| eprintln!("model {}: {e:#}", t.name))
+            .ok()?;
         eprintln!("model {}: {:.1?}", t.name, t0.elapsed());
         if let Some(c) = &cache {
             let mut flat = Vec::with_capacity(a.len() * 13);
@@ -718,134 +803,185 @@ fn main() -> anyhow::Result<()> {
         }
         Some(a)
     };
-    let pool = rayon::ThreadPoolBuilder::new().num_threads(jobs.max(1)).build()?;
-    let results: Vec<(Res, Option<Res>, Option<Res>)> = pool.install(|| truth
-        .par_iter()
-        .with_max_len(1)
-        .filter_map(|t| {
-            let audio = match clubcraft_audio::decode_file(&t.path, 44_100) {
-                Ok(a) => a,
-                Err(e) => {
-                    eprintln!("decode {}: {e}", t.path.display());
-                    return None;
-                }
-            };
-            let opts = AnalyzeOptions::default();
-            let t0 = Instant::now();
-            let a = analyze(&audio, None, &opts);
-            let r = evaluate(t, &a, false, t0.elapsed().as_secs_f64(), verbose);
-            if dump_chroma {
-                if let (Some((tun, tb, bb)), Some(k)) = (
-                    clubcraft_analysis::key::debug_chroma(&audio, None),
-                    t.mik_key.or(t.key),
-                ) {
-                    let f = |c: &[f32; 12]| {
-                        c.iter()
-                            .map(|v| format!("{v:.4}"))
-                            .collect::<Vec<_>>()
-                            .join(",")
-                    };
-                    println!(
-                        "CHROMA {} {} {} {tun:.1} {} {} |{}",
-                        k.tonic,
-                        k.minor as u8,
-                        if t.mik_key.is_some() { "mik" } else { "dj" },
-                        f(&tb),
-                        f(&bb),
-                        t.name
-                    );
-                }
-            }
-            if dump_phase {
-                if let Some((first, beat, f)) =
-                    clubcraft_analysis::beatgrid::debug_phase_features(&audio)
-                {
-                    let spb = 60.0 / t.bpm;
-                    // Reference downbeat: MIK cues (majority bar line) if present, else DJ.Studio beat 0.
-                    let mut votes = [0usize; 4];
-                    for b in &t.mik_cues {
-                        votes[(*b).rem_euclid(4) as usize] += 1;
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(jobs.max(1))
+        .build()?;
+    let results: Vec<(Res, Option<Res>, Option<Res>)> = pool.install(|| {
+        truth
+            .par_iter()
+            .with_max_len(1)
+            .filter_map(|t| {
+                let audio = match clubcraft_audio::decode_file(&t.path, 44_100) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        eprintln!("decode {}: {e}", t.path.display());
+                        return None;
                     }
-                    let mik_shift = (0..4).max_by_key(|i| votes[*i]).unwrap_or(0) as f64;
-                    let src = if t.mik_cues.is_empty() { "dj " } else { "mik" };
-                    let gt_db = t.beat0
-                        + if t.mik_cues.is_empty() {
-                            0.0
-                        } else {
-                            mik_shift * spb
+                };
+                let opts = AnalyzeOptions::default();
+                let t0 = Instant::now();
+                let a = analyze(&audio, None, &opts);
+                let r = evaluate(t, &a, false, t0.elapsed().as_secs_f64(), verbose);
+                if dump_chroma {
+                    if let (Some((tun, tb, bb)), Some(k)) = (
+                        clubcraft_analysis::key::debug_chroma(&audio, None),
+                        t.mik_key.or(t.key),
+                    ) {
+                        let f = |c: &[f32; 12]| {
+                            c.iter()
+                                .map(|v| format!("{v:.4}"))
+                                .collect::<Vec<_>>()
+                                .join(",")
                         };
-                    let k = (gt_db - first) / beat;
-                    if (k - k.round()).abs() < 0.2 && (t.bpm - 60.0 / beat).abs() < 0.05 {
-                        let p = (k.round() as i64).rem_euclid(4);
-                        let lv: Vec<String> = (0..6)
-                            .map(|k| {
-                                let a = ((first + k as f64 * beat) * 44100.0) as usize;
-                                let b = (a + (beat * 44100.0) as usize).min(audio.left.len());
-                                let ms = audio.left[a.min(b)..b].iter().map(|v| v * v).sum::<f32>()
-                                    / (b - a).max(1) as f32;
-                                format!("{:.0}", 10.0 * ms.max(1e-12).log10())
-                            })
-                            .collect();
-                        eprintln!(
-                            "FIRST {src} p={p} first={first:.3} beat0={:.3} lv={} |{}",
-                            t.beat0,
-                            lv.join(","),
+                        println!(
+                            "CHROMA {} {} {} {tun:.1} {} {} |{}",
+                            k.tonic,
+                            k.minor as u8,
+                            if t.mik_key.is_some() { "mik" } else { "dj" },
+                            f(&tb),
+                            f(&bb),
                             t.name
                         );
-                        let mut line = format!("PHASE {src} {p} {:.3}", (first - t.beat0) / spb);
-                        for row in &f {
-                            line += &format!(
-                                " {:.3},{:.3},{:.3},{:.3}",
-                                row[0], row[1], row[2], row[3]
+                    }
+                }
+                if dump_phase {
+                    if let Some((first, beat, f)) =
+                        clubcraft_analysis::beatgrid::debug_phase_features(&audio)
+                    {
+                        let spb = 60.0 / t.bpm;
+                        // Reference downbeat: MIK cues (majority bar line) if present, else DJ.Studio beat 0.
+                        let mut votes = [0usize; 4];
+                        for b in &t.mik_cues {
+                            votes[(*b).rem_euclid(4) as usize] += 1;
+                        }
+                        let mik_shift = (0..4).max_by_key(|i| votes[*i]).unwrap_or(0) as f64;
+                        let src = if t.mik_cues.is_empty() { "dj " } else { "mik" };
+                        let gt_db = t.beat0
+                            + if t.mik_cues.is_empty() {
+                                0.0
+                            } else {
+                                mik_shift * spb
+                            };
+                        let k = (gt_db - first) / beat;
+                        if (k - k.round()).abs() < 0.2 && (t.bpm - 60.0 / beat).abs() < 0.05 {
+                            let p = (k.round() as i64).rem_euclid(4);
+                            let lv: Vec<String> = (0..6)
+                                .map(|k| {
+                                    let a = ((first + k as f64 * beat) * 44100.0) as usize;
+                                    let b = (a + (beat * 44100.0) as usize).min(audio.left.len());
+                                    let ms =
+                                        audio.left[a.min(b)..b].iter().map(|v| v * v).sum::<f32>()
+                                            / (b - a).max(1) as f32;
+                                    format!("{:.0}", 10.0 * ms.max(1e-12).log10())
+                                })
+                                .collect();
+                            eprintln!(
+                                "FIRST {src} p={p} first={first:.3} beat0={:.3} lv={} |{}",
+                                t.beat0,
+                                lv.join(","),
+                                t.name
+                            );
+                            let mut line =
+                                format!("PHASE {src} {p} {:.3}", (first - t.beat0) / spb);
+                            for row in &f {
+                                line += &format!(
+                                    " {:.3},{:.3},{:.3},{:.3}",
+                                    row[0], row[1], row[2], row[3]
+                                );
+                            }
+                            println!("{line} |{}", t.name);
+                        }
+                    }
+                }
+                if dump_onoff {
+                    if let Some(g) = a.grid {
+                        let p = clubcraft_analysis::beatgrid::debug_pulse_profile(&audio, &g);
+                        let half = (r.phase_ms.abs() - 30000.0 / r.bpm_gt).abs() < 25.0;
+                        let ok = r.phase_ms.abs() < 25.0;
+                        let mut line = format!(
+                            "ONOFF {} ",
+                            if ok {
+                                "on "
+                            } else if half {
+                                "off"
+                            } else {
+                                "?? "
+                            }
+                        );
+                        for v in &p {
+                            line += &format!(" {:.2}/{:.2}", v[0], v[1]);
+                        }
+                        println!("{line}  {}", t.name);
+                    }
+                }
+                let stems = stem_dir(t).and_then(|d| {
+                    if d.extension().is_some_and(|e| e == "flac") {
+                        clubcraft_stems::load_stems(&d)
+                            .ok()
+                            .map(|s| clubcraft_analysis::OwnedStems { stems: s.stems })
+                    } else {
+                        common::load_stems(&d, &audio).ok()
+                    }
+                });
+                let (mut rs, mut rm) = (None, None);
+                if let Some(st) = &stems {
+                    let rules = AnalyzeOptions {
+                        structure: clubcraft_analysis::StructureSource::Rules,
+                        ..AnalyzeOptions::default()
+                    };
+                    let t0 = Instant::now();
+                    let a = analyze(&audio, Some(&st.as_ref()), &rules);
+                    let mut r1 = evaluate(t, &a, true, t0.elapsed().as_secs_f64(), verbose);
+                    let bars = a.grid.map(|g| {
+                        (
+                            g,
+                            clubcraft_analysis::structure::bar_features_for(
+                                &audio,
+                                Some(st.as_ref()),
+                                &g,
+                            ),
+                        )
+                    });
+                    let times = |b: &clubcraft_analysis::structure::BarFeatures,
+                                 idx: &[usize]|
+                     -> Vec<f64> {
+                        idx.iter()
+                            .filter(|i| **i < b.len())
+                            .map(|i| b.start[*i])
+                            .collect()
+                    };
+                    if let Some((_, b)) = &bars {
+                        r1.raw = raw_scores(
+                            t,
+                            &times(b, &clubcraft_analysis::structure::rule_boundaries(b)),
+                        );
+                    }
+                    rs = Some(r1);
+                    if let Some(act) = get_act(t, st) {
+                        let t0 = Instant::now();
+                        let a = clubcraft_analysis::analyze_with_activations(
+                            &audio,
+                            Some(&st.as_ref()),
+                            &AnalyzeOptions::default(),
+                            Some(&act),
+                        );
+                        let mut r2 = evaluate(t, &a, true, t0.elapsed().as_secs_f64(), verbose);
+                        if let Some((g, b)) = &bars {
+                            r2.raw = raw_scores(
+                                t,
+                                &times(
+                                    b,
+                                    &clubcraft_analysis::structure::model_boundaries(b, g, &act),
+                                ),
                             );
                         }
-                        println!("{line} |{}", t.name);
+                        rm = Some(r2);
                     }
                 }
-            }
-            if dump_onoff {
-                if let Some(g) = a.grid {
-                    let p = clubcraft_analysis::beatgrid::debug_pulse_profile(&audio, &g);
-                    let half = (r.phase_ms.abs() - 30000.0 / r.bpm_gt).abs() < 25.0;
-                    let ok = r.phase_ms.abs() < 25.0;
-                    let mut line = format!(
-                        "ONOFF {} ",
-                        if ok {
-                            "on "
-                        } else if half {
-                            "off"
-                        } else {
-                            "?? "
-                        }
-                    );
-                    for v in &p {
-                        line += &format!(" {:.2}/{:.2}", v[0], v[1]);
-                    }
-                    println!("{line}  {}", t.name);
-                }
-            }
-            let stems = stem_dir(t).and_then(|d| {
-                if d.extension().is_some_and(|e| e == "flac") {
-                    clubcraft_stems::load_stems(&d).ok().map(|s| clubcraft_analysis::OwnedStems { stems: s.stems })
-                } else {
-                    common::load_stems(&d, &audio).ok()
-                }
-            });
-            let (mut rs, mut rm) = (None, None);
-            if let Some(st) = &stems {
-                let rules = AnalyzeOptions { structure: clubcraft_analysis::StructureSource::Rules, ..AnalyzeOptions::default() };
-                let t0 = Instant::now();
-                let a = analyze(&audio, Some(&st.as_ref()), &rules);
-                rs = Some(evaluate(t, &a, true, t0.elapsed().as_secs_f64(), verbose));
-                if let Some(act) = get_act(t, st) {
-                    let t0 = Instant::now();
-                    let a = clubcraft_analysis::analyze_with_activations(&audio, Some(&st.as_ref()), &AnalyzeOptions::default(), Some(&act));
-                    rm = Some(evaluate(t, &a, true, t0.elapsed().as_secs_f64(), verbose));
-                }
-            }
-            Some((r, rs, rm))
-        })
-        .collect());
+                Some((r, rs, rm))
+            })
+            .collect()
+    });
     let mut plain: Vec<Res> = results.iter().map(|r| r.0.clone()).collect();
     plain.sort_by(|a, b| a.name.cmp(&b.name));
     println!(

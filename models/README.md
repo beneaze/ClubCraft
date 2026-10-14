@@ -49,3 +49,19 @@ The exported graph is the network between the mel band gather and the mask scatt
 (8 s chunks, `num_overlap` 2, linear fades). fp16 CoreML was tried (1.4x faster) but only
 matches PyTorch to 39 dB, so fp32 is used. `melroformer_ref_*.npy` feed
 `cargo test -p clubcraft-stems --test roformer`.
+
+## Structure model (crates/analysis)
+
+`allin1.onnx` + `allin1.json`: the All-In-One music structure model (Kim & Choi 2023,
+github.com/mir-aidj/all-in-one, MIT), 8-fold Harmonix ensemble, exported without NATTEN by
+`tools/model-export/export_allin1.py` (≈21 MB, not checked in). Input `spec [1,4,T,81]`
+(per-stem log-filtered spectrograms, computed in Rust), output `act [1,T,13]`; `T` must be
+≥ 10240 frames (102.4 s). `clubcraft-analysis` uses it for section boundaries when stems are
+available and falls back to its rules when the file is missing. Recreate:
+
+```sh
+cd tools/model-export
+mkdir -p cache/allin1 && for f in harmonix-fold{0-0vra4ys2,1-3ozjhtsj,2-gmgo0nsy,3-i92b7m8p,4-1bql5qo0,5-x4z5zeef,6-x7t226rq,7-qwwskhg6}; do
+  curl -L -o cache/allin1/$f.pth https://huggingface.co/taejunkim/allinone/resolve/main/$f.pth; done
+.venv/bin/python export_allin1.py export --out ../../models
+```

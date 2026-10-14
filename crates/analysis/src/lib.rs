@@ -9,8 +9,10 @@
 //!
 //! # Entry points
 //!
-//! * [`analyze`] — full analysis (≈0.2–0.4 s for a 5-minute track in release builds, without
-//!   decoding; with stems somewhat more).
+//! * [`analyze`] — full analysis (≈0.2–0.5 s for a 5-minute track in release builds, without
+//!   decoding; with stems and the All-In-One model add ~15–30 s of model inference — pass
+//!   `structure: StructureSource::Rules` to skip it, or [`analyze_with_activations`] with cached
+//!   activations).
 //! * [`analyze_with_stem_track`] — same, taking the stems as a [`StemTrack`].
 //! * [`waveform()`] — multi-band (+ per-stem) waveform summary for the waveform views.
 //! * Individually usable pieces: [`beatgrid::detect`], [`key::detect`],
@@ -40,9 +42,12 @@
 //!   BPM snapping → bar phase = first beat with music.
 //! * [`key`]: HPSS-style median filtering (or bass+other+vocals stems), tuning estimation,
 //!   tuned chroma, EDM key profiles.
-//! * [`structure`]: per-bar stem activities (real stems, or estimates from the mix), phrase-aware
-//!   dynamic-programming segmentation, rule-based labelling.
-//! * [`cues`]: 8 stable hot-cue slots + markers, mix-in / mix-out phrase-aligned.
+//! * [`structure`]: per-bar stem activities (real stems, or estimates from the mix), section
+//!   boundaries from the All-In-One model ([`allinone`], with stems) or phrase-aware
+//!   dynamic-programming segmentation (rules), activity-based labelling; adjacent sections
+//!   never share a label.
+//! * [`cues`]: 8 stable hot-cue slots + markers, all on downbeats; mix-in / mix-out on phrase
+//!   lines counted from the grid anchor (the first downbeat with music).
 //! * [`energy`], [`loudness`], [`mod@waveform`].
 //!
 //! # Evaluation
@@ -295,31 +300,37 @@ pub fn analyze_with_activations(
     let t1 = t0.elapsed();
     let want_model = opts.structure == StructureSource::Auto && activations.is_none();
     let (((est, key), lufs), model_act) = rayon::join(
-        || rayon::join(
         || {
             rayon::join(
                 || {
-                    let t = std::time::Instant::now();
-                    let r = beatgrid::estimate(&prep, &opts.beat);
-                    log::debug!("beat grid {:.0?}", t.elapsed());
-                    r
+                    rayon::join(
+                        || {
+                            let t = std::time::Instant::now();
+                            let r = beatgrid::estimate(&prep, &opts.beat);
+                            log::debug!("beat grid {:.0?}", t.elapsed());
+                            r
+                        },
+                        || {
+                            let t = std::time::Instant::now();
+                            let r = key::detect_prepared(&prep);
+                            log::debug!("key {:.0?}", t.elapsed());
+                            r
+                        },
+                    )
                 },
-                || {
-                    let t = std::time::Instant::now();
-                    let r = key::detect_prepared(&prep);
-                    log::debug!("key {:.0?}", t.elapsed());
-                    r
-                },
+                || loudness::integrated_lufs(&audio.left, &audio.right, audio.sample_rate),
             )
         },
-        || loudness::integrated_lufs(&audio.left, &audio.right, audio.sample_rate),
-        ),
         || match (want_model, stems.as_ref()) {
             (true, Some(st)) => allinone::shared_activations(st),
             _ => None,
         },
     );
-    let act = if opts.structure == StructureSource::Rules { None } else { activations.or(model_act.as_ref()) };
+    let act = if opts.structure == StructureSource::Rules {
+        None
+    } else {
+        activations.or(model_act.as_ref())
+    };
     let t2 = t0.elapsed();
     out.key = key;
     out.loudness_lufs = lufs;
@@ -328,11 +339,10 @@ pub fn analyze_with_activations(
         let grid = est.grid;
         out.grid = Some(grid);
         let bars = structure::bar_features(&prep, &grid);
-        out.sections = match act {
-            Some(a) if a.len() >= allinone::MIN_FRAMES => structure::segment_with_model(&bars, &grid, duration, a),
-            _ => structure::segment(&bars, &grid, duration),
-        };
-        out.cues = cues::generate_from(&grid, &out.sections, &bars, duration);
+        let act = act.filter(|a| a.len() >= allinone::MIN_FRAMES);
+        let seg = structure::segment_phrases(&bars, &grid, duration, act);
+        out.sections = seg.sections;
+        out.cues = cues::generate_from(&grid, &out.sections, &bars, &seg.phrases, duration);
         out.energy = Some(energy::rating_from(lufs, &bars, &out.sections, grid.bpm));
         log::debug!(
             "analysis: front end {t1:.0?}, grid/key/loudness {:.0?}, structure+cues {:.0?}",
