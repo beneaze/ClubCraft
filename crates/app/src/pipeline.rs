@@ -16,11 +16,13 @@ pub struct Settings {
     /// Use the All-In-One structure model (needs stems; ~1 min and +1.5 GB per track) for
     /// slightly better sections and cues. Off by default.
     pub deep_structure: bool,
+    pub bpm_min: f64,
+    pub bpm_max: f64,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { separate_stems: true, quality: "best".into(), deep_structure: false }
+        Settings { separate_stems: true, quality: "best".into(), deep_structure: false, bpm_min: 70.0, bpm_max: 180.0 }
     }
 }
 
@@ -117,10 +119,12 @@ pub fn analyze(lib: &Library, id: TrackId, s: &Settings, progress: &mut dyn FnMu
 
 /// Quick analysis (rule-based structure, ~1 s) for tracks loaded on a deck before analysis.
 pub fn analyze_quick(lib: &Library, id: TrackId) -> Result<()> {
-    analyze_with(lib, id, &Settings::default(), clubcraft_analysis::StructureSource::Rules, &mut |_, _| {})
+    let p = crate::prefs::Prefs::load();
+    let s = Settings { bpm_min: p.bpm_min, bpm_max: p.bpm_max, ..Default::default() };
+    analyze_with(lib, id, &s, clubcraft_analysis::StructureSource::Rules, &mut |_, _| {})
 }
 
-fn analyze_with(lib: &Library, id: TrackId, _s: &Settings, structure: clubcraft_analysis::StructureSource, progress: &mut dyn FnMut(f32, &str)) -> Result<()> {
+fn analyze_with(lib: &Library, id: TrackId, s: &Settings, structure: clubcraft_analysis::StructureSource, progress: &mut dyn FnMut(f32, &str)) -> Result<()> {
     let t = lib.track(id)?.context("unknown track")?;
     progress(0.1, "Decoding");
     let audio = clubcraft_audio::decode_file(&t.path, clubcraft_core::SAMPLE_RATE)?;
@@ -143,7 +147,12 @@ fn analyze_with(lib: &Library, id: TrackId, _s: &Settings, structure: clubcraft_
     };
     progress(0.5, "Analysing");
     let owned = stems.as_ref().map(OwnedStems::from_stem_track_partial);
-    let opts = AnalyzeOptions { stems_model: stems.as_ref().map(|s| s.model.clone()), structure, ..Default::default() };
+    let opts = AnalyzeOptions {
+        stems_model: stems.as_ref().map(|s| s.model.clone()),
+        structure,
+        beat: clubcraft_analysis::BeatOptions::with_range(s.bpm_min, s.bpm_max),
+        ..Default::default()
+    };
     let sref = owned.as_ref().map(|o| o.as_ref());
     let (analysis, wf) = rayon::join(|| clubcraft_analysis::analyze(&audio, sref.as_ref(), &opts), || clubcraft_analysis::waveform(&audio, sref));
     progress(0.9, "Saving");

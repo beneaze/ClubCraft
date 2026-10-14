@@ -73,12 +73,22 @@ impl StudioView {
         ui.allocate_rect(full, Sense::hover());
         let ruler_h = 24.0;
         let tempo_h = if self.tempo_open { 58.0 } else { 24.0 };
-        let lane_h = ((full.height() - ruler_h - 21.0 - tempo_h - 8.0) / MIX_LANES as f32).clamp(80.0, 300.0);
+        // Collapsed lanes are a slim row (clip titles only); expanded lanes share the rest.
+        const COLLAPSED_H: f32 = 30.0;
+        let n_open = (0..MIX_LANES).filter(|l| !self.lane_collapsed[*l]).count().max(1) as f32;
+        let n_closed = MIX_LANES as f32 - (0..MIX_LANES).filter(|l| !self.lane_collapsed[*l]).count() as f32;
+        let open_h = ((full.height() - ruler_h - 21.0 - tempo_h - 8.0 - n_closed * (COLLAPSED_H + 2.0)) / n_open).clamp(80.0, 300.0);
+        let lane_hs: Vec<f32> = (0..MIX_LANES).map(|l| if self.lane_collapsed[l] { COLLAPSED_H } else { open_h }).collect();
         let canvas = Rect::from_min_max(pos2(full.left() + HEADER_W + 4.0, full.top()), full.max);
         let ruler = Rect::from_min_size(canvas.min, vec2(canvas.width(), ruler_h));
         let strip_h = 20.0;
         let tstrip = Rect::from_min_size(pos2(canvas.left(), ruler.bottom() + 1.0), vec2(canvas.width(), strip_h));
-        let lanes: Vec<Rect> = (0..MIX_LANES).map(|l| Rect::from_min_size(pos2(canvas.left(), tstrip.bottom() + 2.0 + l as f32 * (lane_h + 2.0)), vec2(canvas.width(), lane_h))).collect();
+        let mut lanes: Vec<Rect> = Vec::with_capacity(MIX_LANES);
+        let mut ly = tstrip.bottom() + 2.0;
+        for h in &lane_hs {
+            lanes.push(Rect::from_min_size(pos2(canvas.left(), ly), vec2(canvas.width(), *h)));
+            ly += h + 2.0;
+        }
         let tempo = Rect::from_min_size(pos2(canvas.left(), lanes[MIX_LANES - 1].bottom() + 4.0), vec2(canvas.width(), tempo_h));
 
         // ----- lane headers
@@ -89,7 +99,7 @@ impl StudioView {
             ui.painter().text(corner.left_center() + vec2(8.0, 0.0), egui::Align2::LEFT_CENTER, format!("{}  ·  {} tracks", theme::fmt_time_short(self.timeline.total_secs), self.mix.tracks.len()), egui::FontId::proportional(11.5), theme::TEXT_DIM);
         }
         for l in 0..MIX_LANES {
-            let hr = Rect::from_min_size(pos2(full.left(), lanes[l].top()), vec2(HEADER_W, lane_h));
+            let hr = Rect::from_min_size(pos2(full.left(), lanes[l].top()), vec2(HEADER_W, lane_hs[l]));
             lane_changed |= self.lane_header(ui, hr, l);
         }
         let th = Rect::from_min_size(pos2(full.left(), tempo.top()), vec2(HEADER_W, tempo_h));
@@ -384,7 +394,10 @@ impl StudioView {
         let mut ls: LaneSettings = self.mix.lanes.get(l).copied().unwrap_or_default();
         let before = ls;
         ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("Deck {}", l + 1)).strong().color(accent));
+            let chevron = if self.lane_collapsed[l] { "⏵" } else { "⏷" };
+            if ui.add(egui::Label::new(RichText::new(format!("{chevron} Deck {}", l + 1)).strong().color(accent)).sense(Sense::click())).on_hover_text("Collapse / expand the lane").clicked() {
+                self.lane_collapsed[l] = !self.lane_collapsed[l];
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if widgets::toggle(ui, ls.mute, "M", Color32::from_rgb(255, 90, 90), vec2(22.0, 18.0)).on_hover_text("Mute lane").clicked() {
                     ls.mute = !ls.mute;
@@ -394,16 +407,18 @@ impl StudioView {
                 }
             });
         });
+        if r.height() >= 56.0 {
         ui.horizontal(|ui| {
-            let mut v = db_fader(ls.gain_db);
-            if widgets::hfader_with_default(ui, &mut v, false, 0.8, Some(0.8), vec2(130.0, 18.0), accent).on_hover_text("Lane volume · double-click: 0 dB").changed() {
-                ls.gain_db = fader_db(v);
-                if ls.gain_db.abs() < 0.3 {
-                    ls.gain_db = 0.0;
+                let mut v = db_fader(ls.gain_db);
+                if widgets::hfader_with_default(ui, &mut v, false, 0.8, Some(0.8), vec2(130.0, 18.0), accent).on_hover_text("Lane volume · double-click: 0 dB").changed() {
+                    ls.gain_db = fader_db(v);
+                    if ls.gain_db.abs() < 0.3 {
+                        ls.gain_db = 0.0;
+                    }
                 }
-            }
-            ui.label(RichText::new(format!("{:+.1} dB", ls.gain_db)).size(10.5).color(theme::TEXT_DIM));
-        });
+                ui.label(RichText::new(format!("{:+.1} dB", ls.gain_db)).size(10.5).color(theme::TEXT_DIM));
+            });
+        }
         if r.height() >= 92.0 {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
@@ -440,7 +455,7 @@ impl StudioView {
         let sel = self.selection == Selection::Track(i);
         let audible = self.mix.lane_audible(i);
         let a = sh.analyses.get(&tt.track_id);
-        let header = Rect::from_min_size(r.min, vec2(r.width(), 20.0));
+        let header = Rect::from_min_size(r.min, vec2(r.width(), 20.0f32.min(r.height())));
         let body = Rect::from_min_max(pos2(r.left(), header.bottom()), r.max);
         p.rect_filled(r, 4.0, Color32::from_rgb(30, 32, 38));
         p.rect_filled(header, egui::CornerRadius { nw: 4, ne: 4, sw: 0, se: 0 }, Color32::from_rgb(66, 58, 30).linear_multiply(if audible { 1.0 } else { 0.5 }));
@@ -450,12 +465,20 @@ impl StudioView {
             let k = k.shifted(self.mix.tracks[i].key_shift);
             let badge = Rect::from_min_size(pos2(tx, header.top() + 2.0), vec2(30.0, 16.0));
             p.rect_filled(badge, 3.0, theme::key_color(k));
-            p.text(badge.center(), egui::Align2::CENTER_CENTER, k.camelot(), egui::FontId::proportional(10.5), Color32::BLACK);
+            p.text(badge.center(), egui::Align2::CENTER_CENTER, crate::theme::key_label(k), egui::FontId::proportional(10.5), Color32::BLACK);
             tx = badge.right() + 5.0;
         }
         let name = sh.track(tt.track_id).map(|t| t.title.clone()).unwrap_or_default();
         let max_chars = ((header.right() - tx) / 6.5).max(0.0) as usize;
         p.text(pos2(tx, header.center().y), egui::Align2::LEFT_CENTER, crate::studio::truncate(&format!("{}. {}", i + 1, name), max_chars), egui::FontId::proportional(11.5), theme::TEXT);
+        if r.height() < 40.0 {
+            // collapsed lane: title bar only
+            if !audible {
+                p.rect_filled(r, 4.0, Color32::from_black_alpha(110));
+            }
+            p.rect_stroke(r, 4.0, Stroke::new(if sel { 2.0 } else { 1.0 }, if sel { theme::ACCENT } else { accent.linear_multiply(0.5) }), StrokeKind::Inside);
+            return;
+        }
         // waveform
         let t0 = self.timeline.track_pos(i, tt.start_beat);
         let t1 = self.timeline.track_pos(i, tt.end_beat);

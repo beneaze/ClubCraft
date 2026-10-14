@@ -11,8 +11,10 @@ mod interop;
 mod jobs;
 mod library_view;
 mod live;
+mod menu;
 mod pipeline;
 mod platform;
+mod prefs;
 mod settings;
 mod studio;
 mod studio_timeline;
@@ -28,7 +30,8 @@ fn main() -> eframe::Result<()> {
             .with_title("ClubCraft")
             .with_inner_size([1480.0, 920.0])
             .with_min_inner_size([1100.0, 700.0])
-            .with_drag_and_drop(true),
+            .with_drag_and_drop(true)
+            .with_icon(std::sync::Arc::new(eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon-256.png")).unwrap_or_default())),
         ..Default::default()
     };
     eframe::run_native("ClubCraft", opts, Box::new(|cc| Ok(Box::new(app::App::new(cc)))))

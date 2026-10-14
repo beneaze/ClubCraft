@@ -94,3 +94,18 @@ pub fn hsv(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
     };
     ((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
 }
+
+static KEY_NOTATION: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn set_key_notation(n: crate::prefs::KeyNotation) {
+    KEY_NOTATION.store(n as u8, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// A key in the notation chosen in the preferences (Camelot, Open Key or musical).
+pub fn key_label(k: clubcraft_core::Key) -> String {
+    match KEY_NOTATION.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => k.open_key(),
+        2 => k.name(),
+        _ => k.camelot(),
+    }
+}

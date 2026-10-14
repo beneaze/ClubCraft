@@ -186,7 +186,7 @@ impl LiveView {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if let Some(k) = d.key {
                     let k2 = k.shifted(d.key_shift);
-                    let txt = if d.key_shift != 0 { format!("{} ({:+})", k2.camelot(), d.key_shift) } else { k2.camelot() };
+                    let txt = if d.key_shift != 0 { format!("{} ({:+})", crate::theme::key_label(k2), d.key_shift) } else { crate::theme::key_label(k2) };
                     ui.label(RichText::new(txt).strong().size(14.0).color(theme::key_color(k2)));
                 }
                 ui.vertical(|ui| {

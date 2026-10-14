@@ -9,6 +9,7 @@ APP=target/ClubCraft.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/models"
 cp target/release/clubcraft "$APP/Contents/MacOS/ClubCraft"
+cp crates/app/assets/ClubCraft.icns "$APP/Contents/Resources/ClubCraft.icns"
 # Models used by the app: htdemucs (fast/live), htdemucs_ft (high), melroformer (best vocals),
 # allin1 (optional deep structure analysis, ONNX only). htdemucs_6s is not bundled.
 for m in htdemucs htdemucs_ft melroformer allin1; do
@@ -30,6 +31,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleVersion</key><string>0.1.0</string>
   <key>CFBundleShortVersionString</key><string>0.1.0</string>
   <key>CFBundleExecutable</key><string>ClubCraft</string>
+  <key>CFBundleIconFile</key><string>ClubCraft</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>

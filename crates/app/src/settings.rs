@@ -1,10 +1,12 @@
 //! Settings window: audio output, headphone routing, MIDI controllers (with learn mode) and
 //! library maintenance.
 
+use crate::prefs::*;
 use crate::theme;
+use clubcraft_core::TransitionStyle;
 use clubcraft_engine::midi::{self, MidiConnection, MidiMapper, MidiMapping};
 use clubcraft_engine::{AudioConfig, DeviceInfo, EngineHandle, EngineState, HeadphoneRouting};
-use eframe::egui::{self, RichText};
+use eframe::egui::{self, RichText, Ui};
 use parking_lot::Mutex;
 use std::sync::Arc;
 
@@ -64,6 +66,37 @@ pub struct Settings {
     connection: Option<MidiConnection>,
     learn_deck: usize,
     pub message: String,
+    pub tab: Tab,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tab {
+    General,
+    Decks,
+    Mixer,
+    Audio,
+    Waveforms,
+    Analysis,
+    Studio,
+    Export,
+    Controllers,
+}
+
+impl Tab {
+    const ALL: [Tab; 9] = [Tab::General, Tab::Decks, Tab::Mixer, Tab::Audio, Tab::Waveforms, Tab::Analysis, Tab::Studio, Tab::Export, Tab::Controllers];
+    fn label(self) -> &'static str {
+        match self {
+            Tab::General => "General",
+            Tab::Decks => "Decks",
+            Tab::Mixer => "Mixer",
+            Tab::Audio => "Audio output",
+            Tab::Waveforms => "Waveforms",
+            Tab::Analysis => "Analysis & stems",
+            Tab::Studio => "Studio",
+            Tab::Export => "Export & recording",
+            Tab::Controllers => "Controllers (MIDI)",
+        }
+    }
 }
 
 impl Settings {
@@ -80,6 +113,7 @@ impl Settings {
             connection: None,
             learn_deck: 0,
             message: String::new(),
+            tab: Tab::General,
         }
     }
 
@@ -111,46 +145,55 @@ impl Settings {
         }
     }
 
-    pub fn ui(&mut self, ctx: &egui::Context, handle: Option<&EngineHandle>, actions: &mut Vec<SettingsAction>, jobs: &mut crate::pipeline::Settings) {
+    pub fn ui(&mut self, ctx: &egui::Context, handle: Option<&EngineHandle>, actions: &mut Vec<SettingsAction>, prefs: &mut Prefs) {
         if !self.open {
             return;
         }
         let mut open = self.open;
-        egui::Window::new("Settings").open(&mut open).default_width(560.0).resizable(true).show(ctx, |ui| {
-            egui::ScrollArea::vertical().max_height(620.0).show(ui, |ui| {
-                self.audio_ui(ui, handle);
-                ui.separator();
-                self.midi_ui(ui, handle);
-                ui.separator();
-                ui.heading("Analysis");
-                ui.checkbox(&mut jobs.separate_stems, "Separate stems automatically for analysed tracks");
-                ui.checkbox(&mut jobs.deep_structure, "Deep structure analysis (All-In-One model: slightly better sections and cues, ~1 min and +1.5 GB per track)");
-                ui.separator();
-                ui.heading("Library");
-                ui.horizontal(|ui| {
-                    if ui.button("Analyse + separate all tracks").clicked() {
-                        actions.push(SettingsAction::ProcessAll);
-                    }
-                    if ui.button("Re-analyse all (keep stems)").clicked() {
-                        actions.push(SettingsAction::ReanalyseAll);
-                    }
-                    if ui.button("Open data folder").clicked() {
-                        crate::platform::open(&clubcraft_core::paths::data_dir());
-                    }
-                });
-                ui.label(RichText::new(format!("Data: {}", clubcraft_core::paths::data_dir().display())).size(11.0).color(theme::TEXT_DIM));
-                ui.label(RichText::new(format!("Models: {}", clubcraft_core::paths::models_dir().display())).size(11.0).color(theme::TEXT_DIM));
-                if !self.message.is_empty() {
+        egui::Window::new("Settings")
+            .open(&mut open)
+            .default_size([760.0, 560.0])
+            .min_width(640.0)
+            .resizable(true)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                ui.horizontal_top(|ui| {
+                    ui.vertical(|ui| {
+                        ui.set_width(150.0);
+                        for t in Tab::ALL {
+                            if ui.add(egui::Button::new(RichText::new(t.label()).size(13.0)).selected(self.tab == t).min_size(egui::vec2(146.0, 26.0))).clicked() {
+                                self.tab = t;
+                            }
+                        }
+                    });
                     ui.separator();
-                    ui.label(&self.message);
-                }
+                    ui.vertical(|ui| {
+                        egui::ScrollArea::vertical().id_salt("settings-body").show(ui, |ui| {
+                            ui.set_min_width(520.0);
+                            match self.tab {
+                                Tab::General => general_ui(ui, prefs),
+                                Tab::Decks => decks_ui(ui, prefs),
+                                Tab::Mixer => mixer_ui(ui, prefs),
+                                Tab::Audio => self.audio_ui(ui, handle),
+                                Tab::Waveforms => waveforms_ui(ui, prefs),
+                                Tab::Analysis => analysis_ui(ui, prefs, actions),
+                                Tab::Studio => studio_ui(ui, prefs),
+                                Tab::Export => export_ui(ui, prefs),
+                                Tab::Controllers => self.midi_ui(ui, handle),
+                            }
+                            if !self.message.is_empty() {
+                                ui.add_space(8.0);
+                                ui.label(RichText::new(&self.message).color(theme::TEXT_DIM));
+                            }
+                        });
+                    });
+                });
             });
-        });
         self.open = open;
     }
 
     fn audio_ui(&mut self, ui: &mut egui::Ui, handle: Option<&EngineHandle>) {
-        ui.heading("Audio output");
+        section(ui, "Audio output");
         if self.devices.is_empty() {
             self.devices = clubcraft_engine::devices().unwrap_or_default();
         }
@@ -214,7 +257,7 @@ impl Settings {
     }
 
     fn midi_ui(&mut self, ui: &mut egui::Ui, handle: Option<&EngineHandle>) {
-        ui.heading("MIDI controller");
+        section(ui, "MIDI controller");
         ui.horizontal(|ui| {
             if self.midi_ports.is_empty() {
                 self.midi_ports = midi::input_ports().unwrap_or_default();
@@ -279,4 +322,195 @@ impl Settings {
 pub enum SettingsAction {
     ProcessAll,
     ReanalyseAll,
+}
+
+fn section(ui: &mut Ui, title: &str) {
+    ui.add_space(2.0);
+    ui.label(RichText::new(title).size(16.0).strong());
+    ui.add_space(4.0);
+}
+
+fn hint(ui: &mut Ui, text: &str) {
+    ui.label(RichText::new(text).size(11.0).color(theme::TEXT_DIM));
+}
+
+fn row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
+    ui.horizontal(|ui| {
+        ui.add_sized(egui::vec2(190.0, 20.0), egui::Label::new(label));
+        add(ui);
+    });
+}
+
+fn general_ui(ui: &mut Ui, p: &mut Prefs) {
+    section(ui, "General");
+    row(ui, "Key notation", |ui| {
+        ui.selectable_value(&mut p.key_notation, KeyNotation::Camelot, "Camelot (8A)");
+        ui.selectable_value(&mut p.key_notation, KeyNotation::OpenKey, "Open Key (1m)");
+        ui.selectable_value(&mut p.key_notation, KeyNotation::Musical, "Musical (Am)");
+    });
+    row(ui, "Interface size", |ui| {
+        ui.add(egui::Slider::new(&mut p.ui_scale, 0.8..=1.5).step_by(0.05).custom_formatter(|v, _| format!("{:.0} %", v * 100.0)));
+    });
+    row(ui, "On start", |ui| {
+        ui.checkbox(&mut p.start_on_home, "Open the home page");
+    });
+    ui.add_space(8.0);
+    hint(ui, &format!("Library, stems and exports are stored in {}", clubcraft_core::paths::data_dir().display()));
+}
+
+fn decks_ui(ui: &mut Ui, p: &mut Prefs) {
+    section(ui, "Decks");
+    row(ui, "Cue button", |ui| {
+        ui.selectable_value(&mut p.cue_button, CueButton::Cdj, "CDJ").on_hover_text("Stopped: set / preview the cue. Playing: back to the cue and stop.");
+        ui.selectable_value(&mut p.cue_button, CueButton::Hold, "Hold").on_hover_text("Plays while held, returns on release");
+        ui.selectable_value(&mut p.cue_button, CueButton::Cup, "Cue-up-play").on_hover_text("Release starts playback from the cue");
+    });
+    row(ui, "Hot cue while stopped", |ui| {
+        ui.selectable_value(&mut p.hot_cue_press, HotCuePress::Preview, "Preview while held");
+        ui.selectable_value(&mut p.hot_cue_press, HotCuePress::Play, "Start playing");
+    });
+    row(ui, "Park loaded track at", |ui| {
+        ui.selectable_value(&mut p.load_position, LoadPosition::FirstBeat, "First beat");
+        ui.selectable_value(&mut p.load_position, LoadPosition::MixIn, "Mix-in cue");
+        ui.selectable_value(&mut p.load_position, LoadPosition::FileStart, "Start of file");
+    });
+    row(ui, "Default pitch range", |ui| {
+        for r in [6u32, 8, 10, 16, 25, 50, 100] {
+            ui.selectable_value(&mut p.pitch_range, r, format!("±{r}%"));
+        }
+    });
+    row(ui, "On load", |ui| {
+        ui.checkbox(&mut p.keylock, "Keylock on");
+        ui.checkbox(&mut p.quantize, "Quantize on");
+        ui.checkbox(&mut p.sync_on_load, "Sync to master");
+    });
+    row(ui, "Reset on load", |ui| {
+        ui.checkbox(&mut p.reset_eq_on_load, "EQ & filter");
+        ui.checkbox(&mut p.reset_stems_on_load, "Stems");
+        ui.checkbox(&mut p.reset_key_on_load, "Key shift");
+        ui.checkbox(&mut p.reset_pitch_on_load, "Pitch");
+    });
+}
+
+fn mixer_ui(ui: &mut Ui, p: &mut Prefs) {
+    section(ui, "Mixer");
+    row(ui, "Crossfader curve", |ui| {
+        ui.selectable_value(&mut p.crossfader_curve, XfCurve::Smooth, "Smooth");
+        ui.selectable_value(&mut p.crossfader_curve, XfCurve::Full, "Full");
+        ui.selectable_value(&mut p.crossfader_curve, XfCurve::Cut, "Cut");
+        ui.selectable_value(&mut p.crossfader_curve, XfCurve::Scratch, "Scratch");
+    });
+    row(ui, "Channel fader curve", |ui| {
+        ui.selectable_value(&mut p.fader_curve, FaderLaw::Linear, "Linear");
+        ui.selectable_value(&mut p.fader_curve, FaderLaw::Smooth, "Smooth");
+        ui.selectable_value(&mut p.fader_curve, FaderLaw::Fast, "Fast");
+    });
+    row(ui, "Auto gain", |ui| {
+        ui.checkbox(&mut p.auto_gain, "Match the loudness of every track");
+    });
+    row(ui, "Master limiter", |ui| {
+        ui.checkbox(&mut p.limiter, "On");
+        ui.add_enabled(p.limiter, egui::Slider::new(&mut p.limiter_ceiling_db, -6.0..=0.0).suffix(" dB").text("ceiling"));
+    });
+}
+
+fn waveforms_ui(ui: &mut Ui, p: &mut Prefs) {
+    section(ui, "Waveforms");
+    row(ui, "Colours", |ui| {
+        ui.selectable_value(&mut p.stem_waveforms, true, "By stem");
+        ui.selectable_value(&mut p.stem_waveforms, false, "By frequency band");
+    });
+    row(ui, "Live waveform zoom", |ui| {
+        ui.add(egui::Slider::new(&mut p.wave_zoom_secs, 2.0..=30.0).suffix(" s visible"));
+    });
+}
+
+fn analysis_ui(ui: &mut Ui, p: &mut Prefs, actions: &mut Vec<SettingsAction>) {
+    section(ui, "Analysis");
+    row(ui, "BPM range", |ui| {
+        ui.add(egui::DragValue::new(&mut p.bpm_min).range(50.0..=p.bpm_max - 10.0).speed(1.0));
+        ui.label("to");
+        ui.add(egui::DragValue::new(&mut p.bpm_max).range(p.bpm_min + 10.0..=250.0).speed(1.0));
+        ui.label("BPM");
+    });
+    hint(ui, "Detected tempos are folded into this range (e.g. 70–180 for house and techno, 85–175 for drum & bass at half time).");
+    row(ui, "Structure", |ui| {
+        ui.checkbox(&mut p.deep_structure, "Deep structure analysis (All-In-One model)");
+    });
+    hint(ui, "Slightly better sections and cues; needs stems, about 1 min and 1.5 GB extra per track.");
+    ui.add_space(6.0);
+    section(ui, "Stems");
+    row(ui, "Separate automatically", |ui| {
+        ui.checkbox(&mut p.separate_stems, "For every imported track (in the background)");
+    });
+    row(ui, "Quality", |ui| {
+        for (q, l, h) in [
+            ("best", "Best", "Mel-Band RoFormer vocals + htdemucs_ft: cleanest vocals, ~3.5 min per track"),
+            ("high", "High", "htdemucs_ft, ~80 s per track"),
+            ("fast", "Fast", "htdemucs, ~17 s per track"),
+        ] {
+            ui.selectable_value(&mut p.stem_quality, q.to_string(), l).on_hover_text(h);
+        }
+    });
+    hint(ui, "Decks always get fast stems within seconds when a track was not separated yet.");
+    ui.add_space(6.0);
+    section(ui, "Library");
+    ui.horizontal(|ui| {
+        if ui.button("Analyse + separate all tracks").clicked() {
+            actions.push(SettingsAction::ProcessAll);
+        }
+        if ui.button("Re-analyse all (keep stems)").clicked() {
+            actions.push(SettingsAction::ReanalyseAll);
+        }
+        if ui.button("Open data folder").clicked() {
+            crate::platform::open(&clubcraft_core::paths::data_dir());
+        }
+    });
+}
+
+fn studio_ui(ui: &mut Ui, p: &mut Prefs) {
+    section(ui, "Studio (new transitions)");
+    row(ui, "Default transition", |ui| {
+        egui::ComboBox::from_id_salt("pref-tstyle").selected_text(p.transition_style.label()).show_ui(ui, |ui| {
+            for s in TransitionStyle::ALL.into_iter().filter(|s| *s != TransitionStyle::Custom) {
+                ui.selectable_value(&mut p.transition_style, s, s.label());
+            }
+        });
+    });
+    row(ui, "Transition length", |ui| {
+        ui.selectable_value(&mut p.transition_bars, None, "Auto");
+        for b in [4u32, 8, 16, 32] {
+            ui.selectable_value(&mut p.transition_bars, Some(b), format!("{b} bars"));
+        }
+    });
+    hint(ui, "Auto picks the length from the outro of the outgoing and the intro of the incoming track. Stem transitions fall back to a bass swap for tracks without stems.");
+    row(ui, "Harmonic mixing", |ui| {
+        ui.checkbox(&mut p.allow_key_shift, "Shift keys by ±1 semitone to avoid clashes");
+    });
+    row(ui, "Keylock in mixes", |ui| {
+        ui.checkbox(&mut p.mix_keylock, "Keep the original key when the tempo changes");
+    });
+}
+
+fn export_ui(ui: &mut Ui, p: &mut Prefs) {
+    section(ui, "Mix export");
+    row(ui, "Format", |ui| {
+        for f in [AudioFormat::Wav16, AudioFormat::Wav24, AudioFormat::Wav32Float] {
+            ui.selectable_value(&mut p.export_format, f, f.label());
+        }
+    });
+    row(ui, "Cue sheet", |ui| {
+        ui.checkbox(&mut p.export_cue_sheet, "Write a .cue track list next to the mix");
+    });
+    row(ui, "Tail", |ui| {
+        ui.add(egui::Slider::new(&mut p.export_tail_secs, 0.0..=10.0).suffix(" s").text("after the last track"));
+    });
+    ui.add_space(6.0);
+    section(ui, "Recording (live)");
+    row(ui, "Format", |ui| {
+        for f in [AudioFormat::Wav16, AudioFormat::Wav24, AudioFormat::Wav32Float] {
+            ui.selectable_value(&mut p.record_format, f, f.label());
+        }
+    });
+    hint(ui, &format!("Recordings go to {}", clubcraft_core::paths::recordings_dir().display()));
 }

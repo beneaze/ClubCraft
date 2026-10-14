@@ -50,6 +50,11 @@ pub struct StudioView {
     pub tgroup: crate::studio_transition::ParamGroup,
     /// Zoom to fit the whole mix on the next frame.
     pub fit_request: bool,
+    /// Defaults for new transitions (from the preferences).
+    pub plan_opts: PlanOptions,
+    /// Collapsed lanes in the timeline and the track strip.
+    pub lane_collapsed: [bool; clubcraft_core::MIX_LANES],
+    pub strip_open: bool,
 }
 
 impl Default for StudioView {
@@ -75,6 +80,9 @@ impl Default for StudioView {
             drag_acc: 0.0,
             tgroup: Default::default(),
             fit_request: true,
+            plan_opts: PlanOptions::default(),
+            lane_collapsed: [false; clubcraft_core::MIX_LANES],
+            strip_open: true,
         }
     }
 }
@@ -112,7 +120,7 @@ impl StudioView {
         let mut order: Vec<TrackId> = self.mix.tracks.iter().map(|t| t.track_id).collect();
         let start = order.len();
         order.extend(ids.iter().copied().filter(|id| !self.mix.tracks.iter().any(|t| t.track_id == *id)));
-        let planned = planner::plan_mix(&self.mix.name, &order, &|id| analysis_of(sh, id), &PlanOptions { has_stems: true, ..Default::default() });
+        let planned = planner::plan_mix(&self.mix.name, &order, &|id| analysis_of(sh, id), &self.plan_opts);
         for (i, t) in planned.tracks.into_iter().enumerate().skip(start) {
             self.mix.tracks.push(t);
             if i > 0 && self.mix.transitions.len() < i {
@@ -138,7 +146,7 @@ impl StudioView {
     pub fn replan(&mut self, sh: &Shared, order: &[TrackId]) {
         let styles: Vec<TransitionStyle> = self.mix.transitions.iter().map(|t| t.style).collect();
         let keep_style = styles.iter().all(|s| *s == styles.first().copied().unwrap_or(TransitionStyle::StemBlend));
-        let mut planned = planner::plan_mix(&self.mix.name, order, &|id| analysis_of(sh, id), &PlanOptions { style: if keep_style { styles.first().copied() } else { None }, ..Default::default() });
+        let mut planned = planner::plan_mix(&self.mix.name, order, &|id| analysis_of(sh, id), &PlanOptions { style: if keep_style { styles.first().copied() } else { self.plan_opts.style }, ..self.plan_opts });
         planned.id = self.mix.id;
         planned.tempo = self.mix.tempo;
         planned.keylock = self.mix.keylock;
@@ -154,9 +162,10 @@ impl StudioView {
         egui::Panel::top("studio-toolbar").frame(egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(10, 6))).show(ui, |ui| {
             self.toolbar(ui, sh, mixes, out, load_mix, new_mix);
         });
-        egui::Panel::bottom("studio-inspector-v2")
-            .default_size(380.0)
-            .min_size((ui.available_height() * 0.40).clamp(220.0, 400.0))
+        let none_selected = self.selection == Selection::None;
+        egui::Panel::bottom(if none_selected { "studio-inspector-empty" } else { "studio-inspector-v2" })
+            .default_size(if none_selected { 80.0 } else { 380.0 })
+            .min_size(if self.selection == Selection::None { 70.0 } else { (ui.available_height() * 0.40).clamp(220.0, 400.0) })
             .max_size((ui.available_height() * 0.65).max(260.0))
             .resizable(true)
             .frame(egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(12, 8)))
@@ -367,6 +376,14 @@ impl StudioView {
     }
 
     fn order_strip(&mut self, ui: &mut Ui, sh: &Shared) {
+        let chevron = if self.strip_open { "⏷" } else { "⏵" };
+        let n = self.mix.tracks.len();
+        if ui.add(egui::Label::new(RichText::new(format!("{chevron} Tracks ({n})")).size(12.0).color(theme::TEXT_DIM)).sense(Sense::click())).on_hover_text("Show / hide the track order strip").clicked() {
+            self.strip_open = !self.strip_open;
+        }
+        if !self.strip_open {
+            return;
+        }
         let h = 50.0;
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
         if let Some(p) = resp.dnd_release_payload::<DraggedTracks>() {
@@ -405,7 +422,7 @@ impl StudioView {
                         }
                         if let Some(k) = a.key {
                             let k = k.shifted(self.mix.tracks[i].key_shift);
-                            p.text(r.center_bottom() + vec2(0.0, -5.0), egui::Align2::CENTER_BOTTOM, k.camelot(), egui::FontId::proportional(12.0), theme::key_color(k));
+                            p.text(r.center_bottom() + vec2(0.0, -5.0), egui::Align2::CENTER_BOTTOM, crate::theme::key_label(k), egui::FontId::proportional(12.0), theme::key_color(k));
                         }
                         if let Some(e) = a.energy {
                             p.text(r.right_bottom() + vec2(-6.0, -5.0), egui::Align2::RIGHT_BOTTOM, format!("E{e}"), egui::FontId::proportional(10.5), theme::WARN);
@@ -507,7 +524,7 @@ impl StudioView {
                 ui.add_space(10.0);
                 ui.label(RichText::new(format!("{:.2} BPM", a.bpm().unwrap_or(0.0))).monospace());
                 if let Some(k) = a.key {
-                    ui.label(RichText::new(k.camelot()).strong().color(theme::key_color(k)));
+                    ui.label(RichText::new(crate::theme::key_label(k)).strong().color(theme::key_color(k)));
                     ui.label(RichText::new(k.name()).color(theme::TEXT_DIM));
                 }
                 if let Some(e) = a.energy {
@@ -561,12 +578,12 @@ impl StudioView {
                     }
                     if let Some(k) = a.as_ref().and_then(|a| a.key) {
                         let k2 = k.shifted(mt.key_shift);
-                        ui.label(RichText::new(k2.camelot()).strong().color(theme::key_color(k2)));
+                        ui.label(RichText::new(crate::theme::key_label(k2)).strong().color(theme::key_color(k2)));
                         for (n, other) in [("prev", prev_key), ("next", next_key)] {
                             if let Some(o) = other {
                                 let c = if n == "prev" { o.compatibility(k2) } else { k2.compatibility(o) };
                                 let col = if c >= 0.85 { theme::OK } else if c >= 0.5 { theme::WARN } else { Color32::from_rgb(255, 90, 90) };
-                                ui.label(RichText::new(format!("{n} {}", o.camelot())).size(11.0).color(col));
+                                ui.label(RichText::new(format!("{n} {}", crate::theme::key_label(o))).size(11.0).color(col));
                             }
                         }
                     }

@@ -90,6 +90,9 @@ pub struct App {
     pub eng: crate::live::adapter::LiveEngine,
     pub settings: crate::settings::Settings,
     pub home: crate::home::HomeView,
+    pub prefs: crate::prefs::Prefs,
+    menu: Option<crate::menu::AppMenu>,
+    applied_prefs: Option<crate::prefs::Prefs>,
     pub mix_summaries: Vec<crate::home::MixSummary>,
     prepared: (i64, usize),
     queued: std::collections::HashSet<TrackId>,
@@ -101,19 +104,11 @@ impl App {
         let lib = Library::open_default().expect("open library");
         let mut sh = Shared { deck_count: 2, ..Default::default() };
         sh.reload(&lib);
-        let mut job_settings = crate::pipeline::Settings::default();
-        if let Some(q) = cc.storage.and_then(|s| eframe::get_value::<String>(s, "stems_quality")) {
-            job_settings.quality = q;
-        }
-        if let Some(a) = cc.storage.and_then(|s| eframe::get_value::<bool>(s, "auto_stems")) {
-            job_settings.separate_stems = a;
-        }
-        if let Some(a) = cc.storage.and_then(|s| eframe::get_value::<bool>(s, "deep_structure")) {
-            job_settings.deep_structure = a;
-        }
+        let prefs = crate::prefs::Prefs::load();
+        let job_settings = prefs_job_settings(&prefs);
         let jobs = Jobs::new(job_settings);
-        // Always start on the home page (unless `--view` says otherwise).
-        let mut view = View::Home;
+        // Start on the home page (preference), otherwise where the user left off.
+        let mut view = if prefs.start_on_home { View::Home } else { cc.storage.and_then(|s| eframe::get_value(s, "view")).unwrap_or(View::Home) };
         // Developer conveniences: `--import <path>` and `--view library|studio|live`.
         let args: Vec<String> = std::env::args().collect();
         for w in args.windows(2) {
@@ -132,7 +127,7 @@ impl App {
         }
         let audio_cfg: clubcraft_engine::AudioConfig = cc.storage.and_then(|s| eframe::get_value(s, "audio")).unwrap_or_default();
         let midi_port: Option<String> = cc.storage.and_then(|s| eframe::get_value(s, "midi_port"));
-        let mut app = App { lib, sh, jobs, view, library: LibraryView::default(), status: String::new(), devctl: crate::devctl::DevCtl::from_env(), live: Default::default(), decks: vec![Default::default(); 2], mixer: Default::default(), browser: LibraryView::default(), studio: Default::default(), mixes: Vec::new(), eng: crate::live::adapter::LiveEngine::start(audio_cfg.clone()), settings: crate::settings::Settings::new(audio_cfg, midi_port), home: Default::default(), mix_summaries: Vec::new(), prepared: (-1, 0), queued: Default::default() };
+        let mut app = App { lib, sh, jobs, view, library: LibraryView::default(), status: String::new(), devctl: crate::devctl::DevCtl::from_env(), live: Default::default(), decks: vec![Default::default(); 2], mixer: Default::default(), browser: LibraryView::default(), studio: Default::default(), mixes: Vec::new(), eng: crate::live::adapter::LiveEngine::start(audio_cfg.clone()), settings: crate::settings::Settings::new(audio_cfg, midi_port), home: Default::default(), prefs, applied_prefs: None, menu: crate::menu::AppMenu::install(&cc.egui_ctx), mix_summaries: Vec::new(), prepared: (-1, 0), queued: Default::default() };
         app.settings.connect_midi(app.eng.handle.as_ref());
         if let Some(e) = &app.eng.error {
             app.status = e.clone();
@@ -241,6 +236,63 @@ impl App {
         }
     }
 
+    fn menu_command(&mut self, c: crate::menu::MenuCmd) {
+        use crate::home::HomeAction as H;
+        use crate::menu::MenuCmd as M;
+        use crate::studio::StudioAction as S;
+        match c {
+            M::Settings => self.settings.open = true,
+            M::NewMix => self.handle_home_actions(vec![H::NewMix { name: "New mix".into(), tracks: vec![], harmonize: false }]),
+            M::AddMusic => self.handle_home_actions(vec![H::AddMusic]),
+            M::ImportDjStudio => self.handle_studio_actions(vec![S::ImportDjStudio]),
+            M::ExportVirtualDj => self.handle_studio_actions(vec![S::ExportVirtualDj]),
+            M::ExportMix => {
+                self.view = View::Studio;
+                self.studio_transport(S::Export);
+            }
+            M::SaveMix => self.save_mix(),
+            M::ViewHome => self.view = View::Home,
+            M::ViewLibrary => self.view = View::Library,
+            M::ViewStudio => self.view = View::Studio,
+            M::ViewLive => self.view = View::Live,
+            M::PlayPause => self.studio_transport(S::PlayPause),
+            M::OpenDataFolder => crate::platform::open(&clubcraft_core::paths::data_dir()),
+            M::Help => crate::platform::open(std::path::Path::new("https://github.com/beneaze/ClubCraft#readme")),
+        }
+    }
+
+    /// Push changed preferences into the engine, the job system and the views, and save them.
+    fn apply_prefs(&mut self, ctx: &egui::Context) {
+        if self.applied_prefs.as_ref() == Some(&self.prefs) {
+            return;
+        }
+        let p = self.prefs.clone();
+        let first = self.applied_prefs.is_none();
+        crate::theme::set_key_notation(p.key_notation);
+        ctx.set_zoom_factor(p.ui_scale);
+        if let Some(h) = &self.eng.handle {
+            for c in p.engine_commands() {
+                let _ = h.send(c);
+            }
+        }
+        *self.jobs.settings.lock() = prefs_job_settings(&p);
+        self.live.wave_style = if p.stem_waveforms { crate::waveform::WaveStyle::Stems } else { crate::waveform::WaveStyle::Bands };
+        if first || self.applied_prefs.as_ref().map(|o| o.wave_zoom_secs) != Some(p.wave_zoom_secs) {
+            self.live.zoom = p.wave_zoom_secs;
+        }
+        self.studio.plan_opts = clubcraft_core::planner::PlanOptions {
+            transition_beats: p.transition_bars.map(|b| b * 4),
+            style: Some(p.transition_style),
+            allow_key_shift: p.allow_key_shift,
+            has_stems: true,
+        };
+        self.eng.prefs = p.clone();
+        if !first {
+            p.save();
+        }
+        self.applied_prefs = Some(p);
+    }
+
     /// Make sure every track of the open mix gets analysed and separated (high priority).
     pub fn prepare_mix_tracks(&mut self) {
         for t in &self.studio.mix.tracks {
@@ -273,7 +325,8 @@ impl App {
                     } else {
                         tracks
                     };
-                    let mut mix = clubcraft_core::planner::plan_mix(&name, &order, &|id| self.sh.analyses.get(&id).cloned(), &Default::default());
+                    let mut mix = clubcraft_core::planner::plan_mix(&name, &order, &|id| self.sh.analyses.get(&id).cloned(), &self.studio.plan_opts);
+                    mix.keylock = self.prefs.mix_keylock;
                     mix.name = name;
                     if let Err(e) = self.lib.save_mix(&mut mix) {
                         self.status = format!("create mix: {e}");
@@ -511,6 +564,13 @@ impl App {
                 }
             }
             "settings" => self.settings.open = true,
+            "collapse" => {
+                if let Ok(l) = arg.trim().parse::<usize>() {
+                    if l < self.studio.lane_collapsed.len() {
+                        self.studio.lane_collapsed[l] = !self.studio.lane_collapsed[l];
+                    }
+                }
+            }
             "send-live" => self.studio_transport(crate::studio::StudioAction::SendToLive),
             "mix-seek" => {
                 if let Ok(t) = arg.trim().parse::<f64>() {
@@ -564,17 +624,15 @@ impl App {
                 if ui.button("⚙ Settings").clicked() {
                     self.settings.open = !self.settings.open;
                 }
-                let mut s = self.jobs.settings.lock();
+                let p = &mut self.prefs;
                 egui::ComboBox::from_id_salt("quality")
-                    .selected_text(format!("Stems: {}", s.quality))
+                    .selected_text(format!("Stems: {}", p.stem_quality))
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut s.quality, "best".to_string(), "Best: RoFormer vocals + htdemucs_ft (~3.5 min/track)");
-                        ui.selectable_value(&mut s.quality, "fast".to_string(), "Fast: htdemucs (~17 s/track)");
-                        ui.selectable_value(&mut s.quality, "high".to_string(), "High: htdemucs_ft (~80 s/track)");
-                        ui.selectable_value(&mut s.quality, "ultra".to_string(), "Ultra (ft + shifts)");
+                        ui.selectable_value(&mut p.stem_quality, "best".to_string(), "Best: RoFormer vocals + htdemucs_ft (~3.5 min/track)");
+                        ui.selectable_value(&mut p.stem_quality, "high".to_string(), "High: htdemucs_ft (~80 s/track)");
+                        ui.selectable_value(&mut p.stem_quality, "fast".to_string(), "Fast: htdemucs (~17 s/track)");
                     });
-                ui.checkbox(&mut s.separate_stems, "Auto stems");
-                drop(s);
+                ui.checkbox(&mut p.separate_stems, "Auto stems");
                 let pending = self.jobs.pending();
                 if pending > 0 {
                     if ui.small_button("Stop").clicked() {
@@ -593,6 +651,10 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.handle_events(&ctx);
+        let menu_cmds = self.menu.as_ref().map(|m| m.poll()).unwrap_or_default();
+        for c in menu_cmds {
+            self.menu_command(c);
+        }
         for cmd in self.devctl.poll(&ctx) {
             match cmd {
                 crate::devctl::DevCmd::View(v) => self.view = v,
@@ -648,11 +710,8 @@ impl eframe::App for App {
         self.handle_library_actions(actions);
         self.handle_home_actions(home_actions);
         let mut sa = Vec::new();
-        {
-            let mut js = self.jobs.settings.lock().clone();
-            self.settings.ui(&ctx, self.eng.handle.as_ref(), &mut sa, &mut js);
-            *self.jobs.settings.lock() = js;
-        }
+        self.settings.ui(&ctx, self.eng.handle.as_ref(), &mut sa, &mut self.prefs);
+        self.apply_prefs(&ctx);
         for a in sa {
             match a {
                 crate::settings::SettingsAction::ProcessAll => {
@@ -676,12 +735,6 @@ impl eframe::App for App {
         eframe::set_value(storage, "view", &self.view);
         eframe::set_value(storage, "audio", &self.settings.audio);
         eframe::set_value(storage, "midi_port", &self.settings.midi_port);
-        {
-            let js = self.jobs.settings.lock();
-            eframe::set_value(storage, "stems_quality", &js.quality);
-            eframe::set_value(storage, "auto_stems", &js.separate_stems);
-            eframe::set_value(storage, "deep_structure", &js.deep_structure);
-        }
         self.save_mix();
         if self.studio.mix.id > 0 {
             eframe::set_value(storage, "mix", &self.studio.mix.id);
@@ -733,7 +786,7 @@ fn live_browser(ui: &mut egui::Ui, browser: &mut LibraryView, sh: &Shared, queue
                         ui.label(RichText::new(format!("{}.", i + 1)).color(theme::TEXT_DIM));
                         ui.add(egui::Label::new(crate::studio::truncate(&name, 26)).truncate());
                         if let Some(k) = a.and_then(|a| a.key) {
-                            ui.label(RichText::new(k.camelot()).color(theme::key_color(k)).size(11.0));
+                            ui.label(RichText::new(crate::theme::key_label(k)).color(theme::key_color(k)).size(11.0));
                         }
                         if ui.small_button("✕").clicked() {
                             remove = Some(i);
@@ -746,4 +799,14 @@ fn live_browser(ui: &mut egui::Ui, browser: &mut LibraryView, sh: &Shared, queue
             }
         });
     });
+}
+
+fn prefs_job_settings(p: &crate::prefs::Prefs) -> crate::pipeline::Settings {
+    crate::pipeline::Settings {
+        separate_stems: p.separate_stems,
+        quality: p.stem_quality.clone(),
+        deep_structure: p.deep_structure,
+        bpm_min: p.bpm_min,
+        bpm_max: p.bpm_max,
+    }
 }

@@ -173,7 +173,7 @@ impl LibraryView {
                     });
                     row.col(|ui| {
                         if let Some(k) = a.and_then(|a| a.key) {
-                            ui.label(RichText::new(k.camelot()).color(theme::key_color(k)).strong());
+                            ui.label(RichText::new(crate::theme::key_label(k)).color(theme::key_color(k)).strong());
                         }
                     });
                     row.col(|ui| {

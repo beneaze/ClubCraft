@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use clubcraft_core::library::stems_path;
 use clubcraft_core::{Cue, CueSource, Library, Mix, StemKind, StemTrack, TrackId, HOT_CUES};
 use clubcraft_engine::{
-    AudioConfig, Command, Engine, EngineHandle, EngineState, EqBand, FxKind, LoadedTrack, MixPlayer, PitchRange, RenderOptions, WavFormat,
+    AudioConfig, Command, Engine, EngineHandle, EngineState, EqBand, FxKind, LoadedTrack, MixPlayer, PitchRange, RenderOptions,
 };
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use parking_lot::Mutex;
@@ -216,6 +216,8 @@ pub struct LiveEngine {
     pub automix_queue: Vec<TrackId>,
     /// Tracks whose library data changed (analysed while loading); the app refreshes them.
     pub touched: Vec<TrackId>,
+    /// Current preferences (set by the app).
+    pub prefs: crate::prefs::Prefs,
 }
 
 impl LiveEngine {
@@ -245,6 +247,7 @@ impl LiveEngine {
             export: None,
             automix_queue: Vec::new(),
             touched: Vec::new(),
+            prefs: crate::prefs::Prefs::default(),
         }
     }
 
@@ -342,9 +345,10 @@ impl LiveEngine {
         let analyses: HashMap<TrackId, clubcraft_core::Analysis> = mix.tracks.iter().filter_map(|t| sh.analyses.get(&t.track_id).map(|a| (t.track_id, a.clone()))).collect();
         let mix = playable_mix(mix, &|id| analyses.get(&id).is_some_and(|a| a.stems_model.is_some()));
         let cache = self.cache.clone();
+        let (format, cue_sheet, tail) = (self.prefs.export_format.wav(), self.prefs.export_cue_sheet, self.prefs.export_tail_secs);
         std::thread::spawn(move || {
             let r = (|| -> Result<PathBuf> {
-                let opts = RenderOptions { format: WavFormat::Pcm24, ..Default::default() };
+                let opts = RenderOptions { format, tail_secs: tail, ..Default::default() };
                 // Tracks are loaded just before they play and dropped afterwards (bounded memory);
                 // nothing is added to the shared cache.
                 let report = clubcraft_engine::render_mix(&mix, &|id| analyses.get(&id).cloned(), &|id| cache.get(id).or_else(|| load_uncached(id).ok()), &out, &opts, &mut |p| {
@@ -352,7 +356,9 @@ impl LiveEngine {
                     true
                 })?;
                 log::info!("rendered {:?}", report);
-                write_cue_sheet(&mix, &analyses, &out)?;
+                if cue_sheet {
+                    write_cue_sheet(&mix, &analyses, &out)?;
+                }
                 Ok(out)
             })();
             *done.lock() = Some(r.map_err(|e| format!("{e:#}")));
@@ -375,7 +381,11 @@ impl LiveEngine {
                                 let _ = lib.increment_play_count(id);
                                 self.touched.push(id);
                             }
+                            let cmds = self.prefs.on_load_commands(deck, &t);
                             self.send(Command::LoadTrack(deck, t));
+                            for c in cmds {
+                                self.send(c);
+                            }
                         }
                         Err(e) => messages.push(format!("Load failed: {e:#}")),
                     }
@@ -547,7 +557,7 @@ impl LiveEngine {
                     if on {
                         let name = format!("ClubCraft {}.wav", crate::platform::timestamp());
                         let _ = std::fs::create_dir_all(clubcraft_core::paths::recordings_dir());
-                        if let Err(e) = h.start_recording(&clubcraft_core::paths::recordings_dir().join(name), WavFormat::Pcm24) {
+                        if let Err(e) = h.start_recording(&clubcraft_core::paths::recordings_dir().join(name), self.prefs.record_format.wav()) {
                             log::error!("recording: {e:#}");
                         }
                     } else {

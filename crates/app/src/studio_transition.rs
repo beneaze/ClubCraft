@@ -274,5 +274,5 @@ impl StudioView {
 fn key_badge(ui: &mut Ui, k: clubcraft_core::Key) {
     let (r, _) = ui.allocate_exact_size(vec2(32.0, 18.0), Sense::hover());
     ui.painter().rect_filled(r, 4.0, theme::key_color(k));
-    ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, k.camelot(), egui::FontId::proportional(11.0), Color32::BLACK);
+    ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, crate::theme::key_label(k), egui::FontId::proportional(11.0), Color32::BLACK);
 }
