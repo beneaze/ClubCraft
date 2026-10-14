@@ -9,7 +9,7 @@ APP=target/ClubCraft.app
 VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/models"
-cp target/release/clubcraft "$APP/Contents/MacOS/ClubCraft"
+cp target/release/ClubCraft "$APP/Contents/MacOS/ClubCraft"
 cp crates/app/assets/ClubCraft.icns "$APP/Contents/Resources/ClubCraft.icns"
 # Models used by the app: htdemucs (fast/live), htdemucs_ft (high), melroformer (best vocals),
 # allin1 (optional deep structure analysis, ONNX only). htdemucs_6s is not bundled.

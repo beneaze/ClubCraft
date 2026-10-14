@@ -257,6 +257,13 @@ impl Transition {
         if !self.uses_stems() {
             return self.clone();
         }
+        // Transitions with their own volume curve (e.g. imported from DJ.Studio: crossfade + bass
+        // swap + stems) keep everything but the stem lanes.
+        let has_volume = self.lanes.iter().any(|l| l.param == Param::Volume && l.points.iter().any(|p| (p.1 - 1.0).abs() > 1e-3));
+        if has_volume {
+            let lanes = self.lanes.iter().filter(|l| !matches!(l.param, Param::Stem(_))).cloned().collect();
+            return Transition { style: self.style, beats: self.beats, lanes, locked: self.locked };
+        }
         let len = self.beats as f32;
         let (q, h) = (len * 0.25, len * 0.5);
         let lanes = match self.style {

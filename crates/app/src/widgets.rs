@@ -177,3 +177,27 @@ pub fn vu(ui: &mut Ui, l: f32, r: f32, size: egui::Vec2) {
         }
     }
 }
+
+/// Round play / pause button with a drawn (optically centred) symbol.
+pub fn play_button(ui: &mut Ui, playing: bool, enabled: bool, d: f32) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(d, d), if enabled { Sense::click() } else { Sense::hover() });
+    let p = ui.painter();
+    let c = rect.center();
+    let fill = if !enabled { theme::LINE } else if resp.hovered() { theme::blend(theme::accent(), Color32::WHITE, 0.3) } else { theme::accent() };
+    p.circle_filled(c, d * 0.5, fill);
+    let ink = Color32::from_gray(16);
+    let s = d * 0.36;
+    if playing {
+        let (w, h) = (s * 0.3, s * 0.95);
+        for dx in [-s * 0.27, s * 0.27] {
+            p.rect_filled(egui::Rect::from_center_size(c + egui::vec2(dx, 0.0), egui::vec2(w, h)), 1.5, ink);
+        }
+    } else {
+        // the triangle's centroid sits on the circle's centre
+        let h = s * 1.0;
+        let w = h * 0.9;
+        let pts = vec![c + egui::vec2(-w / 3.0, -h / 2.0), c + egui::vec2(2.0 * w / 3.0, 0.0), c + egui::vec2(-w / 3.0, h / 2.0)];
+        p.add(egui::Shape::convex_polygon(pts, ink, Stroke::NONE));
+    }
+    resp
+}

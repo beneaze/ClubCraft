@@ -32,7 +32,7 @@ fn main() -> eframe::Result<()> {
     if std::env::args().nth(1).as_deref() == Some("mcp") {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).target(env_logger::Target::Stderr).init();
         if let Err(e) = mcp::run() {
-            eprintln!("clubcraft mcp: {e:#}");
+            eprintln!("ClubCraft mcp: {e:#}");
             std::process::exit(1);
         }
         return Ok(());

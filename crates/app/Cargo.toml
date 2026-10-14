@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# The executable is "ClubCraft" (menu bar, Dock, Task Manager), the package stays `clubcraft`.
+[[bin]]
+name = "ClubCraft"
+path = "src/main.rs"
+
 [dependencies]
 clubcraft-core.workspace = true
 clubcraft-audio.workspace = true

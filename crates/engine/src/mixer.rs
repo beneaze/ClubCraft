@@ -79,7 +79,8 @@ pub struct Channel {
     filter: DjFilter,
     pub fx: [FxSlot; FX_SLOTS],
     pub fader: f32,
-    /// Automation volume (mix lanes), 0..1 through the fader curve.
+    /// Automation volume (mix lanes), 0..1; gain = value² (fixed, independent of the DJ fader
+    /// curve preference, so studio transitions sound the same for everyone).
     pub lane_volume: f32,
     fader_gain: Smoother,
     pub assign: CrossfaderAssign,
@@ -155,7 +156,7 @@ impl Channel {
         for s in self.fx.iter_mut() {
             s.process(buf, ctx);
         }
-        self.fader_gain.set(curve.gain(self.fader) * curve.gain(self.lane_volume) * xf);
+        self.fader_gain.set(curve.gain(self.fader) * FaderCurve::Smooth.gain(self.lane_volume) * xf);
         for (i, f) in buf.chunks_exact(2).enumerate() {
             let g = self.fader_gain.next();
             post[i * 2] = f[0] * g;

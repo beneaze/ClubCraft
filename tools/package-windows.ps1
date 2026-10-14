@@ -12,7 +12,7 @@ $dist = "dist\ClubCraft"
 if (Test-Path $dist) { Remove-Item $dist -Recurse -Force }
 New-Item -ItemType Directory -Force -Path "$dist\models" | Out-Null
 
-Copy-Item "target\release\clubcraft.exe" "$dist\ClubCraft.exe"
+Copy-Item "target\release\ClubCraft.exe" "$dist\ClubCraft.exe"
 # ONNX Runtime / DirectML runtime libraries copied next to the build output by the ort crate.
 Get-ChildItem "target\release" -Filter *.dll -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item $_.FullName $dist }
 

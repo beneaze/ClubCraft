@@ -955,9 +955,7 @@ impl StudioView {
                 out.push(StudioAction::Seek(self.timeline.transitions[k].start_sec));
             }
         }
-        let play = if self.playing { "⏸" } else { "▶" };
-        let pb = egui::Button::new(RichText::new(play).size(18.0).color(Color32::BLACK)).fill(theme::accent()).corner_radius(20.0).min_size(vec2(40.0, 40.0));
-        if c.add_enabled(has, pb).on_hover_text("Play / pause (Space)").clicked() {
+        if crate::widgets::play_button(&mut c, self.playing, has, 40.0).on_hover_text("Play / pause (Space)").clicked() {
             out.push(StudioAction::PlayPause);
         }
         if c.add_enabled(self.timeline.transitions.len() > 0, round("⏩")).on_hover_text("Next transition (])").clicked() {

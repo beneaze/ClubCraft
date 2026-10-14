@@ -7,7 +7,7 @@
 //! codes) % 256 as unpadded lowercase hex.
 
 use anyhow::{Context, Result};
-use clubcraft_core::{Cue, CueKind, CueSource, Library, Mix, MixTrack, TempoMode, TrackId, Transition, TransitionStyle};
+use clubcraft_core::{Cue, CueKind, CueSource, Lane, Library, Mix, MixTrack, Param, Side, StemKind, TempoMode, TrackId, Transition, TransitionStyle};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -23,10 +23,10 @@ pub fn bucket(key: &str) -> String {
 }
 
 /// Parse a JSON file, tolerating trailing garbage (DJ.Studio leaves some behind).
+/// A record file can hold several versions back to back (DJ.Studio appends); the last is current.
 fn read_json(path: &Path) -> Option<Value> {
     let text = std::fs::read_to_string(path).ok()?;
-    let mut de = serde_json::Deserializer::from_str(&text).into_iter::<Value>();
-    de.next()?.ok()
+    serde_json::Deserializer::from_str(&text).into_iter::<Value>().map_while(|v| v.ok()).last()
 }
 
 /// DJ.Studio key integer → key. 0..11 major by pitch class, 12 + i = relative minor of major i.
@@ -158,6 +158,212 @@ fn style_from_effects(effects: &[Value]) -> TransitionStyle {
     }
 }
 
+// ------------------------------------------------------------------ transitions
+
+/// Volume in dB → ClubCraft's volume lane value (gain = value², see `Channel::lane_volume`).
+fn vol_value(db: f32) -> f32 {
+    if db <= -49.0 {
+        0.0
+    } else {
+        10f32.powf(db / 20.0).sqrt().min(1.0)
+    }
+}
+
+/// EQ band linear gain (DJ.Studio: 1 flat, 0.04 kill, up to 1.96) → ClubCraft's EQ knob.
+fn eq_value(g: f32) -> f32 {
+    clubcraft_engine::dsp::eq_gain_to_knob(g.max(0.0))
+}
+
+/// DJ.Studio filter level (−1 low-pass … 0 off … +1 high-pass) → ClubCraft's filter knob.
+fn filter_value(level: f32) -> f32 {
+    (0.5 + 0.5 * level).clamp(0.0, 1.0)
+}
+
+/// Sample `f(t)` for t in 0..1 over `len` beats (curves that aren't piecewise linear).
+fn sampled(len: f32, n: usize, f: impl Fn(f32) -> f32) -> Vec<(f32, f32)> {
+    (0..=n).map(|i| {
+        let t = i as f32 / n as f32;
+        (t * len, f(t))
+    }).collect()
+}
+
+/// Stored automation lane of a transition side (`_0` outgoing, `_1` incoming), window beats.
+fn lane_points(root: &Path, ae_key: &str, side: usize, control: &str) -> Option<Vec<(f32, f32)>> {
+    let v = read_json(&root.join("automation-data-table").join(format!("{ae_key}_{side}")).join(control))?;
+    let pts: Vec<(f32, f32)> = v.get("points")?.as_array()?.iter().filter_map(|p| Some((p.get("time")?.as_f64()? as f32, p.get("value")?.as_f64()? as f32))).collect();
+    (!pts.is_empty()).then_some(pts)
+}
+
+/// Convert a DJ.Studio transition ("autoEffect") into ClubCraft lanes: every effect with its
+/// parameters (volume crossfade, bass swap, filters, echo, stems Full / Swap / Crossfade / None)
+/// and, for `_Manual` effects, the stored curves (with their slopes), per side.
+pub fn transition_from(root: &Path, ae: &Value) -> Transition {
+    let d = ae.get("duration").and_then(|d| d.as_f64()).unwrap_or(32.0).max(1.0) as f32;
+    let key = ae.get("key").and_then(|k| k.as_str()).unwrap_or_default().to_string();
+    let effects: Vec<Value> = ae.get("effects").and_then(|e| e.as_array()).cloned().unwrap_or_default();
+    let manual_all = ae.get("manual").and_then(|m| m.as_bool()).unwrap_or(false);
+    let style = style_from_effects(&effects);
+    let mut lanes: Vec<Lane> = Vec::new();
+    let mut set = |lanes: &mut Vec<Lane>, side: Side, param: Param, pts: Vec<(f32, f32)>| {
+        lanes.retain(|l| !(l.side == side && l.param == param));
+        lanes.push(Lane::new(side, param, &pts));
+    };
+    let stored = |side: usize, control: &str| lane_points(root, &key, side, control);
+    let eps = 0.01f32.min(d * 0.01);
+    for e in &effects {
+        let name = e.get("effectName").and_then(|n| n.as_str()).unwrap_or_default();
+        let p = e.get("effectParams").cloned().unwrap_or(Value::Null);
+        let num = |k: &str, dflt: f32| p.get(k).and_then(|v| v.as_f64()).map(|v| v as f32).unwrap_or(dflt);
+        let flag = |k: &str| p.get(k).and_then(|v| v.as_bool()).unwrap_or(true);
+        let manual = manual_all || name.ends_with("_Manual");
+        let sides = [(Side::Out, 0usize), (Side::In, 1usize)];
+        match name {
+            // volume crossfade: in linear amplitude, the outgoing over the last `range`, the
+            // incoming over the first `range`, down to `level` dB
+            n if n.starts_with("AE_CrossFade") || n.starts_with("AE_FadeIn") || n.starts_with("AE_FadeOut") => {
+                for (side, i) in sides {
+                    if n.starts_with("AE_FadeIn") && side == Side::Out || n.starts_with("AE_FadeOut") && side == Side::In {
+                        continue;
+                    }
+                    if manual {
+                        if let Some(pts) = stored(i, "volume") {
+                            set(&mut lanes, side, Param::Volume, pts.into_iter().map(|(t, v)| (t, vol_value(v))).collect());
+                        }
+                        continue;
+                    }
+                    let level = 10f32.powf(num(if side == Side::Out { "level" } else { "primaryLevel" }, -20.0) / 20.0);
+                    let range = num("range", 1.0).clamp(0.01, 1.0);
+                    set(&mut lanes, side, Param::Volume, sampled(d, 24, |t| {
+                        let t = if side == Side::Out { t } else { 1.0 - t };
+                        let k = ((t - (1.0 - range)) / range).clamp(0.0, 1.0);
+                        let a = 1.0 + (level - 1.0) * k;
+                        vol_value(20.0 * a.max(1e-6).log10())
+                    }));
+                }
+            }
+            n if n.starts_with("AE_Swap") || n.starts_with("AE_ManualVolume") => {
+                for (side, i) in sides {
+                    if manual || n.starts_with("AE_ManualVolume") {
+                        if let Some(pts) = stored(i, "volume") {
+                            set(&mut lanes, side, Param::Volume, pts.into_iter().map(|(t, v)| (t, vol_value(v))).collect());
+                        }
+                        continue;
+                    }
+                    let c = num("effectCenter", 0.5) * d;
+                    let lv = vol_value(num("level", -50.0));
+                    let pts = if side == Side::Out { vec![(0.0, 1.0), (c - eps, 1.0), (c, lv)] } else { vec![(0.0, lv), (c - eps, lv), (c, 1.0)] };
+                    set(&mut lanes, side, Param::Volume, pts);
+                }
+            }
+            // EQ bands: swap / crossfade / swap-fade / manual
+            n if n.starts_with("AE_Bass_") || n.starts_with("AE_Mid_") || n.starts_with("AE_High_") => {
+                let (param, control) = if n.starts_with("AE_Bass_") {
+                    (Param::EqLow, "eq-low")
+                } else if n.starts_with("AE_Mid_") {
+                    (Param::EqMid, "eq-mid")
+                } else {
+                    (Param::EqHigh, "eq-high")
+                };
+                for (side, i) in sides {
+                    if manual {
+                        if let Some(pts) = stored(i, control) {
+                            set(&mut lanes, side, param, pts.into_iter().map(|(t, v)| (t, eq_value(v))).collect());
+                        }
+                        continue;
+                    }
+                    let lv = eq_value(num(if side == Side::Out { "level" } else { "primaryLevel" }, 0.04));
+                    let c = (num("effectCenter", 0.5) * d).round();
+                    let pts = if n.contains("CrossFade") {
+                        if side == Side::Out { vec![(0.0, 0.5), (d, lv)] } else { vec![(0.0, lv), (d, 0.5)] }
+                    } else if n.contains("SwapFade") {
+                        if side == Side::Out { vec![(0.0, 0.5), (c, lv)] } else { vec![(0.0, lv), (c - eps, lv), (c, 0.5)] }
+                    } else {
+                        let beats = num("beats", 0.0);
+                        if side == Side::Out { vec![(0.0, 0.5), ((c - beats - eps).max(0.0), 0.5), ((c - beats).max(eps), lv)] } else { vec![(0.0, lv), (c - eps, lv), (c, 0.5)] }
+                    };
+                    set(&mut lanes, side, param, pts);
+                }
+            }
+            // filters ("high to low" = low-pass on the way out)
+            n if n.starts_with("AE_LowPass_Filter") || n.starts_with("AE_HighPass_Filter") || n.starts_with("AE_Manual_Filter") => {
+                for (side, i) in sides {
+                    if manual || n.starts_with("AE_Manual_Filter") {
+                        if let Some(pts) = stored(i, "filter-level") {
+                            set(&mut lanes, side, Param::Filter, pts.into_iter().map(|(t, v)| (t, filter_value(v))).collect());
+                        }
+                        continue;
+                    }
+                    let sign = if n.starts_with("AE_LowPass") { -1.0 } else { 1.0 };
+                    let range = num("range", 1.0).clamp(0.01, 1.0);
+                    let pts = if side == Side::Out {
+                        vec![(0.0, 0.5), (d * (1.0 - range), 0.5), (d, filter_value(0.8 * sign))]
+                    } else {
+                        vec![(0.0, filter_value(-0.8 * sign)), (d, 0.5)]
+                    };
+                    set(&mut lanes, side, Param::Filter, pts);
+                }
+            }
+            n if n.starts_with("AE_EchoTransition") => {
+                let c = num("effectCenter", 0.0) * d;
+                set(&mut lanes, Side::Out, Param::Echo, vec![(0.0, 0.0), (c, 0.0), (c + eps, 0.8)]);
+                set(&mut lanes, Side::Out, Param::Volume, vec![(0.0, 1.0), (c, 1.0), ((c + 4.0).min(d), 0.0)]);
+            }
+            // stems: AE_Stems<Stem>_<Mode>[_Manual]
+            n if n.starts_with("AE_Stems") => {
+                let rest = &n["AE_Stems".len()..];
+                let (stem, mode) = rest.split_once('_').unwrap_or((rest, "Full"));
+                let (kinds, controls): (&[StemKind], &[&str]) = match stem {
+                    "Drums" => (&[StemKind::Drums], &["virtual-stems-drums"]),
+                    "Bass" => (&[StemKind::Bass], &["virtual-stems-bass"]),
+                    "Melody" => (&[StemKind::Other], &["virtual-stems-melody"]),
+                    "Vocals" | "VocalsHQ" => (&[StemKind::Vocals], &["virtual-stems-vocals", "virtual-stems-vocals-hq"]),
+                    "Instrumental" | "InstrumentalHQ" => (&[StemKind::Drums, StemKind::Bass, StemKind::Other], &["virtual-stems-instrumental", "virtual-stems-instrumental-hq"]),
+                    _ => continue,
+                };
+                let mode = mode.trim_end_matches("_Manual");
+                for (side, i) in sides {
+                    let enabled = flag(if side == Side::Out { "primaryEnabled" } else { "secondaryEnabled" });
+                    let pts: Option<Vec<(f32, f32)>> = if !enabled {
+                        // muted on this side for the whole transition
+                        Some(if side == Side::Out { vec![(0.0, 0.0), (d, 0.0)] } else { vec![(0.0, 0.0), (d - eps, 0.0), (d, 1.0)] })
+                    } else if let Some(pts) = manual.then(|| controls.iter().find_map(|c| stored(i, c))).flatten() {
+                        Some(pts)
+                    } else {
+                        // generated: the stem switches at a point (Full: the outgoing keeps it to the
+                        // end, the incoming has it from the start), Crossfade ramps 40-60 %
+                        let sw = |custom: &str, center: &str, dflt: f32| {
+                            let c = num(custom, -1.0);
+                            if c >= 0.0 { c } else if num(center, -1.0) >= 0.0 { num(center, dflt) } else { dflt }
+                        };
+                        let (s_out, s_in) = match mode {
+                            "Full" => (sw("primaryCustomSwapPoint", "primaryEffectCenter", 1.0), sw("customSwapPoint", "effectCenter", 0.0)),
+                            _ => (sw("primaryCustomSwapPoint", "primaryEffectCenter", 0.5), sw("customSwapPoint", "effectCenter", 0.5)),
+                        };
+                        match (mode, side) {
+                            ("None", Side::Out) => Some(vec![(0.0, 0.0), (d, 0.0)]),
+                            ("None", _) => Some(vec![(0.0, 0.0), (d - eps, 0.0), (d, 1.0)]),
+                            ("Crossfade", Side::Out) => Some(vec![(0.0, 1.0), (d * 0.4, 1.0), (d * 0.6, 0.0)]),
+                            ("Crossfade", _) => Some(vec![(0.0, 0.0), (d * 0.4, 0.0), (d * 0.6, 1.0)]),
+                            (_, Side::Out) if s_out >= 1.0 => None,
+                            (_, Side::In) if s_in <= 0.0 => None,
+                            (_, Side::Out) => Some(vec![(0.0, 1.0), (s_out * d - eps, 1.0), (s_out * d, 0.0)]),
+                            (_, Side::In) => Some(vec![(0.0, 0.0), (s_in * d - eps, 0.0), (s_in * d, 1.0)]),
+                        }
+                    };
+                    if let Some(pts) = pts {
+                        for k in kinds {
+                            set(&mut lanes, side, Param::Stem(*k), pts.clone());
+                        }
+                    }
+                }
+            }
+            _ => log::debug!("DJ.Studio effect {name} not converted"),
+        }
+    }
+    let locked = ae.get("locked").and_then(|l| l.as_bool()).unwrap_or(false);
+    Transition { style, beats: d.round().max(1.0) as u32, lanes, locked }
+}
+
 pub struct ImportReport {
     pub tracks_imported: usize,
     pub cues_imported: usize,
@@ -237,11 +443,7 @@ pub fn project_to_mix(root: &Path, project_key: &str, tracks: &HashMap<String, T
     for k in item_keys.iter().take(item_keys.len().saturating_sub(1)) {
         let ae = effects.iter().find(|e| e.get("mixTrackKey").and_then(|m| m.as_str()) == Some(k.as_str()));
         let t = match ae {
-            Some(ae) => {
-                let beats = ae.get("duration").and_then(|d| d.as_f64()).unwrap_or(32.0).max(4.0) as u32;
-                let style = style_from_effects(ae.get("effects").and_then(|e| e.as_array()).map(|v| v.as_slice()).unwrap_or(&[]));
-                Transition::new(style, beats)
-            }
+            Some(ae) => transition_from(root, ae),
             None => Transition::new(TransitionStyle::BassSwap, 32),
         };
         mix.transitions.push(t);
@@ -258,12 +460,23 @@ pub fn project_to_mix(root: &Path, project_key: &str, tracks: &HashMap<String, T
 pub fn import_all(lib: &Library, root: &Path) -> Result<ImportReport> {
     let mut report = ImportReport { tracks_imported: 0, cues_imported: 0, missing_files: vec![], mixes: vec![] };
     let map = import_library(lib, root, &mut report)?;
-    let mut existing: std::collections::HashSet<String> = lib.mixes()?.into_iter().map(|m| m.1).collect();
+    let existing: HashMap<String, i64> = lib.mixes()?.into_iter().map(|m| (m.1, m.0)).collect();
+    let mut seen: std::collections::HashSet<String> = Default::default();
     for p in read_projects(root) {
         let mut mix = project_to_mix(root, &p.key, &map)?;
         // Projects are sorted newest first; keep only the newest of same-named versions.
-        if mix.tracks.len() < 2 || !existing.insert(mix.name.clone()) {
+        if mix.tracks.len() < 2 || !seen.insert(mix.name.clone()) {
             continue;
+        }
+        // Re-importing updates an earlier import (tracks, mix points, transitions, tempo) and
+        // keeps what only exists in ClubCraft (sample lanes, lane mixer settings).
+        if let Some(&id) = existing.get(&mix.name) {
+            if let Ok(Some(old)) = lib.mix(id) {
+                mix.id = id;
+                mix.samples = old.samples;
+                mix.sample_lanes = old.sample_lanes;
+                mix.lanes = old.lanes;
+            }
         }
         let id = lib.save_mix(&mut mix)?;
         report.mixes.push((id, mix.name.clone()));
@@ -301,6 +514,27 @@ mod real_data {
                 let tr = lib.track(t.track_id).unwrap().unwrap();
                 let tx = m.transitions.get(i).map(|t| format!("{:?} {}b", t.style, t.beats)).unwrap_or_default();
                 println!("  {} in {:.1} out {:.1} shift {} gain {:.1} -> {}", tr.display_name(), t.mix_in, t.mix_out, t.key_shift, t.gain_db, tx);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod real_transitions {
+    /// `cargo test -p clubcraft real_djstudio_transitions -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn real_djstudio_transitions() {
+        let root = super::default_root();
+        for p in super::read_projects(&root).into_iter().filter(|p| p.name.contains("Harvard-Square")).take(1) {
+            let pv = super::read_json(&root.join("projects-table").join(&p.key)).unwrap();
+            for ae in pv["autoEffects"].as_array().unwrap().iter().take(6) {
+                let t = super::transition_from(&root, ae);
+                println!("== {} beats {} style {:?} locked {}", &ae["key"].as_str().unwrap()[37..45], t.beats, t.style, t.locked);
+                for l in &t.lanes {
+                    let pts: Vec<String> = l.points.iter().map(|(x, y)| format!("({x:.1},{y:.2})")).collect();
+                    println!("   {:?} {:?}: {}", l.side, l.param, pts.join(" "));
+                }
             }
         }
     }
