@@ -274,3 +274,29 @@ pub fn stem_icon(p: &egui::Painter, r: Rect, stem: clubcraft_core::StemKind, col
         }
     }
 }
+
+/// A padlock, closed or open, drawn into `r`.
+pub fn lock_icon(p: &egui::Painter, r: Rect, locked: bool, color: Color32) {
+    let w = r.width();
+    let body = Rect::from_min_max(pos2(r.left() + w * 0.12, r.top() + r.height() * 0.45), pos2(r.right() - w * 0.12, r.bottom()));
+    p.rect_filled(body, w * 0.12, color);
+    // shackle: a half ring above the body (shifted up and open on the right when unlocked)
+    let (cx, top, rad) = (body.center().x, body.top(), body.width() * 0.32);
+    let lift = if locked { 0.0 } else { r.height() * 0.14 };
+    let n = 14;
+    let pts: Vec<egui::Pos2> = (0..=n)
+        .filter_map(|i| {
+            let a = std::f32::consts::PI * i as f32 / n as f32;
+            if !locked && i < 3 {
+                return None; // open on the right
+            }
+            Some(pos2(cx + rad * a.cos(), top - lift - rad * a.sin() * 1.15))
+        })
+        .collect();
+    let stroke = Stroke::new((w * 0.14).max(1.2), color);
+    p.add(egui::Shape::line(pts, stroke));
+    p.line_segment([pos2(cx - rad, top - lift), pos2(cx - rad, top + 1.0)], stroke);
+    if locked {
+        p.line_segment([pos2(cx + rad, top), pos2(cx + rad, top + 1.0)], stroke);
+    }
+}

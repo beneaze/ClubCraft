@@ -339,8 +339,19 @@ impl StudioView {
                 let over_header = ui.input(|inp| inp.pointer.hover_pos()).is_some_and(|q| q.y < r.top() + 20.0);
                 ui.ctx().set_cursor_icon(if self.drag == Some(Drag::Clip(i)) { CursorIcon::Grabbing } else if over_header { CursorIcon::Grab } else { CursorIcon::Text });
             }
+            // inside the selected transition the clicks belong to it: the transition stays selected
+            let in_sel_transition = match self.selection {
+                Selection::Transition(k) if k == i || k + 1 == i => self.timeline.transitions.get(k).is_some_and(|x| {
+                    let px = ui.input(|inp| inp.pointer.press_origin()).map(|q| q.x);
+                    px.is_some_and(|px| px >= x_of(x.start_sec) && px <= x_of(x.end_sec))
+                }),
+                _ => false,
+            };
+            let keeps_transition = matches!(self.selection, Selection::Transition(k) if k == i || k + 1 == i);
             if cr.clicked() {
-                clicked_track = Some(i);
+                if !in_sel_transition {
+                    clicked_track = Some(i);
+                }
                 self.range = None;
             }
             // sliding a track moves its incoming transition: not while that one is locked
@@ -351,7 +362,7 @@ impl StudioView {
                 let b = tl.beat_at_sec((((x - origin) / zoom) as f64).max(0.0));
                 if free { b } else { b.round() }
             };
-            if cr.drag_started() && !on_header {
+            if cr.drag_started() && !on_header && !in_sel_transition {
                 let free = ui.input(|inp| inp.modifiers.alt);
                 let x = ui.input(|inp| inp.pointer.press_origin()).map(|q| q.x).unwrap_or(r.left());
                 let (lo, hi) = (self.timeline.tracks[i].start_beat, self.timeline.tracks[i].end_beat);
@@ -451,7 +462,10 @@ impl StudioView {
             if cr.drag_started() && on_header && !in_locked {
                 self.drag = Some(Drag::Clip(i));
                 self.drag_acc = 0.0;
-                self.selection = Selection::Track(i);
+                // sliding a track of the selected transition keeps that transition selected
+                if !keeps_transition {
+                    self.selection = Selection::Track(i);
+                }
             }
             if cr.dragged() && self.drag == Some(Drag::Clip(i)) {
                 self.drag_acc += cr.drag_delta().x;
@@ -507,9 +521,9 @@ impl StudioView {
                 let ns = if no_stems { " · no stems" } else { "" };
                 let label = [format!("{} · {bars} bars{keys}{ns}", tr.style.label()), format!("{} · {bars} bars{ns}", tr.style.label()), format!("{} · {bars}", tr.style.label()), format!("{abbrev} {bars}"), format!("{bars}")]
                     .into_iter()
-                    .find(|l| ui.fonts_mut(|f| f.layout_no_wrap(l.clone(), font.clone(), Color32::WHITE).size().x) < chip.width() - 8.0)
+                    .find(|l| ui.fonts_mut(|f| f.layout_no_wrap(l.clone(), font.clone(), Color32::WHITE).size().x) < chip.width() - 30.0)
                     .unwrap_or_default();
-                p.with_clip_rect(chip).text(chip.center(), egui::Align2::CENTER_CENTER, label, font, if sel { Color32::BLACK } else { Color32::WHITE });
+                p.with_clip_rect(chip).text(chip.center() - vec2(9.0, 0.0), egui::Align2::CENTER_CENTER, label, font, if sel { Color32::BLACK } else { Color32::WHITE });
             }
             // the bar (chip) moves the transition, its edges change the length: like DJ.Studio
             let locked = self.mix.transitions[k].locked;
@@ -539,6 +553,22 @@ impl StudioView {
             }
             if chip_r.drag_stopped() {
                 self.drag = None;
+            }
+            // lock / unlock on the bar (shown when locked, or when the bar is hovered or selected)
+            let lock_r = Rect::from_center_size(pos2(bar_r.right() - 10.0, tstrip.center().y), vec2(16.0, 16.0));
+            let show_lock = locked || sel || chip_r.hovered() || ui.rect_contains_pointer(lock_r);
+            if show_lock && bar_r.width() > 40.0 {
+                let lr = ui.interact(lock_r, Id::new(("tlock", k)), Sense::click());
+                if lr.hovered() {
+                    p.rect_filled(lock_r, 4.0, Color32::from_black_alpha(90));
+                    ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                }
+                widgets::lock_icon(&p, lock_r.shrink(3.0), locked, if sel { Color32::BLACK } else { Color32::WHITE });
+                if lr.on_hover_text(if locked { "Locked: click to unlock" } else { "Lock this transition (harmonize and automatic mix points leave it alone, and it can't be dragged)" }).clicked() {
+                    self.mix.transitions[k].locked = !locked;
+                    self.selection = Selection::Transition(k);
+                    self.changed();
+                }
             }
             chip_r.on_hover_text(if locked {
                 "Locked: unlock it in the transition editor to move it"

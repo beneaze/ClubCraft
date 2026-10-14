@@ -242,6 +242,73 @@ fn track_stem_lanes(root: &Path, item_key: &str, md: &Value) -> Vec<StemLane> {
     lanes
 }
 
+/// Parameters of a generated DJ.Studio stem effect (`AE_Stems<Stem>_<Full|Swap|Crossfade>`).
+#[derive(Clone, Copy, Debug)]
+struct StemParams {
+    level: f32,
+    primary_level: f32,
+    effect_center: f32,
+    primary_effect_center: f32,
+    custom_swap_point: f32,
+    primary_custom_swap_point: f32,
+    beats: f32,
+    cross_fade: bool,
+}
+
+/// Default (effectCenter, primaryEffectCenter, customSwapPoint, primaryCustomSwapPoint) of each
+/// generated stem effect, as DJ.Studio defines them (stored parameters override these).
+fn stem_defaults(stem: &str, mode: &str) -> [f32; 4] {
+    match (mode, stem) {
+        ("Full", _) => [0.0, 1.0, 0.0, 1.0],
+        ("Swap", _) => [0.5, 0.5, 0.5, -1.0],
+        ("Crossfade", "Drums") => [0.0, 1.0, 0.591_751, 0.405_487],
+        ("Crossfade", "Bass") => [0.25, 0.75, 0.863_630, 0.066_995],
+        ("Crossfade", "Melody") => [0.25, 0.75, 0.991_287, -1.0],
+        ("Crossfade", _) => [0.375, 0.625, 0.946_959, 0.005_610],
+        _ => [0.0, 1.0, 0.0, 1.0],
+    }
+}
+
+/// DJ.Studio's curve for a generated stem effect over a `d`-beat window, per side. The outgoing
+/// (primary) track plays at `primaryLevel` until its swap point (`primaryCustomSwapPoint`, or the
+/// incoming side's centre when that is −1) and fades linearly to silence by its own centre
+/// (`primaryEffectCenter`, minus `beats`). The incoming track is silent until its centre
+/// (`effectCenter`) and fades in to `level` by its swap point (`customSwapPoint`, or the
+/// outgoing side's centre). Times are rounded to whole beats; without `crossFade` the stem
+/// switches at the centre.
+fn stem_points(p: &StemParams, primary: bool, d: f32) -> Vec<(f32, f32)> {
+    let round = |x: f32| (x + 0.5).floor(); // JavaScript's Math.round
+    let (own_center, other_center, level, swap) = if primary {
+        (p.primary_effect_center, p.effect_center, p.primary_level, p.primary_custom_swap_point)
+    } else {
+        (p.effect_center, p.primary_effect_center, p.level, p.custom_swap_point)
+    };
+    let mut l = round(own_center * d);
+    if primary {
+        l -= p.beats;
+    }
+    let (from, to) = if primary { (level, 0.0) } else { (0.0, level) };
+    let fe = if swap != -1.0 { round(swap * d) } else { round(other_center * d) };
+    let (mut a, mut e) = if primary { (fe, l) } else { (l, fe) };
+    if a > e {
+        if primary {
+            a = e;
+        } else {
+            e = a;
+        }
+    }
+    let mut pts = vec![(0.0, from)];
+    if p.cross_fade && a <= e {
+        pts.push((a.clamp(0.0, d), from));
+        pts.push((e.clamp(0.0, d), to));
+    } else {
+        pts.push((l.clamp(0.0, d), from));
+        pts.push((l.clamp(0.0, d), to));
+    }
+    pts.push((d, to));
+    pts
+}
+
 /// Convert a DJ.Studio transition ("autoEffect") into ClubCraft lanes: every effect with its
 /// parameters (volume crossfade, bass swap, filters, echo, stems Full / Swap / Crossfade / None)
 /// and, for `_Manual` effects, the stored curves (with their slopes), per side.
@@ -368,35 +435,32 @@ pub fn transition_from(root: &Path, ae: &Value) -> Transition {
                     "Instrumental" | "InstrumentalHQ" => (&[StemKind::Drums, StemKind::Bass, StemKind::Other], &["virtual-stems-instrumental", "virtual-stems-instrumental-hq"]),
                     _ => continue,
                 };
+                // `_Manual` effects play their stored curves (none stored: the track's own stem
+                // lane decides); the others generate theirs from the parameters (DJ.Studio's
+                // stem generator, see `stem_points`)
+                let is_manual = name.ends_with("_Manual");
                 let mode = mode.trim_end_matches("_Manual");
                 for (side, i) in sides {
                     let enabled = flag(if side == Side::Out { "primaryEnabled" } else { "secondaryEnabled" });
                     let pts: Option<Vec<(f32, f32)>> = if !enabled {
-                        // muted on this side for the whole transition
-                        Some(if side == Side::Out { vec![(0.0, 0.0), (d, 0.0)] } else { vec![(0.0, 0.0), (d - eps, 0.0), (d, 1.0)] })
-                    } else if let Some(pts) = manual.then(|| controls.iter().find_map(|c| stored(i, c))).flatten() {
-                        Some(pts)
+                        // switched off on this side for the whole transition
+                        Some(vec![(0.0, 0.0), (d, 0.0)])
+                    } else if is_manual {
+                        controls.iter().find_map(|c| stored(i, c))
                     } else {
-                        // generated: the stem switches at a point (Full: the outgoing keeps it to the
-                        // end, the incoming has it from the start), Crossfade ramps 40-60 %
-                        let sw = |custom: &str, center: &str, dflt: f32| {
-                            let c = num(custom, -1.0);
-                            if c >= 0.0 { c } else if num(center, -1.0) >= 0.0 { num(center, dflt) } else { dflt }
+                        let dflt = stem_defaults(stem, mode);
+                        let get = |k: &str, dv: f32| num(k, dv);
+                        let sp = StemParams {
+                            level: get("level", 1.0),
+                            primary_level: get("primaryLevel", 1.0),
+                            effect_center: get("effectCenter", dflt[0]),
+                            primary_effect_center: get("primaryEffectCenter", dflt[1]),
+                            custom_swap_point: get("customSwapPoint", dflt[2]),
+                            primary_custom_swap_point: get("primaryCustomSwapPoint", dflt[3]),
+                            beats: get("beats", 0.0),
+                            cross_fade: p.get("crossFade").and_then(|v| v.as_bool()).unwrap_or(true),
                         };
-                        let (s_out, s_in) = match mode {
-                            "Full" => (sw("primaryCustomSwapPoint", "primaryEffectCenter", 1.0), sw("customSwapPoint", "effectCenter", 0.0)),
-                            _ => (sw("primaryCustomSwapPoint", "primaryEffectCenter", 0.5), sw("customSwapPoint", "effectCenter", 0.5)),
-                        };
-                        match (mode, side) {
-                            ("None", Side::Out) => Some(vec![(0.0, 0.0), (d, 0.0)]),
-                            ("None", _) => Some(vec![(0.0, 0.0), (d - eps, 0.0), (d, 1.0)]),
-                            ("Crossfade", Side::Out) => Some(vec![(0.0, 1.0), (d * 0.4, 1.0), (d * 0.6, 0.0)]),
-                            ("Crossfade", _) => Some(vec![(0.0, 0.0), (d * 0.4, 0.0), (d * 0.6, 1.0)]),
-                            (_, Side::Out) if s_out >= 1.0 => None,
-                            (_, Side::In) if s_in <= 0.0 => None,
-                            (_, Side::Out) => Some(vec![(0.0, 1.0), (s_out * d - eps, 1.0), (s_out * d, 0.0)]),
-                            (_, Side::In) => Some(vec![(0.0, 0.0), (s_in * d - eps, 0.0), (s_in * d, 1.0)]),
-                        }
+                        Some(stem_points(&sp, side == Side::Out, d))
                     };
                     if let Some(pts) = pts {
                         for k in kinds {
@@ -536,6 +600,29 @@ pub fn import_all(lib: &Library, root: &Path) -> Result<ImportReport> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sp(stem: &str, mode: &str) -> StemParams {
+        let d = stem_defaults(stem, mode);
+        StemParams { level: 1.0, primary_level: 1.0, effect_center: d[0], primary_effect_center: d[1], custom_swap_point: d[2], primary_custom_swap_point: d[3], beats: 0.0, cross_fade: true }
+    }
+
+    #[test]
+    fn stem_effects_follow_djstudio() {
+        // Full: the outgoing keeps the stem to the end, the incoming has it from the start
+        assert_eq!(stem_points(&sp("Drums", "Full"), true, 32.0), vec![(0.0, 1.0), (32.0, 1.0), (32.0, 0.0), (32.0, 0.0)]);
+        assert_eq!(stem_points(&sp("Drums", "Full"), false, 32.0), vec![(0.0, 0.0), (0.0, 0.0), (0.0, 1.0), (32.0, 1.0)]);
+        // Melody crossfade: out fades over 25-75 %, in comes up over 25-99 % (whole beats)
+        assert_eq!(stem_points(&sp("Melody", "Crossfade"), true, 32.0), vec![(0.0, 1.0), (8.0, 1.0), (24.0, 0.0), (32.0, 0.0)]);
+        assert_eq!(stem_points(&sp("Melody", "Crossfade"), false, 32.0), vec![(0.0, 0.0), (8.0, 0.0), (32.0, 1.0), (32.0, 1.0)]);
+        // Swap: a hard switch in the middle for both
+        assert_eq!(stem_points(&sp("Vocals", "Swap"), true, 32.0), vec![(0.0, 1.0), (16.0, 1.0), (16.0, 0.0), (32.0, 0.0)]);
+        assert_eq!(stem_points(&sp("Vocals", "Swap"), false, 32.0), vec![(0.0, 0.0), (16.0, 0.0), (16.0, 1.0), (32.0, 1.0)]);
+        // without crossFade: a switch at the side's own centre; a lower level is kept
+        let mut p = sp("Bass", "Crossfade");
+        p.cross_fade = false;
+        p.primary_level = 0.93;
+        assert_eq!(stem_points(&p, true, 64.0), vec![(0.0, 0.93), (48.0, 0.93), (48.0, 0.0), (64.0, 0.0)]);
+    }
     #[test]
     fn keys() {
         assert_eq!(key_from_int(0).unwrap().camelot(), "8B");
