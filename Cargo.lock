@@ -410,7 +410,7 @@ dependencies = [
 
 [[package]]
 name = "clubcraft"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -442,7 +442,7 @@ dependencies = [
 
 [[package]]
 name = "clubcraft-analysis"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clubcraft-audio",
@@ -459,7 +459,7 @@ dependencies = [
 
 [[package]]
 name = "clubcraft-audio"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clubcraft-core",
@@ -470,7 +470,7 @@ dependencies = [
 
 [[package]]
 name = "clubcraft-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -483,7 +483,7 @@ dependencies = [
 
 [[package]]
 name = "clubcraft-engine"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cc",
@@ -505,7 +505,7 @@ dependencies = [
 
 [[package]]
 name = "clubcraft-stems"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
