@@ -219,11 +219,15 @@ pub struct Transition {
     /// Overlap length in beats (multiple of 4; typically 16, 32 or 64).
     pub beats: u32,
     pub lanes: Vec<Lane>,
+    /// Locked: kept as it is (mix points, length, curves) by re-ordering and automatic mix
+    /// points, and not editable until unlocked.
+    #[serde(default)]
+    pub locked: bool,
 }
 
 impl Transition {
     pub fn new(style: TransitionStyle, beats: u32) -> Self {
-        Transition { style, beats, lanes: style.lanes(beats as f32) }
+        Transition { style, beats, lanes: style.lanes(beats as f32), locked: false }
     }
 
     /// Value of `param` for `side` at beat `x` of the transition (neutral when there is no lane).
@@ -266,7 +270,7 @@ impl Transition {
             ],
             _ => TransitionStyle::BassSwap.lanes(len),
         };
-        Transition { style: self.style, beats: self.beats, lanes }
+        Transition { style: self.style, beats: self.beats, lanes, locked: self.locked }
     }
 }
 
@@ -327,6 +331,19 @@ impl LaneSettings {
 
 /// Number of deck lanes in the studio timeline.
 pub const MIX_LANES: usize = 2;
+/// Number of sample lanes (one-shots, loops, FX) under the deck lanes.
+pub const SAMPLE_LANES: usize = 2;
+
+/// An audio file placed on a sample lane. It plays at its own speed from `start_beat` (mix
+/// beats), on top of the decks.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SampleClip {
+    pub lane: u8,
+    pub path: std::path::PathBuf,
+    pub start_beat: f64,
+    #[serde(default)]
+    pub gain_db: f32,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Mix {
@@ -341,6 +358,16 @@ pub struct Mix {
     /// Per-lane mixer settings (`lanes[i % MIX_LANES]` applies to track `i`).
     #[serde(default = "default_lanes")]
     pub lanes: Vec<LaneSettings>,
+    /// Clips on the sample lanes.
+    #[serde(default)]
+    pub samples: Vec<SampleClip>,
+    /// Mixer settings of the sample lanes (gain, mute, solo).
+    #[serde(default = "default_sample_lanes")]
+    pub sample_lanes: Vec<LaneSettings>,
+}
+
+fn default_sample_lanes() -> Vec<LaneSettings> {
+    vec![LaneSettings::default(); SAMPLE_LANES]
 }
 
 fn default_lanes() -> Vec<LaneSettings> {
@@ -349,7 +376,7 @@ fn default_lanes() -> Vec<LaneSettings> {
 
 impl Default for Mix {
     fn default() -> Self {
-        Mix { id: 0, name: "New mix".into(), tracks: vec![], transitions: vec![], tempo: TempoMode::Glide, keylock: true, lanes: default_lanes() }
+        Mix { id: 0, name: "New mix".into(), tracks: vec![], transitions: vec![], tempo: TempoMode::Glide, keylock: true, lanes: default_lanes(), samples: vec![], sample_lanes: default_sample_lanes() }
     }
 }
 
@@ -360,9 +387,21 @@ impl Mix {
         self.lanes.get(i % MIX_LANES).copied().unwrap_or_default()
     }
 
+    /// Linear gain of sample lane `l` given its fader, mute and solo (solo on any lane, deck or
+    /// sample, silences the others).
+    pub fn sample_lane_gain(&self, l: usize) -> f32 {
+        let s = self.sample_lanes.get(l).copied().unwrap_or_default();
+        let any_solo = self.lanes.iter().chain(&self.sample_lanes).any(|x| x.solo);
+        if s.mute || (any_solo && !s.solo) {
+            0.0
+        } else {
+            10f32.powf(s.gain_db / 20.0)
+        }
+    }
+
     /// Whether track `i` is audible given mute / solo of the lanes.
     pub fn lane_audible(&self, i: usize) -> bool {
-        let any_solo = self.lanes.iter().any(|l| l.solo);
+        let any_solo = self.lanes.iter().chain(&self.sample_lanes).any(|l| l.solo);
         let l = self.lane_of(i);
         !l.mute && (!any_solo || l.solo)
     }
@@ -370,6 +409,9 @@ impl Mix {
     pub fn normalize(&mut self) {
         if self.lanes.len() < MIX_LANES {
             self.lanes.resize(MIX_LANES, LaneSettings::default());
+        }
+        if self.sample_lanes.len() < SAMPLE_LANES {
+            self.sample_lanes.resize(SAMPLE_LANES, LaneSettings::default());
         }
         let n = self.tracks.len().saturating_sub(1);
         self.transitions.truncate(n);
@@ -411,5 +453,124 @@ mod stemless_tests {
         // styles without stems are unchanged
         let b = Transition::new(TransitionStyle::BassSwap, 32);
         assert_eq!(b.without_stems(), b);
+    }
+}
+
+// ------------------------------------------------------------------ simple per-parameter modes
+
+/// How one stem, EQ band, the volume or an effect behaves across a transition: the simple
+/// choices of the transition editor (like DJ.Studio's None / Swap / Crossfade / Full).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mode {
+    /// Stem: silent on both sides during the transition. EQ / effect: no change.
+    Off,
+    /// Hard switch at the midpoint.
+    Swap,
+    /// Gradual handover (stems between 40 % and 60 %, EQ between 25 % and 75 %, volume across
+    /// the whole transition).
+    Crossfade,
+    /// Both tracks keep it for the whole transition.
+    Full,
+    /// Volume: the outgoing track fades over the second half, the incoming comes up over the first.
+    Half,
+    /// Filter: high-pass sweep out of the outgoing track.
+    SweepOut,
+    /// Filter: low-pass sweep into the incoming track.
+    SweepIn,
+    /// Echo: the outgoing track echoes out over the last bar.
+    EchoOut,
+}
+
+impl Mode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Mode::Off => "Off",
+            Mode::Swap => "Swap",
+            Mode::Crossfade => "Crossfade",
+            Mode::Full => "Full",
+            Mode::Half => "Second half",
+            Mode::SweepOut => "Sweep out",
+            Mode::SweepIn => "Sweep in",
+            Mode::EchoOut => "Echo out",
+        }
+    }
+
+    /// Modes offered for a parameter.
+    pub fn for_param(p: Param) -> &'static [Mode] {
+        match p {
+            Param::Stem(_) => &[Mode::Off, Mode::Swap, Mode::Crossfade, Mode::Full],
+            Param::EqLow | Param::EqMid | Param::EqHigh => &[Mode::Off, Mode::Swap, Mode::Crossfade],
+            Param::Volume => &[Mode::Full, Mode::Crossfade, Mode::Half, Mode::Swap],
+            Param::Filter => &[Mode::Off, Mode::SweepOut, Mode::SweepIn],
+            Param::Echo => &[Mode::Off, Mode::EchoOut],
+        }
+    }
+}
+
+/// Lanes (both sides) for `mode` of `param` over `len` beats.
+pub fn mode_lanes(param: Param, mode: Mode, len: f32) -> Vec<Lane> {
+    use Side::*;
+    let h = len * 0.5;
+    let e = 0.01f32.min(len * 0.01);
+    let pair = |out: &[(f32, f32)], inc: &[(f32, f32)]| vec![Lane::new(Out, param, out), Lane::new(In, param, inc)];
+    match (param, mode) {
+        (Param::Stem(_), Mode::Off) => pair(&[(0.0, 0.0), (len, 0.0)], &[(0.0, 0.0), (len - e, 0.0), (len, 1.0)]),
+        (Param::Stem(_), Mode::Swap) | (Param::Volume, Mode::Swap) => pair(&[(0.0, 1.0), (h - e, 1.0), (h, 0.0)], &[(0.0, 0.0), (h - e, 0.0), (h, 1.0)]),
+        (Param::Stem(_), Mode::Crossfade) => pair(&[(0.0, 1.0), (len * 0.4, 1.0), (len * 0.6, 0.0)], &[(0.0, 0.0), (len * 0.4, 0.0), (len * 0.6, 1.0)]),
+        (Param::EqLow | Param::EqMid | Param::EqHigh, Mode::Swap) => pair(&[(0.0, 0.5), (h - e, 0.5), (h, 0.0)], &[(0.0, 0.0), (h - e, 0.0), (h, 0.5)]),
+        (Param::EqLow | Param::EqMid | Param::EqHigh, Mode::Crossfade) => pair(&[(0.0, 0.5), (len * 0.25, 0.5), (len * 0.75, 0.0)], &[(0.0, 0.0), (len * 0.25, 0.0), (len * 0.75, 0.5)]),
+        (Param::Volume, Mode::Crossfade) => pair(&[(0.0, 1.0), (len, 0.0)], &[(0.0, 0.0), (len, 1.0)]),
+        (Param::Volume, Mode::Half) => pair(&[(0.0, 1.0), (h, 1.0), (len, 0.0)], &[(0.0, 0.0), (h, 1.0)]),
+        (Param::Filter, Mode::SweepOut) => vec![Lane::new(Out, param, &[(0.0, 0.5), (len, 0.92)])],
+        (Param::Filter, Mode::SweepIn) => vec![Lane::new(In, param, &[(0.0, 0.08), (len, 0.5)])],
+        (Param::Echo, Mode::EchoOut) => {
+            let s = len - 4.0f32.min(len);
+            vec![Lane::new(Out, param, &[(0.0, 0.0), (s, 0.0), (s + e, 0.8)])]
+        }
+        _ => vec![], // Off / Full: neutral
+    }
+}
+
+impl Transition {
+    /// The simple mode `param` currently follows, `None` for a hand-drawn / preset-specific curve.
+    pub fn mode(&self, param: Param) -> Option<Mode> {
+        let len = self.beats as f32;
+        let probe = |lanes: &[Lane], side: Side, x: f32| lanes.iter().find(|l| l.side == side && l.param == param).map(|l| l.value_at(x)).unwrap_or(param.neutral());
+        Mode::for_param(param).iter().copied().find(|&m| {
+            let want = mode_lanes(param, m, len);
+            (0..=64).all(|i| {
+                let x = len * i as f32 / 64.0;
+                [Side::Out, Side::In].iter().all(|&s| (probe(&self.lanes, s, x) - probe(&want, s, x)).abs() < 0.03)
+            })
+        })
+    }
+
+    /// Make `param` follow `mode` on both sides; the transition becomes a custom one.
+    pub fn set_mode(&mut self, param: Param, mode: Mode) {
+        self.lanes.retain(|l| l.param != param);
+        self.lanes.extend(mode_lanes(param, mode, self.beats as f32));
+        self.style = TransitionStyle::Custom;
+    }
+}
+
+#[cfg(test)]
+mod mode_tests {
+    use super::*;
+
+    #[test]
+    fn modes_roundtrip_and_presets_are_recognised() {
+        let mut t = Transition::new(TransitionStyle::BassSwap, 32);
+        assert_eq!(t.mode(Param::EqLow), Some(Mode::Swap));
+        assert_eq!(t.mode(Param::Volume), None); // bass swap's own volume curve
+        assert_eq!(t.mode(Param::Stem(StemKind::Vocals)), Some(Mode::Full));
+        for k in StemKind::ALL {
+            for &m in Mode::for_param(Param::Stem(k)) {
+                t.set_mode(Param::Stem(k), m);
+                assert_eq!(t.mode(Param::Stem(k)), Some(m));
+            }
+        }
+        assert_eq!(t.style, TransitionStyle::Custom);
+        t.set_mode(Param::Volume, Mode::Half);
+        assert_eq!(t.mode(Param::Volume), Some(Mode::Half));
     }
 }

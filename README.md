@@ -74,7 +74,7 @@ Every screenshot here is the real app at work on a mix imported from DJ.Studio. 
       <h3>Design the whole set</h3>
       Drop tracks in and <b>✨ Harmonize</b> orders them by Camelot key, tempo and energy arc, using simulated annealing over the whole set. Mix-in and mix-out points come from the analysed structure, and transition lengths fit the intro and outro of each pair.
       <br><br>
-      Slide tracks and transitions by bars, collapse lanes, solo or mute them, shape a lane with its EQ and filter, and render the result to WAV with a cue sheet, faster than real time. Everything else lives in a DJ.Studio-style bar at the bottom: the transport, plus tabs for Zoom, Playlist, Transition, Track, Mashups and Master that open their panel above it. Every edit can be undone.
+      Slide tracks and transitions by bars, collapse lanes, solo or mute them, shape a lane with its EQ and filter, and render the result to WAV with a cue sheet, faster than real time. Everything else lives in a DJ.Studio-style bar at the bottom: the transport, plus tabs for Zoom, Playlist (a sortable track table with keys, harmonic matches, energy and BPM), Transition, Track, Mashups and Master. Two <b>sample lanes</b> take one-shots, loops and FX dropped from Finder. Every edit can be undone.
     </td>
     <td width="50%" valign="top">
       <img src="docs/images/live.jpg" alt="The live view: two scrolling stem-coloured waveforms in phase, deck A playing Define (Club Mix) and deck B synced to 122 BPM, both with eight auto-generated hot cues (Start, Mix In, Vocal, Break, Drop, Break, Drop, Mix Out), the mixer in the middle and the browser below" width="100%">
@@ -92,7 +92,7 @@ Every screenshot here is the real app at work on a mix imported from DJ.Studio. 
       <br>
       <sub>The library: BPM, key, energy and cues for every analysed track.</sub>
       <h3>A library that analyses itself</h3>
-      Drop a folder in and every track is analysed within about a second. Stems are separated in the background, one job at a time, so your Mac stays responsive. Sort and search by artist, title, BPM, key or energy, and drag tracks onto a deck or into a mix.
+      Drop a folder in and every track is analysed within about a second. Stems are separated on demand: when a transition needs them, when you export a mix, or for the whole library in the background if you switch that on. Sort and search by artist, title, BPM, key or energy, and drag tracks onto a deck or into a mix.
       <br><br>
       Imports your <b>DJ.Studio</b> projects, with their mix points, transitions and cues, and exports beat grids, keys, hot cues and automix points to <b>VirtualDJ</b>.
     </td>
@@ -114,7 +114,7 @@ Every screenshot here is the real app at work on a mix imported from DJ.Studio. 
     </td>
     <td width="50%" valign="top">
       <h3>Transitions you can read</h3>
-      Stem blend, Bass swap, Crossfade, Vocal over, Filter out, Echo out and Cut, from 2 to 32 bars. The editor lines up the outgoing and incoming track on a bar ruler, with one clearly labelled band per stem, EQ band, filter or echo. Draw a curve with the mouse and it plays back sample-accurately in the preview, the export and on the live decks.
+      Pick a preset (Stem blend, Bass swap, Crossfade, Vocal over, Mashup, Filter out, Echo out, Cut), then adjust it the way DJ.Studio does it: for every stem <b>Off · Swap · Crossfade · Full</b>, the same for each EQ band, plus volume, filter and echo choices. When a transition is selected, the timeline splits both tracks into stem rows with their level lines. <b>Curves</b> lets you draw any parameter by hand. Lock a transition and harmonizing or recomputing mix points leaves it alone.
       <br><br>
       Until both tracks have stems, a stem transition plays as an EQ blend with the same timing. The timeline shows exactly that, marked "no stems", with a one-click button to separate them. The editor also warns when the outgoing track fades out before its transition ends, or when the incoming track comes in much quieter.
       <h3>Keyboard first</h3>

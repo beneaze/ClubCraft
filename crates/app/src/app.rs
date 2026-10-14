@@ -73,6 +73,12 @@ impl Shared {
     }
 }
 
+struct PendingExport {
+    out: std::path::PathBuf,
+    tracks: Vec<TrackId>,
+    total: usize,
+}
+
 pub struct App {
     pub lib: Library,
     pub sh: Shared,
@@ -96,6 +102,8 @@ pub struct App {
     applied_prefs: Option<crate::prefs::Prefs>,
     pub mix_summaries: Vec<crate::home::MixSummary>,
     prepared: (i64, usize),
+    /// Export waiting for stem separation.
+    pending_export: Option<PendingExport>,
     /// Last seen change from `clubcraft mcp` (marker mtime) and when it was checked.
     external: (Option<std::time::SystemTime>, f64),
     queued: std::collections::HashSet<TrackId>,
@@ -130,7 +138,7 @@ impl App {
         }
         let audio_cfg: clubcraft_engine::AudioConfig = cc.storage.and_then(|s| eframe::get_value(s, "audio")).unwrap_or_default();
         let midi_port: Option<String> = cc.storage.and_then(|s| eframe::get_value(s, "midi_port"));
-        let mut app = App { lib, sh, jobs, view, library: LibraryView::default(), status: String::new(), devctl: crate::devctl::DevCtl::from_env(), live: Default::default(), decks: vec![Default::default(); 2], mixer: Default::default(), browser: LibraryView::default(), studio: Default::default(), mixes: Vec::new(), eng: crate::live::adapter::LiveEngine::start(audio_cfg.clone()), settings: crate::settings::Settings::new(audio_cfg, midi_port), home: Default::default(), prefs, applied_prefs: None, menu: crate::menu::AppMenu::install(&cc.egui_ctx), ui_ctx_cmd: None, mix_summaries: Vec::new(), prepared: (-1, 0), queued: Default::default(), external: (std::fs::metadata(crate::mcp::change_marker()).and_then(|m| m.modified()).ok(), 0.0) };
+        let mut app = App { lib, sh, jobs, view, library: LibraryView::default(), status: String::new(), devctl: crate::devctl::DevCtl::from_env(), live: Default::default(), decks: vec![Default::default(); 2], mixer: Default::default(), browser: LibraryView::default(), studio: Default::default(), mixes: Vec::new(), eng: crate::live::adapter::LiveEngine::start(audio_cfg.clone()), settings: crate::settings::Settings::new(audio_cfg, midi_port), home: Default::default(), prefs, applied_prefs: None, menu: crate::menu::AppMenu::install(&cc.egui_ctx), ui_ctx_cmd: None, mix_summaries: Vec::new(), prepared: (-1, 0), pending_export: None, queued: Default::default(), external: (std::fs::metadata(crate::mcp::change_marker()).and_then(|m| m.modified()).ok(), 0.0) };
         app.settings.connect_midi(app.eng.handle.as_ref());
         if let Some(e) = &app.eng.error {
             app.status = e.clone();
@@ -217,10 +225,14 @@ impl App {
                 self.eng.studio_update(&self.studio.mix, &self.sh);
             }
         }
-        let anything_playing = st.decks.iter().any(|d| d.playing) || st.mix.active || self.eng.export.is_some() || self.eng.loading_mix.is_some();
-        if self.view == View::Live || anything_playing {
-            ctx.request_repaint();
+        // Redraw only while something moves, at most 60 fps (ProMotion displays would do 120).
+        let anything_playing = st.decks.iter().any(|d| d.playing) || st.mix.playing || self.eng.export.is_some() || self.eng.loading_mix.is_some() || self.pending_export.is_some();
+        if anything_playing {
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        } else if self.view == View::Live {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250)); // meters settle, clock
         }
+        self.tick_pending_export();
         if self.jobs.pending() > 0 {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
@@ -274,6 +286,8 @@ impl App {
                 self.studio.mashup.open_for(id, &self.sh);
                 self.view = View::Studio;
             }
+            M::Undo => self.studio.undo(),
+            M::Redo => self.studio.redo(),
             M::NewMix => self.handle_home_actions(vec![H::NewMix { name: "New mix".into(), tracks: vec![], harmonize: false }]),
             M::AddMusic => self.handle_home_actions(vec![H::AddMusic]),
             M::ImportDjStudio => self.handle_studio_actions(vec![S::ImportDjStudio]),
@@ -405,6 +419,20 @@ impl App {
                 Err(e) => self.status = format!("save mix: {e}"),
             }
             self.refresh_mixes();
+        }
+    }
+
+    /// Start a waiting export once its stems are separated (or the jobs ended / were stopped).
+    fn tick_pending_export(&mut self) {
+        let Some(pe) = &self.pending_export else { return };
+        let missing = pe.tracks.iter().filter(|id| !self.sh.analyses.get(id).is_some_and(|a| a.stems_model.is_some())).count();
+        self.studio.render_progress = Some((pe.total - missing) as f32 / pe.total.max(1) as f32);
+        self.studio.render_label = format!("Stems {}/{}", pe.total - missing, pe.total);
+        if missing == 0 || self.jobs.pending() == 0 {
+            let pe = self.pending_export.take().unwrap();
+            self.studio.render_label.clear();
+            self.eng.export_mix(&self.studio.mix, pe.out, &self.sh);
+            self.status = if missing == 0 { "Stems ready, rendering mix…".into() } else { format!("Rendering mix ({missing} track(s) without stems play EQ blends)…") };
         }
     }
 
@@ -547,8 +575,28 @@ impl App {
                 let _ = std::fs::create_dir_all(&dir);
                 let name: String = self.studio.mix.name.chars().map(|c| if c == '/' || c == ':' { '-' } else { c }).collect();
                 if let Some(out) = rfd::FileDialog::new().set_directory(&dir).set_file_name(format!("{name}.wav")).add_filter("WAV", &["wav"]).save_file() {
-                    self.eng.export_mix(&self.studio.mix, out, &self.sh);
-                    self.status = "Rendering mix…".into();
+                    // the heavy part happens here: stems for the stem transitions that lack them
+                    let mut need: Vec<TrackId> = Vec::new();
+                    for (k, tr) in self.studio.mix.transitions.iter().enumerate() {
+                        if !tr.uses_stems() {
+                            continue;
+                        }
+                        for t in self.studio.mix.tracks.iter().skip(k).take(2) {
+                            if !self.sh.analyses.get(&t.track_id).is_some_and(|a| a.stems_model.is_some()) && !need.contains(&t.track_id) {
+                                need.push(t.track_id);
+                            }
+                        }
+                    }
+                    if need.is_empty() {
+                        self.eng.export_mix(&self.studio.mix, out, &self.sh);
+                        self.status = "Rendering mix…".into();
+                    } else {
+                        for id in &need {
+                            self.jobs.separate_now(*id);
+                        }
+                        self.status = format!("Separating stems for {} track(s), then rendering…", need.len());
+                        self.pending_export = Some(PendingExport { out, total: need.len(), tracks: need });
+                    }
                 }
             }
             A::SendToLive => {
@@ -663,6 +711,23 @@ impl App {
                     self.handle_mashup_actions(vec![a]);
                 }
             }
+            "sample" => {
+                // `sample <lane> <beat> <path>` (tests)
+                let mut it = arg.splitn(3, ' ');
+                let (l, b, path) = (it.next().and_then(|v| v.parse().ok()).unwrap_or(0u8), it.next().and_then(|v| v.parse().ok()).unwrap_or(0.0), it.next().unwrap_or(""));
+                self.studio.mix.samples.push(clubcraft_core::SampleClip { lane: l, path: path.into(), start_beat: b, gain_db: 0.0 });
+                self.studio.changed();
+                self.save_mix();
+            }
+            "lock" => {
+                if let Some(t) = self.studio.mix.transitions.get_mut(arg.trim().parse().unwrap_or(0)) {
+                    t.locked = !t.locked;
+                    self.studio.changed();
+                }
+            }
+            "undo" => self.studio.undo(),
+            "redo" => self.studio.redo(),
+            "harmonize" => self.studio.harmonize(&self.sh),
             "tab" => {
                 use crate::studio::Tab;
                 if let Some(t) = Tab::ALL.into_iter().find(|t| format!("{t:?}").eq_ignore_ascii_case(arg.trim())) {
@@ -836,7 +901,7 @@ impl App {
                         ui.selectable_value(&mut p.stem_quality, "high".to_string(), "High: htdemucs_ft (~80 s/track)");
                         ui.selectable_value(&mut p.stem_quality, "fast".to_string(), "Fast: htdemucs (~17 s/track)");
                     });
-                ui.checkbox(&mut p.separate_stems, "Auto stems");
+                ui.checkbox(&mut p.separate_stems, "Background stems").on_hover_text("Separate stems for every imported and opened track in the background (uses a lot of CPU / GPU for a while). Off: stems are separated on demand, e.g. when you export a mix or press 'Separate stems now' on a transition.");
                 let pending = self.jobs.pending();
                 if pending > 0 {
                     if ui.small_button("Stop").clicked() {
@@ -870,13 +935,17 @@ impl eframe::App for App {
             }
         }
 
-        // Files dropped from Finder are imported and analysed.
+        // Files dropped from Finder are imported and analysed (unless they went onto a sample
+        // lane in the studio, see below).
         let dropped: Vec<std::path::PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect());
-        if !dropped.is_empty() {
-            self.jobs.import(dropped, true);
-        }
+        self.studio.consumed_drop = false;
 
         egui::Panel::top("top").exact_size(36.0).show(ui, |ui| self.top_bar(ui));
+        let import_dropped = |app: &mut Self| {
+            if !dropped.is_empty() && !app.studio.consumed_drop {
+                app.jobs.import(dropped.clone(), true);
+            }
+        };
         egui::Panel::bottom("status").exact_size(20.0).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(&self.status).size(11.0).color(theme::TEXT_DIM));
@@ -940,6 +1009,7 @@ impl eframe::App for App {
         if self.view == View::Live {
             self.keyboard(&ctx);
         }
+        import_dropped(self);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {

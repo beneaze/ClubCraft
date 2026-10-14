@@ -6,7 +6,7 @@ use crate::studio::{Selection, StudioAction, StudioView};
 use crate::theme;
 use crate::waveform::{self, WaveParams, WaveStyle};
 use crate::widgets;
-use clubcraft_core::{CueKind, LaneSettings, Param, Side, StemKind, TempoMode, Transition, MIX_LANES};
+use clubcraft_core::{CueKind, LaneSettings, Param, SampleClip, Side, StemKind, TempoMode, Transition, MIX_LANES, SAMPLE_LANES};
 use eframe::egui::{self, pos2, vec2, Align, Color32, CursorIcon, Id, Layout, Rect, RichText, Sense, Stroke, StrokeKind, Ui};
 
 /// Which automation the timeline draws on a lane's clips.
@@ -48,6 +48,8 @@ const RULER_H: f32 = 14.0;
 pub const MAX_ZOOM: f32 = 3000.0;
 pub const EQ_COLORS: [Color32; 3] = [Color32::from_rgb(255, 90, 90), Color32::from_rgb(120, 230, 120), Color32::from_rgb(110, 200, 255)];
 pub const FILTER_COLOR: Color32 = Color32::from_rgb(200, 140, 255);
+/// Colour of the sample lanes.
+pub const SAMPLE_COLOR: Color32 = Color32::from_rgb(120, 200, 190);
 pub const VOLUME_COLOR: Color32 = Color32::from_rgb(255, 214, 60);
 
 /// Knob 0..1 ↔ dB with unity at 0.8.
@@ -80,9 +82,12 @@ impl StudioView {
         let tempo_h = if self.tempo_open { 58.0 } else { 24.0 };
         // Collapsed lanes are a slim row (clip titles only); expanded lanes share the rest.
         const COLLAPSED_H: f32 = 30.0;
+        const SAMPLE_H: f32 = 58.0;
+        let sample_hs: [f32; SAMPLE_LANES] = std::array::from_fn(|l| if self.sample_open[l] { SAMPLE_H } else { COLLAPSED_H });
+        let samples_h: f32 = sample_hs.iter().map(|h| h + 2.0).sum();
         let n_open = (0..MIX_LANES).filter(|l| !self.lane_collapsed[*l]).count().max(1) as f32;
         let n_closed = MIX_LANES as f32 - (0..MIX_LANES).filter(|l| !self.lane_collapsed[*l]).count() as f32;
-        let open_h = ((full.height() - ruler_h - 21.0 - tempo_h - 8.0 - n_closed * (COLLAPSED_H + 2.0)) / n_open).clamp(80.0, 300.0);
+        let open_h = ((full.height() - ruler_h - 21.0 - tempo_h - 8.0 - samples_h - n_closed * (COLLAPSED_H + 2.0)) / n_open).clamp(70.0, 300.0);
         let lane_hs: Vec<f32> = (0..MIX_LANES).map(|l| if self.lane_collapsed[l] { COLLAPSED_H } else { open_h }).collect();
         let canvas = Rect::from_min_max(pos2(full.left() + HEADER_W + 4.0, full.top()), full.max);
         let ruler = Rect::from_min_size(canvas.min, vec2(canvas.width(), ruler_h));
@@ -94,18 +99,42 @@ impl StudioView {
             lanes.push(Rect::from_min_size(pos2(canvas.left(), ly), vec2(canvas.width(), *h)));
             ly += h + 2.0;
         }
-        let tempo = Rect::from_min_size(pos2(canvas.left(), lanes[MIX_LANES - 1].bottom() + 4.0), vec2(canvas.width(), tempo_h));
+        let mut slanes: Vec<Rect> = Vec::with_capacity(SAMPLE_LANES);
+        for h in sample_hs {
+            slanes.push(Rect::from_min_size(pos2(canvas.left(), ly), vec2(canvas.width(), h)));
+            ly += h + 2.0;
+        }
+        let tempo = Rect::from_min_size(pos2(canvas.left(), slanes[SAMPLE_LANES - 1].bottom() + 4.0), vec2(canvas.width(), tempo_h));
 
         // ----- lane headers
         let mut lane_changed = false;
         {
-            let corner = Rect::from_min_size(full.min, vec2(HEADER_W, ruler_h));
-            ui.painter().rect_filled(corner, 4.0, theme::PANEL);
-            ui.painter().text(corner.left_center() + vec2(8.0, 0.0), egui::Align2::LEFT_CENTER, format!("{}  ·  {} tracks", theme::fmt_time_short(self.timeline.total_secs), self.mix.tracks.len()), egui::FontId::proportional(11.5), theme::TEXT_DIM);
+            // like DJ.Studio: playhead time over the mix length, the track playing, its key
+            let corner = Rect::from_min_size(full.min, vec2(HEADER_W, ruler_h + 1.0 + strip_h));
+            let p = ui.painter();
+            p.rect_filled(corner, 4.0, theme::PANEL);
+            let x = corner.left() + 10.0;
+            p.text(pos2(x, corner.top() + 3.0), egui::Align2::LEFT_TOP, theme::fmt_time_short(self.position), egui::FontId::monospace(15.0), theme::TEXT);
+            p.text(pos2(x, corner.bottom() - 3.0), egui::Align2::LEFT_BOTTOM, theme::fmt_time_short(self.timeline.total_secs), egui::FontId::monospace(10.5), theme::TEXT_DIM);
+            let cur = self.track_at_playhead();
+            let x2 = x + 64.0;
+            p.line_segment([pos2(x2 - 8.0, corner.top() + 6.0), pos2(x2 - 8.0, corner.bottom() - 6.0)], Stroke::new(1.0, theme::LINE));
+            p.text(pos2(x2, corner.top() + 3.0), egui::Align2::LEFT_TOP, format!("{}/{}", cur.map(|i| i + 1).unwrap_or(0), self.mix.tracks.len()), egui::FontId::monospace(15.0), theme::TEXT);
+            p.text(pos2(x2, corner.bottom() - 3.0), egui::Align2::LEFT_BOTTOM, "TRACKS", egui::FontId::proportional(10.0), theme::TEXT_DIM);
+            if let Some(k) = cur.and_then(|i| self.mix.tracks.get(i)).and_then(|t| sh.analyses.get(&t.track_id).and_then(|a| a.key).map(|k| k.shifted(t.key_shift))) {
+                let badge = Rect::from_min_size(pos2(corner.right() - 62.0, corner.top() + 5.0), vec2(54.0, corner.height() - 10.0));
+                p.rect_stroke(badge, 5.0, Stroke::new(1.5, theme::key_color(k)), StrokeKind::Inside);
+                p.text(pos2(badge.center().x, badge.top() + 2.0), egui::Align2::CENTER_TOP, theme::key_label(k), egui::FontId::proportional(13.0), theme::key_color(k));
+                p.text(pos2(badge.center().x, badge.bottom() - 1.0), egui::Align2::CENTER_BOTTOM, k.name(), egui::FontId::proportional(10.0), theme::key_color(k));
+            }
         }
         for l in 0..MIX_LANES {
             let hr = Rect::from_min_size(pos2(full.left(), lanes[l].top()), vec2(HEADER_W, lane_hs[l]));
             lane_changed |= self.lane_header(ui, hr, l);
+        }
+        for l in 0..SAMPLE_LANES {
+            let hr = Rect::from_min_size(pos2(full.left(), slanes[l].top()), vec2(HEADER_W, slanes[l].height()));
+            lane_changed |= self.sample_lane_header(ui, hr, l);
         }
         let th = Rect::from_min_size(pos2(full.left(), tempo.top()), vec2(HEADER_W, tempo_h));
         ui.painter().rect_filled(th, 4.0, theme::PANEL);
@@ -165,37 +194,32 @@ impl StudioView {
         let p = ui.painter_at(canvas.expand(1.0));
         p.rect_filled(canvas, 4.0, theme::BG);
 
-        // ----- ruler: mix bars + time (beats when zoomed in)
+        // ----- ruler: time only (like DJ.Studio); bars are on each clip's own ruler
         p.rect_filled(ruler, 0.0, theme::PANEL);
-        let tl = &self.timeline;
-        if tl.total_beats > 0.0 {
-            let px_per_beat = 60.0 / tl.bpm_at_beat(tl.beat_at_sec(((canvas.width() * 0.5 + scroll) / zoom) as f64)) as f32 * zoom;
-            let px_per_bar = 4.0 * px_per_beat;
-            let every = [1.0f32, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0].into_iter().find(|n| n * px_per_bar >= 46.0).unwrap_or(128.0) as f64;
-            // only visit the visible range
-            let b_lo = (tl.beat_at_sec((scroll / zoom) as f64) / 4.0).floor().max(0.0);
-            let b_hi = (tl.beat_at_sec(((canvas.width() + scroll) / zoom) as f64) / 4.0).ceil() + 1.0;
-            let mut bar = (b_lo / every).floor() * every;
-            while bar <= b_hi && bar * 4.0 <= tl.total_beats {
-                let x = x_of(tl.sec_at_beat(bar * 4.0));
-                p.line_segment([pos2(x, ruler.top() + 12.0), pos2(x, ruler.bottom())], Stroke::new(1.0, Color32::from_rgb(200, 190, 90)));
-                p.text(pos2(x + 3.0, ruler.top() + 1.0), egui::Align2::LEFT_TOP, format!("{}", bar as i64 + 1), egui::FontId::proportional(10.0), Color32::from_rgb(220, 210, 120));
-                p.text(pos2(x + 3.0, ruler.top() + 12.0), egui::Align2::LEFT_TOP, theme::fmt_time_short(tl.sec_at_beat(bar * 4.0)), egui::FontId::proportional(9.0), theme::TEXT_DIM);
-                bar += every;
-            }
-            // minor ticks: bars, and beats (with bar.beat labels) when there is room
-            let step_beats = if px_per_beat >= 10.0 { 1.0 } else if px_per_bar >= 5.0 { 4.0 } else { 0.0 };
-            if step_beats > 0.0 {
-                let mut bt = (b_lo * 4.0 / step_beats).floor() * step_beats;
-                while bt <= b_hi * 4.0 && bt <= tl.total_beats {
-                    let x = x_of(tl.sec_at_beat(bt));
-                    let in_bar = (bt as i64).rem_euclid(4);
-                    p.line_segment([pos2(x, ruler.bottom() - if in_bar == 0 { 6.0 } else { 3.0 }), pos2(x, ruler.bottom())], Stroke::new(1.0, theme::LINE));
-                    if in_bar != 0 && px_per_beat >= 70.0 {
-                        p.text(pos2(x + 2.0, ruler.top() + 12.0), egui::Align2::LEFT_TOP, format!("{}.{}", (bt / 4.0).floor() as i64 + 1, in_bar + 1), egui::FontId::proportional(9.0), theme::TEXT_DIM);
-                    }
-                    bt += step_beats;
+        if self.timeline.total_secs > 0.0 {
+            let steps = [0.1f64, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0];
+            let major = steps.into_iter().find(|s| *s as f32 * zoom >= 70.0).unwrap_or(1200.0);
+            let minor = match major {
+                m if m >= 60.0 && (m / 60.0).fract() == 0.0 => major / 6.0,
+                15.0 => 5.0,
+                m => m / 5.0,
+            };
+            let (t_lo, t_hi) = ((scroll / zoom) as f64, ((canvas.width() + scroll) / zoom) as f64);
+            let label = |t: f64| if major < 1.0 { theme::fmt_time(t) } else { theme::fmt_time_short(t) };
+            if minor as f32 * zoom >= 5.0 {
+                let mut t = (t_lo / minor).floor() * minor;
+                while t <= t_hi.min(self.timeline.total_secs + minor) {
+                    let x = x_of(t);
+                    p.line_segment([pos2(x, ruler.bottom() - 5.0), pos2(x, ruler.bottom())], Stroke::new(1.0, theme::LINE));
+                    t += minor;
                 }
+            }
+            let mut t = (t_lo / major).floor() * major;
+            while t <= t_hi.min(self.timeline.total_secs + major) {
+                let x = x_of(t);
+                p.line_segment([pos2(x, ruler.bottom() - 11.0), pos2(x, ruler.bottom())], Stroke::new(1.0, Color32::from_white_alpha(150)));
+                p.text(pos2(x, ruler.top() + 1.0), egui::Align2::CENTER_TOP, label(t.max(0.0)), egui::FontId::proportional(12.0), theme::TEXT);
+                t += major;
             }
         }
         p.rect_filled(tstrip, 0.0, Color32::from_rgb(20, 22, 27));
@@ -226,7 +250,9 @@ impl StudioView {
             if cr.clicked() {
                 clicked_track = Some(i);
             }
-            if cr.drag_started() {
+            // sliding a track moves its incoming transition: not while that one is locked
+            let in_locked = i > 0 && self.mix.transitions.get(i - 1).is_some_and(|t| t.locked);
+            if cr.drag_started() && !in_locked {
                 self.drag = Some(Drag::Clip(i));
                 self.drag_acc = 0.0;
                 self.selection = Selection::Track(i);
@@ -245,7 +271,7 @@ impl StudioView {
             if cr.drag_stopped() {
                 self.drag = None;
             }
-            cr.on_hover_text("Drag to slide the track by bars · click to edit");
+            cr.on_hover_text(if in_locked { "Click to edit · the transition into this track is locked" } else { "Drag to slide the track by bars · click to edit" });
         }
 
         // ----- transitions: shaded overlap, markers and handles
@@ -301,11 +327,12 @@ impl StudioView {
                 p.line_segment([pos2(xx, hr.top() + 5.0), pos2(xx, hr.bottom() - 5.0)], Stroke::new(1.5, Color32::WHITE));
                 let id = Id::new(("thandle", k, end));
                 let r = ui.interact(hr.expand(3.0), id, Sense::click_and_drag());
+                let locked = self.mix.transitions[k].locked;
                 if r.hovered() || r.dragged() {
-                    ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+                    ui.ctx().set_cursor_icon(if locked { CursorIcon::NotAllowed } else { CursorIcon::ResizeHorizontal });
                 }
                 let which = if end { Drag::TransitionEnd(k) } else { Drag::TransitionStart(k) };
-                if r.drag_started() {
+                if r.drag_started() && !locked {
                     self.drag = Some(which);
                     self.drag_acc = 0.0;
                     self.selection = Selection::Transition(k);
@@ -382,6 +409,9 @@ impl StudioView {
                 }
             }
         }
+
+        // ----- sample lanes
+        self.sample_lanes_ui(ui, &p, &slanes, canvas, &x_of);
 
         // ----- playhead
         let xp = x_of(self.position);
@@ -529,20 +559,27 @@ impl StudioView {
                 let r = Rect::from_x_y_ranges(x0..=x1, wrect.y_range());
                 waveform::paint_wave(p, r, &wp, self.timeline.track_pos(i, b0), self.timeline.track_pos(i, b1), true);
             };
-            let mut regions: Vec<(f64, f64, Transition, Side)> = Vec::new();
+            let mut regions: Vec<(f64, f64, Transition, Side, usize)> = Vec::new();
             if i > 0 {
                 if let (Some(x), Some(tr)) = (self.timeline.transitions.get(i - 1), self.effective_transition(sh, i - 1)) {
-                    regions.push((x.start_beat, x.start_beat + x.beats, tr, Side::In));
+                    regions.push((x.start_beat, x.start_beat + x.beats, tr, Side::In, i - 1));
                 }
             }
             if let (Some(x), Some(tr)) = (self.timeline.transitions.get(i), self.effective_transition(sh, i)) {
-                regions.push((x.start_beat, x.start_beat + x.beats, tr, Side::Out));
+                regions.push((x.start_beat, x.start_beat + x.beats, tr, Side::Out, i));
             }
             let mut b = tt.start_beat;
-            for (start, end, tr, side) in &regions {
+            for (start, end, tr, side, k) in &regions {
                 let (start, r0, r1) = (*start, start.max(tt.start_beat), end.min(tt.end_beat));
                 if r0 > b {
                     paint(b, r0, [1.0; 4], 1.0);
+                }
+                // the selected transition shows one row per stem (like DJ.Studio)
+                if self.selection == Selection::Transition(*k) && wf.stems.is_some() && audible {
+                    let (x0, x1) = (x_of(self.timeline.sec_at_beat(r0)), x_of(self.timeline.sec_at_beat(r1)));
+                    self.paint_stem_rows(p, Rect::from_x_y_ranges(x0..=x1, wrect.y_range()), wf, i, tr, *side, start, x_of);
+                    b = b.max(r1);
+                    continue;
                 }
                 let (x0, x1) = (x_of(self.timeline.sec_at_beat(r0)), x_of(self.timeline.sec_at_beat(r1)));
                 let n = ((x1 - x0) / 4.0).clamp(4.0, 400.0) as usize;
@@ -584,20 +621,245 @@ impl StudioView {
         }
         // inline transition automation
         let show = self.lane_show[l];
+        // the selected transition draws stem rows with their own level lines instead
+        let stem_rows = audible && sh.waveforms.get(&tt.track_id).is_some_and(|w| w.stems.is_some());
+        let show_for = |k: usize| -> Option<ShowMode> {
+            if stem_rows && self.selection == Selection::Transition(k) {
+                (show == ShowMode::Eq).then_some(ShowMode::Eq)
+            } else {
+                Some(show)
+            }
+        };
         if show != ShowMode::None {
             if i > 0 {
-                if let (Some(x), Some(tr)) = (self.timeline.transitions.get(i - 1), self.effective_transition(sh, i - 1)) {
-                    self.draw_automation(p, body, &tr, Side::In, x.start_beat, x.beats, show, x_of);
+                if let (Some(x), Some(tr), Some(sm)) = (self.timeline.transitions.get(i - 1), self.effective_transition(sh, i - 1), show_for(i - 1)) {
+                    self.draw_automation(p, body, &tr, Side::In, x.start_beat, x.beats, sm, x_of);
                 }
             }
-            if let (Some(x), Some(tr)) = (self.timeline.transitions.get(i), self.effective_transition(sh, i)) {
-                self.draw_automation(p, body, &tr, Side::Out, x.start_beat, x.beats, show, x_of);
+            if let (Some(x), Some(tr), Some(sm)) = (self.timeline.transitions.get(i), self.effective_transition(sh, i), show_for(i)) {
+                self.draw_automation(p, body, &tr, Side::Out, x.start_beat, x.beats, sm, x_of);
             }
         }
         if !audible {
             p.rect_filled(r, 4.0, Color32::from_black_alpha(110));
         }
         p.rect_stroke(r, 4.0, Stroke::new(if sel { 2.0 } else { 1.0 }, if sel { theme::accent() } else { accent.linear_multiply(0.5) }), StrokeKind::Inside);
+    }
+
+    /// Stem rows (drums, bass, melody, vocals) of track `i` inside transition `tr`: each row shows
+    /// that stem's waveform at the level it plays, and its level as a white line.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_stem_rows(&self, p: &egui::Painter, rect: Rect, wf: &clubcraft_core::Waveform, i: usize, tr: &Transition, side: Side, start: f64, x_of: &dyn Fn(f64) -> f32) {
+        let Some(stems) = &wf.stems else { return };
+        let clip = p.clip_rect().intersect(rect);
+        if clip.width() <= 0.0 {
+            return;
+        }
+        let origin = x_of(0.0);
+        let beat_at_x = |x: f32| self.timeline.beat_at_sec(((x - origin) / self.zoom) as f64);
+        let order = [StemKind::Drums, StemKind::Bass, StemKind::Other, StemKind::Vocals];
+        let rh = rect.height() / 4.0;
+        let mut mesh = egui::Mesh::default();
+        let mut lines: Vec<egui::Shape> = Vec::new();
+        for (row, k) in order.into_iter().enumerate() {
+            let r = Rect::from_min_size(pos2(rect.left(), rect.top() + row as f32 * rh), vec2(rect.width(), rh - 1.0));
+            let col = theme::stem_color(k);
+            p.rect_filled(r.intersect(clip), 0.0, theme::blend(theme::PANEL, col, 0.2));
+            let data = &stems[k.index()];
+            let mut line: Vec<egui::Pos2> = Vec::new();
+            let mut x = clip.left().floor();
+            while x < clip.right() {
+                let b = beat_at_x(x + 0.5);
+                let g = (tr.value(side, Param::Stem(k), (b - start) as f32) * tr.value(side, Param::Volume, (b - start) as f32)).clamp(0.0, 1.0);
+                let pos = self.timeline.track_pos(i, b);
+                let bin = ((pos * wf.rate) as usize).min(data.len().saturating_sub(1));
+                let v = data.get(bin).map(|&v| v as f32 / 255.0).unwrap_or(0.0) * g;
+                let hh = v * (rh * 0.5 - 2.0);
+                mesh.add_colored_rect(Rect::from_min_max(pos2(x, r.center().y - hh), pos2(x + 1.0, r.center().y + hh)), col);
+                if (x as i32) % 3 == 0 {
+                    line.push(pos2(x, r.bottom() - 2.0 - g * (rh - 5.0)));
+                }
+                x += 1.0;
+            }
+            lines.push(egui::Shape::line(line, Stroke::new(1.5, Color32::from_white_alpha(230))));
+        }
+        p.add(egui::Shape::mesh(mesh));
+        p.extend(lines);
+    }
+
+    /// Header of sample lane `l`: name, fader, solo / mute, add a file.
+    fn sample_lane_header(&mut self, ui: &mut Ui, r: Rect, l: usize) -> bool {
+        let accent = SAMPLE_COLOR;
+        ui.painter().rect_filled(r, 4.0, theme::PANEL);
+        ui.painter().rect_filled(Rect::from_min_size(r.min, vec2(3.0, r.height())), 2.0, accent);
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r.shrink2(vec2(10.0, 4.0))).layout(Layout::top_down(Align::Min)));
+        let ui = &mut child;
+        self.mix.normalize();
+        let mut ls = self.mix.sample_lanes[l];
+        let before = ls;
+        ui.horizontal(|ui| {
+            let chevron = if self.sample_open[l] { "⏷" } else { "⏵" };
+            if ui.add(egui::Label::new(RichText::new(format!("{chevron} Sample {}", l + 1)).strong().color(accent)).sense(Sense::click())).on_hover_text("Collapse / expand the lane").clicked() {
+                self.sample_open[l] = !self.sample_open[l];
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if widgets::toggle(ui, ls.mute, "M", Color32::from_rgb(255, 90, 90), vec2(22.0, 18.0)).on_hover_text("Mute lane").clicked() {
+                    ls.mute = !ls.mute;
+                }
+                if widgets::toggle(ui, ls.solo, "S", theme::WARN, vec2(22.0, 18.0)).on_hover_text("Solo lane").clicked() {
+                    ls.solo = !ls.solo;
+                }
+                if ui.small_button("+").on_hover_text("Add an audio file at the playhead (or drop files from Finder onto the lane)").clicked() {
+                    if let Some(files) = rfd::FileDialog::new().set_title("Add samples").add_filter("Audio", crate::importer::AUDIO_EXTS).pick_files() {
+                        let beat = self.timeline.beat_at_sec(self.position).round();
+                        for (n, f) in files.into_iter().enumerate() {
+                            self.mix.samples.push(SampleClip { lane: l as u8, path: f, start_beat: beat + 4.0 * n as f64, gain_db: 0.0 });
+                        }
+                        self.changed();
+                    }
+                }
+            });
+        });
+        if self.sample_open[l] {
+            let mut v = db_fader(ls.gain_db);
+            if widgets::hfader_with_default(ui, &mut v, false, 0.8, Some(0.8), vec2(150.0, 16.0), accent).on_hover_text("Lane volume · double-click: 0 dB").changed() {
+                ls.gain_db = fader_db(v);
+            }
+        }
+        if ls != before {
+            self.mix.sample_lanes[l] = ls;
+            return true;
+        }
+        false
+    }
+
+    /// Duration (s) and a peak overview (100 per second) of a sample file, cached.
+    fn sample_info(&mut self, path: &std::path::Path) -> Option<(f64, std::sync::Arc<Vec<f32>>)> {
+        if let Some(i) = self.sample_cache.get(path) {
+            return i.clone();
+        }
+        let info = clubcraft_engine::samples::load(path).map(|a| {
+            let step = (a.sample_rate as usize / 100).max(1);
+            let peaks: Vec<f32> = a.left.chunks(step).zip(a.right.chunks(step)).map(|(l, r)| l.iter().chain(r).fold(0.0f32, |m, v| m.max(v.abs()))).collect();
+            (a.frames() as f64 / a.sample_rate as f64, std::sync::Arc::new(peaks))
+        });
+        self.sample_cache.insert(path.to_path_buf(), info.clone());
+        info
+    }
+
+    /// Sample clips: draw, drag (snaps to beats), context menu; files dropped from Finder land on
+    /// the lane under the pointer.
+    fn sample_lanes_ui(&mut self, ui: &mut Ui, p: &egui::Painter, slanes: &[Rect], canvas: Rect, x_of: &dyn Fn(f64) -> f32) {
+        let origin = x_of(0.0);
+        let zoom = self.zoom;
+        let beat_at_x = move |tl: &clubcraft_core::MixTimeline, x: f32| tl.beat_at_sec((((x - origin) / zoom) as f64).max(0.0));
+        let hovering_files = ui.input(|i| !i.raw.hovered_files.is_empty());
+        let pointer = ui.input(|i| i.pointer.latest_pos());
+        for (l, lane) in slanes.iter().enumerate() {
+            p.rect_filled(*lane, 4.0, Color32::from_rgb(22, 24, 29));
+            if hovering_files && pointer.is_some_and(|q| lane.contains(q)) {
+                p.rect_stroke(*lane, 4.0, Stroke::new(2.0, SAMPLE_COLOR), StrokeKind::Inside);
+            }
+            if self.mix.samples.iter().all(|c| c.lane as usize != l) && self.sample_open[l] {
+                p.text(pos2(canvas.left() + 12.0, lane.center().y), egui::Align2::LEFT_CENTER, "Drop audio files here, or + on the lane header", egui::FontId::proportional(11.0), theme::TEXT_DIM);
+            }
+        }
+        // drops from Finder
+        let dropped: Vec<std::path::PathBuf> = ui.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| crate::importer::is_audio(p)).collect());
+        if let (false, Some(q)) = (dropped.is_empty(), pointer) {
+            if let Some(l) = slanes.iter().position(|r| r.contains(q)) {
+                let beat = beat_at_x(&self.timeline, q.x).round();
+                for (n, f) in dropped.into_iter().enumerate() {
+                    self.mix.samples.push(SampleClip { lane: l as u8, path: f, start_beat: beat + 4.0 * n as f64, gain_db: 0.0 });
+                }
+                self.consumed_drop = true;
+                self.changed();
+            }
+        }
+        let mut remove: Option<usize> = None;
+        let mut dup: Option<usize> = None;
+        let mut edited = false;
+        for j in 0..self.mix.samples.len() {
+            let c = self.mix.samples[j].clone();
+            let Some(lane) = slanes.get(c.lane as usize).copied() else { continue };
+            let (dur, peaks) = self.sample_info(&c.path).unwrap_or((2.0, Default::default()));
+            let t0 = self.timeline.sec_at_beat(c.start_beat);
+            let r = Rect::from_min_max(pos2(x_of(t0), lane.top() + 2.0), pos2(x_of(t0 + dur).max(x_of(t0) + 6.0), lane.bottom() - 2.0));
+            if r.right() < canvas.left() || r.left() > canvas.right() {
+                continue;
+            }
+            let pc = p.with_clip_rect(r.intersect(canvas));
+            pc.rect_filled(r, 4.0, theme::blend(theme::PANEL, SAMPLE_COLOR, 0.35));
+            let name = c.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            pc.text(r.left_top() + vec2(5.0, 2.0), egui::Align2::LEFT_TOP, &name, egui::FontId::proportional(11.0), Color32::WHITE);
+            if r.height() > 24.0 && !peaks.is_empty() {
+                let cy = r.center().y + 6.0;
+                let hmax = (r.height() - 18.0) * 0.5;
+                let mut mesh = egui::Mesh::default();
+                let x0 = r.left().max(canvas.left());
+                let mut x = x0;
+                while x < r.right().min(canvas.right()) {
+                    let t = (x - r.left()) / self.zoom;
+                    let v = peaks.get((t * 100.0) as usize).copied().unwrap_or(0.0).min(1.0);
+                    mesh.add_colored_rect(Rect::from_min_max(pos2(x, cy - v * hmax), pos2(x + 1.0, cy + v * hmax)), SAMPLE_COLOR);
+                    x += 1.0;
+                }
+                pc.add(egui::Shape::mesh(mesh));
+            }
+            pc.rect_stroke(r, 4.0, Stroke::new(1.0, SAMPLE_COLOR), StrokeKind::Inside);
+            let resp = ui.interact(r.intersect(canvas), Id::new(("sample-clip", j)), Sense::click_and_drag());
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(if resp.dragged() { CursorIcon::Grabbing } else { CursorIcon::Grab });
+            }
+            if resp.dragged() {
+                if let Some(q) = ui.input(|i| i.pointer.latest_pos()) {
+                    let nb = beat_at_x(&self.timeline, x_of(t0) + resp.drag_delta().x).max(0.0);
+                    let snapped = if ui.input(|i| i.modifiers.shift) { nb } else { nb.round() };
+                    if (snapped - c.start_beat).abs() > 1e-6 {
+                        self.mix.samples[j].start_beat = snapped;
+                        edited = true;
+                    }
+                    // move between lanes
+                    if let Some(nl) = slanes.iter().position(|lr| lr.contains(q)) {
+                        if nl != c.lane as usize {
+                            self.mix.samples[j].lane = nl as u8;
+                            edited = true;
+                        }
+                    }
+                }
+            }
+            resp.context_menu(|ui| {
+                ui.label(RichText::new(&name).strong());
+                let mut g = self.mix.samples[j].gain_db;
+                if ui.add(egui::Slider::new(&mut g, -24.0..=6.0).suffix(" dB").text("Gain")).changed() {
+                    self.mix.samples[j].gain_db = g;
+                    edited = true;
+                }
+                if ui.button("Duplicate (1 bar later)").clicked() {
+                    dup = Some(j);
+                    ui.close();
+                }
+                if ui.button("Delete").clicked() {
+                    remove = Some(j);
+                    ui.close();
+                }
+            })
+            .map(|_| ());
+            resp.on_hover_text(format!("{name} · {:.1} s · drag to move (snaps to beats, Shift: free) · right-click for more", dur));
+        }
+        if let Some(j) = dup {
+            let mut c = self.mix.samples[j].clone();
+            c.start_beat += 4.0;
+            self.mix.samples.push(c);
+            edited = true;
+        }
+        if let Some(j) = remove {
+            self.mix.samples.remove(j);
+            edited = true;
+        }
+        if edited {
+            self.changed();
+        }
     }
 
     /// Both tracks of transition `k` have stems.

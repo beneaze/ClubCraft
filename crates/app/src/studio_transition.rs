@@ -7,7 +7,7 @@ use crate::studio::StudioView;
 use crate::studio_timeline::{EQ_COLORS, FILTER_COLOR, VOLUME_COLOR};
 use crate::theme;
 use crate::waveform::{self, WaveParams, WaveStyle};
-use clubcraft_core::{Param, Side, StemKind, TrackId, Transition, TransitionStyle};
+use clubcraft_core::{Mode, Param, Side, StemKind, TrackId, Transition, TransitionStyle};
 use eframe::egui::{self, pos2, vec2, Color32, Id, Rect, RichText, Sense, Stroke, StrokeKind, Ui};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -37,6 +37,93 @@ impl ParamGroup {
             ParamGroup::FilterFx => vec![(Param::Filter, "Filter", FILTER_COLOR), (Param::Echo, "Echo", Color32::from_rgb(255, 160, 90))],
         }
     }
+}
+
+/// Categories of the transition editor (DJ.Studio-like): simple choices per stem / band, or the
+/// curve editor.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum TCategory {
+    #[default]
+    Stems,
+    Equalizer,
+    Volume,
+    Effects,
+    Curves,
+}
+
+impl TCategory {
+    const ALL: [TCategory; 5] = [TCategory::Stems, TCategory::Equalizer, TCategory::Volume, TCategory::Effects, TCategory::Curves];
+    fn label(self) -> &'static str {
+        match self {
+            TCategory::Stems => "Stems",
+            TCategory::Equalizer => "Equalizer",
+            TCategory::Volume => "Volume",
+            TCategory::Effects => "Effects",
+            TCategory::Curves => "Curves (draw)",
+        }
+    }
+    fn params(self) -> Vec<Param> {
+        self.columns().into_iter().map(|c| c.0).collect()
+    }
+    fn columns(self) -> Vec<(Param, &'static str, Color32)> {
+        match self {
+            TCategory::Stems => [StemKind::Drums, StemKind::Bass, StemKind::Other, StemKind::Vocals].into_iter().map(|k| (Param::Stem(k), k.label(), theme::stem_color(k))).collect(),
+            TCategory::Equalizer => vec![(Param::EqLow, "Low", EQ_COLORS[0]), (Param::EqMid, "Mid", EQ_COLORS[1]), (Param::EqHigh, "High", EQ_COLORS[2])],
+            TCategory::Volume => vec![(Param::Volume, "Volume", Color32::from_gray(220))],
+            TCategory::Effects => vec![(Param::Filter, "Filter", FILTER_COLOR), (Param::Echo, "Echo", Color32::from_rgb(255, 160, 90))],
+            TCategory::Curves => vec![],
+        }
+    }
+}
+
+fn mode_help(p: Param, m: Mode) -> &'static str {
+    match (p, m) {
+        (Param::Stem(_), Mode::Off) => "Silent on both tracks during the transition",
+        (Param::Stem(_), Mode::Swap) => "The old track's stem plays until the middle, then the new one's",
+        (Param::Stem(_), Mode::Crossfade) => "Handed over between 40 % and 60 % of the transition",
+        (Param::Stem(_), Mode::Full) => "Both tracks keep it for the whole transition",
+        (_, Mode::Off) => "No change",
+        (_, Mode::Swap) => "Switch at the middle of the transition",
+        (_, Mode::Crossfade) => "Gradual handover",
+        (_, Mode::Full) => "Both tracks at full level throughout (stems do the mixing)",
+        (_, Mode::Half) => "Old track fades over the second half, new one comes up over the first (DJ.Studio's bass swap)",
+        (_, Mode::SweepOut) => "High-pass sweep out of the old track",
+        (_, Mode::SweepIn) => "Low-pass sweep into the new track",
+        (_, Mode::EchoOut) => "The old track echoes out over the last bar",
+    }
+}
+
+/// A titled column in the transition editor.
+fn column(ui: &mut Ui, w: f32, h: f32, title: &str, add: impl FnOnce(&mut Ui)) {
+    egui::Frame::new().fill(theme::PANEL_HI).corner_radius(6.0).inner_margin(8.0).show(ui, |ui| {
+        ui.set_width(w - 16.0);
+        ui.set_min_height(h - 16.0);
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 3.0;
+            ui.label(RichText::new(title).strong());
+            ui.add_space(4.0);
+            add(ui);
+        });
+    });
+}
+
+/// A choice column with a coloured header (one stem / band).
+fn mode_column(ui: &mut Ui, title: &str, col: Color32, h: f32, add: impl FnOnce(&mut Ui)) {
+    egui::Frame::new().fill(theme::PANEL_HI).corner_radius(6.0).show(ui, |ui| {
+        ui.set_width(144.0);
+        ui.set_min_height(h);
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 3.0;
+            let (r, _) = ui.allocate_exact_size(vec2(144.0, 28.0), Sense::hover());
+            ui.painter().rect_filled(r, egui::CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 }, theme::blend(theme::PANEL, col, 0.65));
+            ui.painter().text(r.left_center() + vec2(10.0, 0.0), egui::Align2::LEFT_CENTER, title, egui::FontId::proportional(14.0), Color32::WHITE);
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.vertical(add);
+            });
+        });
+    });
 }
 
 fn style_help(s: TransitionStyle) -> &'static str {
@@ -85,12 +172,26 @@ impl StudioView {
         let title = |id| sh.track(id).map(|t| t.title.clone()).unwrap_or_default();
         let key = |i: usize, id| sh.analyses.get(&id).and_then(|a| a.key).map(|kk| kk.shifted(self.mix.tracks[i].key_shift));
         let (ka, kb) = (key(k, ia), key(k + 1, ib));
+        let n_tr = self.mix.transitions.len();
+        let locked = self.mix.transitions[k].locked;
         let mut changed = false;
 
         // ------------------------------------------------------------ header
         ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("Transition {} ▶ {}", k + 1, k + 2)).size(15.0).strong());
-            ui.add_space(8.0);
+            ui.spacing_mut().item_spacing.x = 6.0;
+            if ui.add_enabled(k > 0, egui::Button::new("‹").min_size(vec2(24.0, 24.0))).on_hover_text("Previous transition ([)").clicked() {
+                self.selection = crate::studio::Selection::Transition(k - 1);
+            }
+            ui.label(RichText::new(format!("Transition {}", k + 1)).size(15.0).strong());
+            if ui.add_enabled(k + 1 < n_tr, egui::Button::new("›").min_size(vec2(24.0, 24.0))).on_hover_text("Next transition (])").clicked() {
+                self.selection = crate::studio::Selection::Transition(k + 1);
+            }
+            let lock_txt = if locked { "🔒 Locked" } else { "🔓 Lock" };
+            if crate::widgets::toggle(ui, locked, lock_txt, theme::accent(), vec2(78.0, 22.0)).on_hover_text("A locked transition keeps its mix points, length and curves when you harmonize or recompute mix points, and can't be edited or dragged").clicked() {
+                self.mix.transitions[k].locked = !locked;
+                changed = true;
+            }
+            ui.add_space(6.0);
             for (n, (id, kk, col)) in [(ia, ka, theme::deck_color(k % 2)), (ib, kb, theme::deck_color((k + 1) % 2))].into_iter().enumerate() {
                 if n == 1 {
                     ui.label(RichText::new("▶").color(theme::TEXT_DIM));
@@ -98,17 +199,43 @@ impl StudioView {
                 if let Some(kk) = kk {
                     key_badge(ui, kk);
                 }
-                ui.label(RichText::new(crate::studio::truncate(&title(id), 30)).color(col));
+                ui.label(RichText::new(crate::studio::truncate(&title(id), 26)).color(col));
             }
             if let (Some(a), Some(b)) = (ka, kb) {
                 let c = a.compatibility(b);
                 let (txt, col) = if c >= 0.85 { ("harmonic", theme::OK) } else if c >= 0.5 { ("acceptable", theme::WARN) } else { ("key clash", Color32::from_rgb(255, 90, 90)) };
-                ui.label(RichText::new(txt).color(col).size(12.0)).on_hover_text(if c < 0.5 { "Try a key shift on one of the tracks (select the track)" } else { "Camelot-compatible keys" });
+                ui.label(RichText::new(txt).color(col).size(12.0));
             }
-            ui.add_space(12.0);
-            if ui.button("🎤 Find vocal-over point").on_hover_text("Find where the outgoing vocals sound best over the incoming instrumental").clicked() {
-                self.pending.push(crate::studio::StudioAction::FindVocalOver(k));
-            }
+            ui.separator();
+            ui.add_enabled_ui(!locked, |ui| {
+                let tr = &mut self.mix.transitions[k];
+                for bars in [4u32, 8, 16, 32] {
+                    if ui.selectable_label(tr.beats == bars * 4, format!("{bars}")).on_hover_text("Length in bars").clicked() && tr.beats != bars * 4 {
+                        let lanes = if tr.style == TransitionStyle::Custom { crate::studio::scale_lanes(&tr.lanes, tr.beats as f32, (bars * 4) as f32) } else { tr.style.lanes((bars * 4) as f32) };
+                        tr.beats = bars * 4;
+                        tr.lanes = lanes;
+                        changed = true;
+                    }
+                }
+                ui.label(RichText::new("bars").color(theme::TEXT_DIM));
+                ui.add_space(6.0);
+                let bar = self.timeline.tracks.get(k).map(|t| t.grid.bar_len()).unwrap_or(2.0);
+                for (lbl, d) in [("−8", -8.0), ("−1", -1.0), ("+1", 1.0), ("+8", 8.0)] {
+                    if ui.small_button(lbl).on_hover_text("Move the transition by bars (the incoming track moves with it)").clicked() {
+                        let mt = &mut self.mix.tracks[k];
+                        let nv = mt.mix_out + d * bar;
+                        if nv > mt.mix_in + 2.0 * bar {
+                            mt.mix_out = nv;
+                            changed = true;
+                        }
+                    }
+                }
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("🎤 Find vocal-over point").on_hover_text("Find where the outgoing vocals sound best over the incoming instrumental").clicked() {
+                    self.pending.push(crate::studio::StudioAction::FindVocalOver(k));
+                }
+            });
         });
         // what you hear differs from the curves: no stems yet
         if self.mix.transitions[k].uses_stems() && !self.stems_ok(sh, k) {
@@ -161,63 +288,73 @@ impl StudioView {
                 .size(12.0));
             }
         }
+        if locked {
+            ui.label(RichText::new("Locked: harmonize and automatic mix points keep this transition as it is. Unlock it to change it.").color(theme::TEXT_DIM).size(12.0));
+        }
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            let tr = &mut self.mix.transitions[k];
-            ui.label(RichText::new("Style").color(theme::TEXT_DIM));
-            egui::ComboBox::from_id_salt(("tstyle", k)).width(130.0).selected_text(tr.style.label()).show_ui(ui, |ui| {
-                for s in TransitionStyle::ALL {
-                    if ui.selectable_label(tr.style == s, s.label()).on_hover_text(style_help(s)).clicked() && tr.style != s {
-                        *tr = Transition::new(s, tr.beats);
-                        changed = true;
+
+        // ------------------------------------------------------------ presets · categories · choices
+        ui.add_enabled_ui(!locked, |ui| {
+            ui.horizontal_top(|ui| {
+                let h = (ui.available_height() - 4.0).max(150.0);
+                column(ui, 190.0, h, "Presets", |ui| {
+                    let tr = &mut self.mix.transitions[k];
+                    for st in TransitionStyle::ALL.into_iter().filter(|s| *s != TransitionStyle::Custom) {
+                        let sel = tr.style == st;
+                        if ui.add_sized([170.0, 24.0], egui::Button::selectable(sel, st.label())).on_hover_text(style_help(st)).clicked() && !sel {
+                            *tr = Transition::new(st, tr.beats);
+                            changed = true;
+                        }
                     }
-                }
+                    if tr.style == TransitionStyle::Custom {
+                        ui.label(RichText::new("Custom (edited)").size(11.0).color(theme::TEXT_DIM));
+                    }
+                });
+                column(ui, 170.0, h, "Categories", |ui| {
+                    let tr = &self.mix.transitions[k];
+                    for c in TCategory::ALL {
+                        let n = c.params().iter().filter(|p| tr.lanes.iter().any(|l| l.param == **p && l.points.iter().any(|q| (q.1 - p.neutral()).abs() > 1e-3))).count();
+                        let label = if n > 0 && c != TCategory::Curves { format!("{}   {n}", c.label()) } else { c.label().to_string() };
+                        if ui.add_sized([150.0, 26.0], egui::Button::selectable(self.tcat == c, label)).clicked() {
+                            self.tcat = c;
+                        }
+                    }
+                });
+                ui.vertical(|ui| {
+                    let cat = self.tcat;
+                    if cat == TCategory::Curves {
+                        ui.horizontal(|ui| {
+                            for g in ParamGroup::ALL {
+                                if ui.add(egui::Button::new(RichText::new(g.label()).size(12.5)).selected(self.tgroup == g).min_size(vec2(96.0, 22.0))).clicked() {
+                                    self.tgroup = g;
+                                }
+                            }
+                            ui.label(RichText::new("drag in a band to draw · right-click removes a point").size(11.0).color(theme::TEXT_DIM));
+                        });
+                        egui::ScrollArea::vertical().id_salt(("tedit-scroll", k)).show(ui, |ui| {
+                            changed |= self.aligned_editor(ui, sh, k);
+                        });
+                    } else {
+                        ui.horizontal_top(|ui| {
+                            for (param, name, col) in cat.columns() {
+                                let tr = &mut self.mix.transitions[k];
+                                let cur = tr.mode(param);
+                                mode_column(ui, name, col, h, |ui| {
+                                    for &m in Mode::for_param(param) {
+                                        if ui.add_sized([128.0, 26.0], egui::Button::selectable(cur == Some(m), m.label())).on_hover_text(mode_help(param, m)).clicked() && cur != Some(m) {
+                                            tr.set_mode(param, m);
+                                            changed = true;
+                                        }
+                                    }
+                                    if cur.is_none() {
+                                        ui.label(RichText::new("preset curve").size(10.5).color(theme::TEXT_DIM)).on_hover_text("This parameter follows the preset's own curve (see Curves)");
+                                    }
+                                });
+                            }
+                        });
+                    }
+                });
             });
-            ui.add_space(10.0);
-            ui.label(RichText::new("Length").color(theme::TEXT_DIM));
-            for bars in [2u32, 4, 8, 16, 32] {
-                if ui.selectable_label(tr.beats == bars * 4, format!("{bars}")).clicked() && tr.beats != bars * 4 {
-                    let lanes = if tr.style == TransitionStyle::Custom { crate::studio::scale_lanes(&tr.lanes, tr.beats as f32, (bars * 4) as f32) } else { tr.style.lanes((bars * 4) as f32) };
-                    tr.beats = bars * 4;
-                    tr.lanes = lanes;
-                    changed = true;
-                }
-            }
-            ui.label(RichText::new("bars").color(theme::TEXT_DIM));
-            ui.add_space(10.0);
-            ui.label(RichText::new("Move").color(theme::TEXT_DIM));
-            let bar = self.timeline.tracks.get(k).map(|t| t.grid.bar_len()).unwrap_or(2.0);
-            for (lbl, d) in [("−8", -8.0), ("−1", -1.0), ("+1", 1.0), ("+8", 8.0)] {
-                if ui.small_button(lbl).on_hover_text("Move the transition by bars (the incoming track moves with it)").clicked() {
-                    let mt = &mut self.mix.tracks[k];
-                    let nv = mt.mix_out + d * bar;
-                    if nv > mt.mix_in + 2.0 * bar {
-                        mt.mix_out = nv;
-                        changed = true;
-                    }
-                }
-            }
-            let tr = &mut self.mix.transitions[k];
-            if tr.style == TransitionStyle::Custom && ui.small_button("Reset curves").clicked() {
-                *tr = Transition::new(TransitionStyle::StemBlend, tr.beats);
-                changed = true;
-            }
-            ui.label(RichText::new(style_help(tr.style)).size(11.0).color(theme::TEXT_DIM));
-        });
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            for g in ParamGroup::ALL {
-                if ui.add(egui::Button::new(RichText::new(g.label()).size(12.5)).selected(self.tgroup == g).min_size(vec2(96.0, 22.0))).clicked() {
-                    self.tgroup = g;
-                }
-            }
-            ui.add_space(8.0);
-            ui.label(RichText::new("drag in a band to draw · right-click removes a point").size(11.0).color(theme::TEXT_DIM));
-        });
-        ui.add_space(4.0);
-        egui::ScrollArea::vertical().id_salt(("tedit-scroll", k)).show(ui, |ui| {
-            changed |= self.aligned_editor(ui, sh, k);
         });
         if changed {
             self.changed();

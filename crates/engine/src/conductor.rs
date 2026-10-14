@@ -57,6 +57,10 @@ pub struct MixSchedule {
     pub decks: [DeckId; 2],
     /// Empty (and hand back) slots outside [`Self::window_at`] while playing.
     pub release_finished: bool,
+    /// Sample lane clips (audio decoded when the schedule is built).
+    pub samples: Vec<crate::samples::SchedSample>,
+    /// A sample lane is soloed (silences the decks).
+    pub sample_solo: bool,
 }
 
 impl std::fmt::Debug for MixSchedule {
@@ -98,10 +102,11 @@ impl MixSchedule {
 
     fn build(mix: &Mix, analyses: &dyn Fn(TrackId) -> Option<Analysis>, decks: [DeckId; 2]) -> Self {
         let timeline = MixTimeline::build(mix, analyses);
+        let timeline = &timeline;
         let lanes = std::array::from_fn(|i| mix.lanes.get(i).copied().unwrap_or_default());
         MixSchedule {
             id: NEXT_SCHEDULE_ID.fetch_add(1, Ordering::Relaxed),
-            timeline,
+            timeline: timeline.clone(),
             track_ids: mix.tracks.iter().map(|t| t.track_id).collect(),
             slots: vec![None; mix.tracks.len()],
             transitions: mix.transitions.clone(),
@@ -109,6 +114,17 @@ impl MixSchedule {
             lanes,
             decks,
             release_finished: true,
+            samples: mix
+                .samples
+                .iter()
+                .map(|c| crate::samples::SchedSample {
+                    lane: c.lane as usize,
+                    start: timeline.sec_at_beat(c.start_beat),
+                    gain: mix.sample_lane_gain(c.lane as usize) * 10f32.powf(c.gain_db / 20.0),
+                    audio: crate::samples::load(&c.path),
+                })
+                .collect(),
+            sample_solo: mix.sample_lanes.iter().any(|l| l.solo),
         }
     }
 
@@ -131,7 +147,7 @@ impl MixSchedule {
 
     /// Track `i` is audible given the lanes' mute / solo (same rule as [`Mix::lane_audible`]).
     pub fn lane_audible(&self, i: usize) -> bool {
-        let any_solo = self.lanes.iter().any(|l| l.solo);
+        let any_solo = self.sample_solo || self.lanes.iter().any(|l| l.solo);
         let l = self.lane_of(i);
         !l.mute && (!any_solo || l.solo)
     }
@@ -338,6 +354,18 @@ impl Conductor {
         self.state
     }
 
+    /// Mix the sample lanes for the next block (call before [`Self::step`]). Returns whether
+    /// anything was written to `out`.
+    pub fn render_samples(&self, n: usize, sr: f64, out: &mut [f32]) -> bool {
+        match (&self.sched, self.playing) {
+            (Some(s), true) if !s.samples.is_empty() => {
+                out[..n * 2].fill(0.0);
+                crate::samples::render(&s.samples, self.time, n, sr, &mut out[..n * 2])
+            }
+            _ => false,
+        }
+    }
+
     /// Advance by one block of `n` frames at `sr`. Old tracks are passed to `drop_track`.
     pub fn step(&mut self, decks: &mut [Deck], mixer: &mut Mixer, n: usize, sr: f64, drop_track: &mut dyn FnMut(Arc<LoadedTrack>)) {
         let Some(s) = self.sched.as_mut() else {
@@ -470,7 +498,7 @@ impl Conductor {
                 // transition EQ modulates (gains multiply), and a non-neutral transition filter
                 // overrides the lane filter.
                 let lane = s.lanes[i % MIX_LANES];
-                let any_solo = s.lanes.iter().any(|l| l.solo);
+                let any_solo = s.sample_solo || s.lanes.iter().any(|l| l.solo);
                 if lane.mute || (any_solo && !lane.solo) {
                     vol = 0.0;
                 }

@@ -189,7 +189,7 @@ impl Default for Prefs {
             ui_scale: 1.0,
             start_on_home: true,
             accent: Accent::White,
-            version: 2,
+            version: 3,
             cue_button: CueButton::Cdj,
             hot_cue_press: HotCuePress::Preview,
             load_position: LoadPosition::FirstBeat,
@@ -209,7 +209,7 @@ impl Default for Prefs {
             stem_waveforms: true,
             soft_stem_colors: true,
             wave_zoom_secs: 8.0,
-            separate_stems: true,
+            separate_stems: false,
             stem_quality: if cfg!(target_os = "macos") { "best".into() } else { "high".into() },
             deep_structure: false,
             bpm_min: 70.0,
@@ -236,8 +236,13 @@ impl Prefs {
         if p.version < 2 {
             // white is the new default accent (it used to be pink)
             p.accent = Accent::White;
-            p.version = 2;
         }
+        if p.version < 3 {
+            // stems are separated on demand (transition button, export), not for every track in
+            // the background: that kept the machine busy for hours
+            p.separate_stems = false;
+        }
+        p.version = p.version.max(3);
         p
     }
 

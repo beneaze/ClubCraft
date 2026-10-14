@@ -126,7 +126,25 @@ pub fn order_tracks(items: &[OrderItem], o: &OrderOptions) -> Vec<TrackId> {
     }
     let m: Vec<Vec<f32>> =
         (0..n).map(|i| (0..n).map(|j| if i == j { 0.0 } else { pair_cost(&items[i], &items[j], o) }).collect()).collect();
+    order_indices(items, &m, o).into_iter().map(|i| items[i].id).collect()
+}
 
+/// Order groups of tracks that must stay together in their order (locked transitions): the cost
+/// of `a → b` is that of the last track of `a` into the first of `b`. Returns group indices.
+pub fn order_groups(groups: &[Vec<OrderItem>], o: &OrderOptions) -> Vec<usize> {
+    let n = groups.len();
+    if n < 3 {
+        return (0..n).collect();
+    }
+    let m: Vec<Vec<f32>> = (0..n)
+        .map(|i| (0..n).map(|j| if i == j { 0.0 } else { pair_cost(groups[i].last().unwrap(), &groups[j][0], o) }).collect())
+        .collect();
+    let reps: Vec<OrderItem> = groups.iter().map(|g| g[0].clone()).collect();
+    order_indices(&reps, &m, o)
+}
+
+fn order_indices(items: &[OrderItem], m: &[Vec<f32>], o: &OrderOptions) -> Vec<usize> {
+    let n = items.len();
     // Greedy start: begin at the locked first track or the slowest / lowest energy track.
     let mut start = 0;
     if !o.lock_first {
@@ -159,7 +177,7 @@ pub fn order_tracks(items: &[OrderItem], o: &OrderOptions) -> Vec<TrackId> {
     let lo = if o.lock_first { 1 } else { 0 };
     let hi = if o.lock_last { n - 1 } else { n }; // exclusive
     if hi - lo < 2 {
-        return order.iter().map(|&i| items[i].id).collect();
+        return order;
     }
     let mut rng = 0x2545F4914F6CDD1Du64;
     let mut rand = move || {
@@ -168,7 +186,7 @@ pub fn order_tracks(items: &[OrderItem], o: &OrderOptions) -> Vec<TrackId> {
         rng ^= rng << 17;
         rng
     };
-    let mut cur_cost = total_cost(items, &order, &m, o);
+    let mut cur_cost = total_cost(items, &order, m, o);
     let mut best = order.clone();
     let mut best_cost = cur_cost;
     let iters = o.iterations.max(1);
@@ -188,7 +206,7 @@ pub fn order_tracks(items: &[OrderItem], o: &OrderOptions) -> Vec<TrackId> {
             let t = cand.remove(a);
             cand.insert(b, t);
         }
-        let c = total_cost(items, &cand, &m, o);
+        let c = total_cost(items, &cand, m, o);
         let accept = c < cur_cost || {
             let p = (-(c - cur_cost) / temp).exp();
             (rand() % 1_000_000) as f32 / 1_000_000.0 < p
@@ -202,7 +220,7 @@ pub fn order_tracks(items: &[OrderItem], o: &OrderOptions) -> Vec<TrackId> {
             }
         }
     }
-    best.iter().map(|&i| items[i].id).collect()
+    best
 }
 
 // ------------------------------------------------------------------ mix planning

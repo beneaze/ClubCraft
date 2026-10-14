@@ -193,6 +193,9 @@ pub struct Mixer {
     hp_meter: Meter,
     pub auto_gain: bool,
     post: Vec<f32>,
+    /// Extra signal added to the master before its gain and limiter (sample lanes), `n` frames.
+    pub extra: Vec<f32>,
+    pub extra_on: bool,
 }
 
 impl Mixer {
@@ -213,6 +216,8 @@ impl Mixer {
             hp_meter: Meter::new(sr),
             auto_gain: true,
             post: vec![0.0; MAX_BLOCK * 2],
+            extra: vec![0.0; MAX_BLOCK * 2],
+            extra_on: false,
         }
     }
 
@@ -260,6 +265,11 @@ impl Mixer {
                 for (c, b) in cue.iter_mut().zip(buf.iter()) {
                     *c += *b;
                 }
+            }
+        }
+        if self.extra_on {
+            for (m, e) in master.iter_mut().zip(&self.extra[..n * 2]) {
+                *m += *e;
             }
         }
         self.master_gain.set(db_to_gain(self.master_gain_db));

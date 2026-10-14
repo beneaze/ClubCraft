@@ -15,6 +15,8 @@ pub enum MenuCmd {
     ViewStudio,
     ViewLive,
     MashupFinder,
+    Undo,
+    Redo,
     PlayPause,
     OpenDataFolder,
     Help,
@@ -43,6 +45,8 @@ mod imp {
         ("view-studio", MenuCmd::ViewStudio),
         ("view-live", MenuCmd::ViewLive),
         ("mashups", MenuCmd::MashupFinder),
+        ("undo", MenuCmd::Undo),
+        ("redo", MenuCmd::Redo),
         ("play-pause", MenuCmd::PlayPause),
         ("data-folder", MenuCmd::OpenDataFolder),
         ("help", MenuCmd::Help),
@@ -102,8 +106,11 @@ mod imp {
                 "Edit",
                 true,
                 &[
-                    &PredefinedMenuItem::undo(None),
-                    &PredefinedMenuItem::redo(None),
+                    // ClubCraft's own undo (the system items would swallow ⌘Z for the window's
+                    // empty undo manager). No key equivalents: ⌘Z / ⇧⌘Z reach the app, so
+                    // text fields keep their own undo too.
+                    &item("undo", "Undo Mix Edit  (⌘Z)", None),
+                    &item("redo", "Redo Mix Edit  (⇧⌘Z)", None),
                     &PredefinedMenuItem::separator(),
                     &PredefinedMenuItem::cut(None),
                     &PredefinedMenuItem::copy(None),

@@ -90,6 +90,8 @@ pub struct StudioView {
     pub playing: bool,
     pub position: f64,
     pub render_progress: Option<f32>,
+    /// Text on the render progress bar (empty = "Rendering…").
+    pub render_label: String,
     pub message: String,
     pub timeline_dirty: bool,
     /// Set when the mix changed; the app pushes edits into a running preview.
@@ -99,12 +101,19 @@ pub struct StudioView {
     pub drag: Option<crate::studio_timeline::Drag>,
     pub drag_acc: f32,
     pub tgroup: crate::studio_transition::ParamGroup,
+    pub tcat: crate::studio_transition::TCategory,
     /// Zoom to fit the whole mix on the next frame.
     pub fit_request: bool,
     /// Defaults for new transitions (from the preferences).
     pub plan_opts: PlanOptions,
     /// Collapsed lanes in the timeline and the track strip.
     pub lane_collapsed: [bool; clubcraft_core::MIX_LANES],
+    /// Sample lanes expanded.
+    pub sample_open: [bool; clubcraft_core::SAMPLE_LANES],
+    /// Decoded sample overviews (duration, peaks).
+    pub sample_cache: std::collections::HashMap<std::path::PathBuf, Option<(f64, std::sync::Arc<Vec<f32>>)>>,
+    /// Files dropped this frame went onto a sample lane (the app must not import them).
+    pub consumed_drop: bool,
 }
 
 impl Default for StudioView {
@@ -132,6 +141,7 @@ impl Default for StudioView {
             playing: false,
             position: 0.0,
             render_progress: None,
+            render_label: String::new(),
             message: String::new(),
             timeline_dirty: true,
             edited: false,
@@ -140,11 +150,27 @@ impl Default for StudioView {
             drag: None,
             drag_acc: 0.0,
             tgroup: Default::default(),
+            tcat: Default::default(),
             fit_request: true,
             plan_opts: PlanOptions::default(),
             lane_collapsed: [false; clubcraft_core::MIX_LANES],
+            sample_open: [true, false],
+            sample_cache: Default::default(),
+            consumed_drop: false,
         }
     }
+}
+
+/// A drop indicator line along the top of a hovered playlist row.
+fn ui_line(r: &egui::Response) {
+    r.ctx.layer_painter(r.layer_id).line_segment([r.rect.left_top(), r.rect.right_top()], Stroke::new(2.0, theme::accent()));
+}
+
+/// Key badge in the playlist.
+fn key_chip(ui: &mut Ui, k: clubcraft_core::Key) {
+    let (r, _) = ui.allocate_exact_size(vec2(38.0, 20.0), Sense::hover());
+    ui.painter().rect_stroke(r, 4.0, Stroke::new(1.5, theme::key_color(k)), StrokeKind::Inside);
+    ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, theme::key_label(k), egui::FontId::proportional(11.5), theme::key_color(k));
 }
 
 fn analysis_of(sh: &Shared, id: TrackId) -> Option<Analysis> {
@@ -246,8 +272,23 @@ impl StudioView {
     }
 
     pub fn harmonize(&mut self, sh: &Shared) {
-        let items: Vec<OrderItem> = self.mix.tracks.iter().map(|t| OrderItem::from_analysis(t.track_id, sh.analyses.get(&t.track_id))).collect();
-        let order = planner::order_tracks(&items, &self.order_opts);
+        let item = |t: &MixTrack| OrderItem::from_analysis(t.track_id, sh.analyses.get(&t.track_id));
+        let order: Vec<TrackId> = if self.mix.transitions.iter().any(|t| t.locked) {
+            // tracks joined by locked transitions move as one group, in their order
+            let mut groups: Vec<Vec<usize>> = vec![vec![0]];
+            for i in 1..self.mix.tracks.len() {
+                if self.mix.transitions.get(i - 1).is_some_and(|t| t.locked) {
+                    groups.last_mut().unwrap().push(i);
+                } else {
+                    groups.push(vec![i]);
+                }
+            }
+            let items: Vec<Vec<OrderItem>> = groups.iter().map(|g| g.iter().map(|&i| item(&self.mix.tracks[i])).collect()).collect();
+            planner::order_groups(&items, &self.order_opts).into_iter().flat_map(|g| groups[g].iter().map(|&i| self.mix.tracks[i].track_id).collect::<Vec<_>>()).collect()
+        } else {
+            let items: Vec<OrderItem> = self.mix.tracks.iter().map(item).collect();
+            planner::order_tracks(&items, &self.order_opts)
+        };
         self.replan(sh, &order);
         self.message = "Re-ordered for harmonic flow, tempo and energy".into();
     }
@@ -259,6 +300,18 @@ impl StudioView {
         planned.id = self.mix.id;
         planned.tempo = self.mix.tempo;
         planned.keylock = self.mix.keylock;
+        planned.lanes = self.mix.lanes.clone();
+        // locked transitions keep their mix points, curves and key relation
+        let old = &self.mix;
+        for k in 0..planned.transitions.len() {
+            let (a, b) = (planned.tracks[k].track_id, planned.tracks[k + 1].track_id);
+            if let Some(j) = (0..old.transitions.len()).find(|&j| old.transitions[j].locked && old.tracks[j].track_id == a && old.tracks[j + 1].track_id == b) {
+                planned.tracks[k].mix_out = old.tracks[j].mix_out;
+                planned.tracks[k + 1].mix_in = old.tracks[j + 1].mix_in;
+                planned.tracks[k + 1].key_shift = planned.tracks[k].key_shift + (old.tracks[j + 1].key_shift - old.tracks[j].key_shift);
+                planned.transitions[k] = old.transitions[j].clone();
+            }
+        }
         self.mix = planned;
         self.changed();
     }
@@ -285,7 +338,8 @@ impl StudioView {
                 Tab::Zoom => (54.0, 50.0),
                 Tab::Playlist => (100.0, 90.0),
                 Tab::Master => (90.0, 80.0),
-                Tab::Track | Tab::Transition => (380.0, 220.0),
+                Tab::Track => (330.0, 220.0),
+                Tab::Transition => (310.0, 250.0),
                 Tab::Mashups => (430.0, 240.0),
             };
             egui::Panel::bottom(format!("studio-tab-{tab:?}"))
@@ -393,7 +447,244 @@ impl StudioView {
         let _ = sh;
     }
 
-    fn track_at_playhead(&self) -> Option<usize> {
+    /// Re-plan the mix for a new order, keeping the transition (and mix points) of every pair of
+    /// tracks that stays adjacent when `keep_all`, else only of locked pairs.
+    pub fn replan_keep(&mut self, sh: &Shared, order: &[TrackId], keep_all: bool) {
+        let old = self.mix.clone();
+        let mut planned = planner::plan_mix(&self.mix.name, order, &|id| analysis_of(sh, id), &self.plan_opts);
+        planned.id = old.id;
+        planned.tempo = old.tempo;
+        planned.keylock = old.keylock;
+        planned.lanes = old.lanes.clone();
+        for k in 0..planned.transitions.len() {
+            let (a, b) = (planned.tracks[k].track_id, planned.tracks[k + 1].track_id);
+            if let Some(j) = (0..old.transitions.len()).find(|&j| (keep_all || old.transitions[j].locked) && old.tracks[j].track_id == a && old.tracks[j + 1].track_id == b) {
+                planned.tracks[k].mix_out = old.tracks[j].mix_out;
+                planned.tracks[k + 1].mix_in = old.tracks[j + 1].mix_in;
+                planned.tracks[k + 1].key_shift = planned.tracks[k].key_shift + (old.tracks[j + 1].key_shift - old.tracks[j].key_shift);
+                planned.transitions[k] = old.transitions[j].clone();
+            }
+        }
+        // tracks keep their own gain
+        for t in planned.tracks.iter_mut() {
+            if let Some(o) = old.tracks.iter().find(|o| o.track_id == t.track_id) {
+                t.gain_db = o.gain_db;
+            }
+        }
+        self.mix = planned;
+        self.changed();
+    }
+
+    /// The playlist: one row per track (like DJ.Studio's playlist view).
+    fn playlist_panel(&mut self, ui: &mut Ui, sh: &Shared) {
+        #[derive(Clone)]
+        struct RowDrag(usize);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.menu_button("+ Add tracks", |ui| {
+                ui.set_min_width(380.0);
+                let q_id = egui::Id::new("playlist-add-q");
+                let mut q: String = ui.data_mut(|d| d.get_temp(q_id).unwrap_or_default());
+                ui.add(egui::TextEdit::singleline(&mut q).hint_text("search the library").desired_width(360.0));
+                ui.data_mut(|d| d.insert_temp(q_id, q.clone()));
+                let ql = q.to_lowercase();
+                egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                    let mut n = 0;
+                    for t in &sh.tracks {
+                        if self.mix.tracks.iter().any(|m| m.track_id == t.id) || (!ql.is_empty() && !crate::library_view::matches(t, &ql)) {
+                            continue;
+                        }
+                        n += 1;
+                        if n > 200 {
+                            break;
+                        }
+                        let a = sh.analyses.get(&t.id);
+                        let info = a.map(|a| format!("  {:.0} · {}", a.bpm().unwrap_or(0.0), a.key.map(theme::key_label).unwrap_or_default())).unwrap_or_default();
+                        if ui.selectable_label(false, format!("{}{info}", t.display_name())).clicked() {
+                            self.add_tracks(sh, &[t.id]);
+                        }
+                    }
+                });
+            });
+            if ui.add_enabled(self.mix.tracks.len() > 2, egui::Button::new("✨ Harmonize")).on_hover_text("Re-order for harmonic mixing, smooth tempo and an energy arc (locked transitions stay together)").clicked() {
+                self.harmonize(sh);
+            }
+            ui.menu_button("Order options ⏷", |ui| {
+                ui.set_min_width(240.0);
+                ui.label("Priority");
+                ui.horizontal(|ui| {
+                    ui.label("Tempo");
+                    ui.add(egui::Slider::new(&mut self.order_opts.key_weight, 0.0..=1.0).show_value(false));
+                    ui.label("Key");
+                });
+                ui.add(egui::Slider::new(&mut self.order_opts.energy_weight, 0.0..=1.0).text("Energy arc"));
+                ui.checkbox(&mut self.order_opts.lock_first, "Keep first track");
+                ui.checkbox(&mut self.order_opts.lock_last, "Keep last track");
+                ui.checkbox(&mut self.order_opts.allow_key_shift, "Allow ±1 semitone key shifts");
+            });
+            if ui.add_enabled(self.mix.tracks.len() > 1, egui::Button::new("Auto mix points")).on_hover_text("Recompute mix-in/out points and transition lengths from the analysed structure (locked transitions stay)").clicked() {
+                let order: Vec<TrackId> = self.mix.tracks.iter().map(|t| t.track_id).collect();
+                self.replan(sh, &order);
+            }
+            ui.label(RichText::new(format!("{} tracks · {} · drag ☰ to reorder", self.mix.tracks.len(), theme::fmt_time_short(self.timeline.total_secs))).size(11.0).color(theme::TEXT_DIM));
+        });
+        ui.add_space(4.0);
+        if self.mix.tracks.is_empty() {
+            ui.label(RichText::new("No tracks yet: use + Add tracks, or drag tracks here from the Library.").color(theme::TEXT_DIM));
+        }
+        let mut moved: Option<(usize, usize)> = None;
+        let mut remove: Option<usize> = None;
+        let mut select: Option<Selection> = None;
+        let played_key = |i: usize| self.mix.tracks.get(i).and_then(|t| sh.analyses.get(&t.track_id).and_then(|a| a.key).map(|k| k.shifted(t.key_shift)));
+        let fixed = match self.mix.tempo {
+            TempoMode::Fixed(b) => Some(b),
+            TempoMode::Glide => None,
+        };
+        let resp = ui
+            .scope(|ui| {
+                egui_extras::TableBuilder::new(ui)
+                    .id_salt("playlist")
+                    .striped(true)
+                    .sense(Sense::click())
+                    .cell_layout(Layout::left_to_right(Align::Center))
+                    .column(egui_extras::Column::exact(22.0))
+                    .column(egui_extras::Column::exact(30.0))
+                    .column(egui_extras::Column::remainder().at_least(180.0).clip(true))
+                    .column(egui_extras::Column::initial(150.0).clip(true))
+                    .column(egui_extras::Column::initial(90.0).clip(true))
+                    .column(egui_extras::Column::exact(130.0))
+                    .column(egui_extras::Column::exact(52.0))
+                    .column(egui_extras::Column::exact(46.0))
+                    .column(egui_extras::Column::exact(46.0))
+                    .column(egui_extras::Column::exact(40.0))
+                    .column(egui_extras::Column::exact(70.0))
+                    .column(egui_extras::Column::exact(28.0))
+                    .header(20.0, |mut h| {
+                        for t in ["", "#", "TITLE", "ARTIST", "GENRE", "TRANSITION IN", "TIME", "KEY", "MATCH", "NRG", "BPM", ""] {
+                            h.col(|ui| {
+                                ui.label(RichText::new(t).size(10.5).color(theme::TEXT_DIM));
+                            });
+                        }
+                    })
+                    .body(|body| {
+                        body.rows(30.0, self.mix.tracks.len(), |mut row| {
+                            let i = row.index();
+                            let mt = &self.mix.tracks[i];
+                            let t = sh.track(mt.track_id);
+                            let a = sh.analyses.get(&mt.track_id);
+                            row.set_selected(self.selection == Selection::Track(i));
+                            row.col(|ui| {
+                                let h = ui.add(egui::Label::new(RichText::new("☰").size(13.0).color(theme::TEXT_DIM)).sense(Sense::drag())).on_hover_text("Drag to reorder");
+                                if h.hovered() {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                                }
+                                h.dnd_set_drag_payload(RowDrag(i));
+                            });
+                            row.col(|ui| {
+                                ui.label(RichText::new(format!("{}", i + 1)).color(theme::TEXT_DIM));
+                            });
+                            row.col(|ui| {
+                                ui.label(t.map(|t| if t.title.is_empty() { t.display_name() } else { t.title.clone() }).unwrap_or_default());
+                            });
+                            row.col(|ui| {
+                                ui.label(RichText::new(t.map(|t| t.artist.clone()).unwrap_or_default()).color(theme::TEXT_DIM));
+                            });
+                            row.col(|ui| {
+                                ui.label(RichText::new(t.map(|t| t.genre.clone()).unwrap_or_default()).color(theme::TEXT_DIM).size(11.5));
+                            });
+                            row.col(|ui| {
+                                if i > 0 {
+                                    if let Some(tr) = self.mix.transitions.get(i - 1) {
+                                        let c = theme::style_color(tr.style);
+                                        let txt = format!("{}{} · {}", if tr.locked { "🔒 " } else { "" }, tr.style.label(), tr.beats / 4);
+                                        if ui.add(egui::Button::new(RichText::new(txt).size(11.5).color(Color32::WHITE)).fill(theme::blend(theme::PANEL, c, 0.5)).min_size(vec2(120.0, 20.0))).on_hover_text("Edit this transition").clicked() {
+                                            select = Some(Selection::Transition(i - 1));
+                                        }
+                                    }
+                                }
+                            });
+                            row.col(|ui| {
+                                ui.label(RichText::new(theme::fmt_time_short(a.map(|a| a.duration).unwrap_or(0.0))).monospace().size(12.0));
+                            });
+                            row.col(|ui| {
+                                if let Some(k) = played_key(i) {
+                                    key_chip(ui, k);
+                                }
+                            });
+                            row.col(|ui| {
+                                if let (true, Some(prev), Some(cur)) = (i > 0, played_key(i.wrapping_sub(1)), played_key(i)) {
+                                    let c = prev.compatibility(cur);
+                                    let (txt, col, tip) = if c >= 0.85 {
+                                        ("ok", theme::OK, "Harmonic with the previous track")
+                                    } else if c >= 0.5 {
+                                        ("boost", theme::WARN, "Acceptable: energy boost / diagonal move")
+                                    } else {
+                                        ("clash", Color32::from_rgb(255, 90, 90), "Key clash with the previous track: try a key shift (Track tab)")
+                                    };
+                                    let (r, resp) = ui.allocate_exact_size(vec2(40.0, 20.0), Sense::hover());
+                                    ui.painter().rect_stroke(r, 4.0, Stroke::new(1.5, col), StrokeKind::Inside);
+                                    ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, txt, egui::FontId::proportional(10.5), col);
+                                    resp.on_hover_text(tip);
+                                }
+                            });
+                            row.col(|ui| {
+                                if let Some(e) = a.and_then(|a| a.energy) {
+                                    ui.label(RichText::new(format!("{e}")).color(theme::WARN));
+                                }
+                            });
+                            row.col(|ui| {
+                                if let Some(b) = a.and_then(|a| a.bpm()) {
+                                    ui.label(RichText::new(format!("{b:.0}")).monospace());
+                                    if let Some(f) = fixed {
+                                        let pct = (f / b - 1.0) * 100.0;
+                                        if pct.abs() >= 0.5 {
+                                            ui.label(RichText::new(format!("{pct:+.0}%")).size(10.5).color(theme::TEXT_DIM));
+                                        }
+                                    }
+                                }
+                            });
+                            row.col(|ui| {
+                                if ui.add(egui::Button::new(RichText::new("🗑").size(13.0)).frame(false)).on_hover_text("Remove from the mix").clicked() {
+                                    remove = Some(i);
+                                }
+                            });
+                            let r = row.response();
+                            if let Some(p) = r.dnd_release_payload::<RowDrag>() {
+                                moved = Some((p.0, i));
+                            }
+                            if r.dnd_hover_payload::<RowDrag>().is_some() {
+                                ui_line(&r);
+                            }
+                            if r.clicked() {
+                                select = Some(Selection::Track(i));
+                            }
+                        });
+                    });
+            })
+            .response;
+        if let Some(p) = resp.dnd_release_payload::<DraggedTracks>() {
+            self.add_tracks(sh, &p.0);
+        }
+        if let Some(sel) = select {
+            self.selection = sel;
+            if matches!(sel, Selection::Track(_)) {
+                self.last_selection = sel; // stay in the playlist
+            }
+        }
+        let mut order: Vec<TrackId> = self.mix.tracks.iter().map(|t| t.track_id).collect();
+        if let Some((from, to)) = moved.filter(|(f, t)| f != t) {
+            let id = order.remove(from);
+            order.insert(to, id);
+            self.selection = Selection::None;
+            self.replan_keep(sh, &order, true);
+        } else if let Some(i) = remove {
+            order.remove(i);
+            self.selection = Selection::None;
+            self.replan_keep(sh, &order, true);
+        }
+    }
+
+    pub(crate) fn track_at_playhead(&self) -> Option<usize> {
         let n = self.timeline.tracks.len();
         (n > 0).then(|| self.timeline.tracks.iter().rposition(|t| t.start_sec <= self.position + 1e-6).unwrap_or(0).min(n - 1))
     }
@@ -472,7 +763,7 @@ impl StudioView {
         left.spacing_mut().item_spacing.x = 6.0;
         left.menu_button(RichText::new("☰ Mixes").size(13.0), |ui| {
             ui.set_min_width(260.0);
-            if ui.button("＋ New mix").clicked() {
+            if ui.button("+ New mix").clicked() {
                 *new_mix = true;
                 ui.close();
             }
@@ -537,7 +828,7 @@ impl StudioView {
         let mut right = ui.new_child(egui::UiBuilder::new().max_rect(full).layout(Layout::right_to_left(Align::Center)));
         right.spacing_mut().item_spacing.x = 6.0;
         if let Some(p) = self.render_progress {
-            right.add(egui::ProgressBar::new(p).desired_width(140.0).text("Rendering…"));
+            right.add(egui::ProgressBar::new(p).desired_width(140.0).text(if self.render_label.is_empty() { "Rendering…" } else { self.render_label.as_str() }));
         } else if right.add_enabled(has, egui::Button::new("Export…")).on_hover_text("Render the mix to WAV with a cue sheet").clicked() {
             out.push(StudioAction::Export);
         }
@@ -619,34 +910,7 @@ impl StudioView {
                     ui.label(RichText::new("Space play · Left/Right 1 bar (Shift: 8) · [ ] transitions · F follow · + − zoom · ⌘Z undo").size(11.0).color(theme::TEXT_DIM));
                 });
             }
-            Tab::Playlist => {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-                    if ui.add_enabled(self.mix.tracks.len() > 2, egui::Button::new("✨ Harmonize")).on_hover_text("Re-order for harmonic mixing, smooth tempo and an energy arc").clicked() {
-                        self.harmonize(sh);
-                    }
-                    ui.menu_button("Order options ⏷", |ui| {
-                        ui.set_min_width(240.0);
-                        ui.label("Priority");
-                        ui.horizontal(|ui| {
-                            ui.label("Tempo");
-                            ui.add(egui::Slider::new(&mut self.order_opts.key_weight, 0.0..=1.0).show_value(false));
-                            ui.label("Key");
-                        });
-                        ui.add(egui::Slider::new(&mut self.order_opts.energy_weight, 0.0..=1.0).text("Energy arc"));
-                        ui.checkbox(&mut self.order_opts.lock_first, "Keep first track");
-                        ui.checkbox(&mut self.order_opts.lock_last, "Keep last track");
-                        ui.checkbox(&mut self.order_opts.allow_key_shift, "Allow ±1 semitone key shifts");
-                    });
-                    if ui.add_enabled(self.mix.tracks.len() > 1, egui::Button::new("Auto mix points")).on_hover_text("Recompute mix-in/out points and transition lengths from the analysed structure").clicked() {
-                        let order: Vec<TrackId> = self.mix.tracks.iter().map(|t| t.track_id).collect();
-                        self.replan(sh, &order);
-                    }
-                    ui.label(RichText::new(format!("{} tracks · drag tracks from the Library onto the strip, drag cards to reorder", self.mix.tracks.len())).size(11.0).color(theme::TEXT_DIM));
-                });
-                ui.add_space(4.0);
-                self.order_strip(ui, sh);
-            }
+            Tab::Playlist => self.playlist_panel(ui, sh),
             Tab::Transition => match self.selection {
                 Selection::Transition(k) if k < self.mix.transitions.len() && k + 1 < self.mix.tracks.len() => self.transition_editor(ui, sh, k),
                 _ => hint(ui, "Click a transition (the coloured chip above the lanes) to edit it. A mix needs at least two tracks."),
@@ -694,117 +958,6 @@ impl StudioView {
                 });
                 hint(ui, "Lane volume, EQ and filter are on the lane headers left of the timeline. Export format and tail: Settings › Export & recording.");
             }
-        }
-    }
-
-    fn order_strip(&mut self, ui: &mut Ui, sh: &Shared) {
-        let h = 50.0;
-        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
-        if let Some(p) = resp.dnd_release_payload::<DraggedTracks>() {
-            self.add_tracks(sh, &p.0);
-        }
-        let hovering = resp.dnd_hover_payload::<DraggedTracks>().is_some();
-        ui.painter().rect_filled(rect, 4.0, theme::BG);
-        if hovering {
-            ui.painter().rect_stroke(rect, 4.0, Stroke::new(2.0, theme::accent()), StrokeKind::Inside);
-        }
-        if self.mix.tracks.is_empty() {
-            ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "Drag tracks from the library here to start a mix", egui::FontId::proportional(14.0), theme::TEXT_DIM);
-            return;
-        }
-        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink(4.0)).layout(Layout::left_to_right(Align::Center)));
-        let mut swap: Option<(usize, usize)> = None;
-        let mut remove: Option<usize> = None;
-        egui::ScrollArea::horizontal().id_salt("order").show(&mut child, |ui| {
-            ui.horizontal(|ui| {
-                for i in 0..self.mix.tracks.len() {
-                    let id = self.mix.tracks[i].track_id;
-                    let t = sh.track(id);
-                    let a = sh.analyses.get(&id);
-                    let sel = self.selection == Selection::Track(i);
-                    let (r, resp) = ui.allocate_exact_size(vec2(150.0, 42.0), Sense::click_and_drag());
-                    let p = ui.painter();
-                    p.rect_filled(r, 5.0, if sel { theme::PANEL_HI.gamma_multiply(1.4) } else { theme::PANEL_HI });
-                    p.rect_stroke(r, 5.0, Stroke::new(1.0, if sel { theme::accent() } else { theme::LINE }), StrokeKind::Inside);
-                    let title = t.map(|t| t.title.clone()).unwrap_or("?".into());
-                    let artist = t.map(|t| t.artist.clone()).unwrap_or_default();
-                    p.text(r.left_top() + vec2(6.0, 5.0), egui::Align2::LEFT_TOP, truncate(&format!("{}. {}", i + 1, title), 22), egui::FontId::proportional(12.0), theme::TEXT);
-                    let _ = &artist;
-                    if let Some(a) = a {
-                        if let Some(b) = a.bpm() {
-                            p.text(r.left_bottom() + vec2(6.0, -5.0), egui::Align2::LEFT_BOTTOM, format!("{b:.1}"), egui::FontId::monospace(11.0), theme::TEXT);
-                        }
-                        if let Some(k) = a.key {
-                            let k = k.shifted(self.mix.tracks[i].key_shift);
-                            p.text(r.center_bottom() + vec2(0.0, -5.0), egui::Align2::CENTER_BOTTOM, crate::theme::key_label(k), egui::FontId::proportional(12.0), theme::key_color(k));
-                        }
-                        if let Some(e) = a.energy {
-                            p.text(r.right_bottom() + vec2(-6.0, -5.0), egui::Align2::RIGHT_BOTTOM, format!("E{e}"), egui::FontId::proportional(10.5), theme::WARN);
-                        }
-                    }
-                    if resp.clicked() {
-                        self.selection = Selection::Track(i);
-                        if let Some(t) = self.timeline.tracks.get(i) {
-                            self.scroll = (t.start_sec as f32 * self.zoom - 100.0).max(0.0);
-                        }
-                    }
-                    if resp.drag_started() {
-                        resp.dnd_set_drag_payload(OrderDrag(i));
-                    }
-                    if let Some(from) = resp.dnd_release_payload::<OrderDrag>() {
-                        if from.0 != i {
-                            swap = Some((from.0, i));
-                        }
-                    }
-                    resp.context_menu(|ui| {
-                        if ui.button("Remove from mix").clicked() {
-                            remove = Some(i);
-                            ui.close();
-                        }
-                    });
-                    // transition badge
-                    if i + 1 < self.mix.tracks.len() {
-                        let tr = &self.mix.transitions[i];
-                        let compat = match (a.and_then(|a| a.key), sh.analyses.get(&self.mix.tracks[i + 1].track_id).and_then(|a| a.key)) {
-                            (Some(k1), Some(k2)) => Some(k1.shifted(self.mix.tracks[i].key_shift).compatibility(k2.shifted(self.mix.tracks[i + 1].key_shift))),
-                            _ => None,
-                        };
-                        let (br, bresp) = ui.allocate_exact_size(vec2(54.0, 42.0), Sense::click());
-                        let selt = self.selection == Selection::Transition(i);
-                        let col = match compat {
-                            Some(c) if c >= 0.85 => theme::OK,
-                            Some(c) if c >= 0.5 => theme::WARN,
-                            Some(_) => Color32::from_rgb(255, 80, 80),
-                            None => theme::TEXT_DIM,
-                        };
-                        let p = ui.painter();
-                        p.rect_filled(br.shrink2(vec2(2.0, 4.0)), 8.0, if selt { theme::PANEL_HI } else { theme::BG });
-                        p.rect_stroke(br.shrink2(vec2(2.0, 4.0)), 8.0, Stroke::new(1.0, col), StrokeKind::Inside);
-                        p.text(br.center() - vec2(0.0, 7.0), egui::Align2::CENTER_CENTER, short_style(tr.style), egui::FontId::proportional(10.0), theme::TEXT);
-                        p.text(br.center() + vec2(0.0, 8.0), egui::Align2::CENTER_CENTER, format!("{} bars", tr.beats / 4), egui::FontId::proportional(9.5), theme::TEXT_DIM);
-                        if bresp.clicked() {
-                            self.selection = Selection::Transition(i);
-                            if let Some(x) = self.timeline.transitions.get(i) {
-                                self.scroll = (x.start_sec as f32 * self.zoom - 200.0).max(0.0);
-                            }
-                        }
-                    }
-                }
-            });
-        });
-        if let Some((a, b)) = swap {
-            let mut order: Vec<TrackId> = self.mix.tracks.iter().map(|t| t.track_id).collect();
-            let t = order.remove(a);
-            order.insert(b, t);
-            self.replan(sh, &order);
-        }
-        if let Some(i) = remove {
-            self.mix.tracks.remove(i);
-            if !self.mix.transitions.is_empty() {
-                self.mix.transitions.remove(i.min(self.mix.transitions.len() - 1));
-            }
-            self.selection = Selection::None;
-            self.changed();
         }
     }
 

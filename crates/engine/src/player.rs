@@ -241,7 +241,7 @@ impl MixPlayer {
     }
 
     fn same_structure(&self, mix: &Mix) -> bool {
-        mix.tracks == self.mix.tracks && mix.transitions == self.mix.transitions && mix.tempo == self.mix.tempo && mix.keylock == self.mix.keylock
+        mix.tracks == self.mix.tracks && mix.transitions == self.mix.transitions && mix.tempo == self.mix.tempo && mix.keylock == self.mix.keylock && mix.samples == self.mix.samples && mix.sample_lanes == self.mix.sample_lanes
     }
 
     fn apply_edit(&mut self, mix: &Mix, sink: &mut dyn CommandSink, state: &EngineState) -> Result<()> {

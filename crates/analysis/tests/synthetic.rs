@@ -171,7 +171,10 @@ fn stems_path_and_waveform() {
     ];
     let track = StemTrack::from_planar("test", &planar);
     let owned = OwnedStems::from_stem_track(&track).expect("complete");
-    assert_eq!(owned.stems[2].0, planar[2].0);
+    // stems are stored as 16 bit with a per-chunk scale: equal within the quantisation step
+    let peak = planar[2].0.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+    let err = owned.stems[2].0.iter().zip(&planar[2].0).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+    assert!(err <= peak / 32767.0 * 1.01 + 1e-7, "stem round trip error {err}");
     let st = owned.as_ref();
     let a = analyze(&audio, Some(&st), &AnalyzeOptions::default());
     assert!((a.grid.unwrap().bpm - 124.0).abs() < 0.01);

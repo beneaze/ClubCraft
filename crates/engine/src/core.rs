@@ -544,6 +544,7 @@ impl EngineCore {
         {
             let garbage = &mut self.garbage;
             let mut drop_track = |t: Arc<LoadedTrack>| Self::dispose(garbage, Garbage::Track(t));
+            self.mixer.extra_on = self.conductor.render_samples(n, sr, &mut self.mixer.extra);
             self.conductor.step(&mut self.decks, &mut self.mixer, n, sr, &mut drop_track);
         }
         self.update_master();
