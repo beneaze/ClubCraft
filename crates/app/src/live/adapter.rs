@@ -22,6 +22,15 @@ use std::sync::Arc;
 pub const STUDIO_DECKS: [usize; 2] = [2, 3];
 pub const LIVE_DECKS: [usize; 2] = [0, 1];
 
+/// Memory budget for decoded tracks that are not in use (bytes).
+const CACHE_BUDGET: usize = 2_500 * 1024 * 1024;
+
+/// Approximate memory held by a loaded track (audio + stems).
+pub fn track_bytes(t: &LoadedTrack) -> usize {
+    let frames = t.audio.frames();
+    frames * 8 + t.stems.as_ref().map(|s| s.frames * clubcraft_core::STEM_CHANNELS * 4).unwrap_or(0)
+}
+
 /// Decoded tracks shared by decks, previews and renders.
 #[derive(Clone, Default)]
 pub struct TrackCache {
@@ -35,11 +44,21 @@ impl TrackCache {
 
     pub fn insert(&self, id: TrackId, t: Arc<LoadedTrack>) {
         let mut m = self.inner.lock();
-        if m.len() > 40 {
-            // drop tracks nobody else holds
-            m.retain(|_, v| Arc::strong_count(v) > 1);
-        }
         m.insert(id, t);
+        // Bound memory: evict tracks nobody else holds (decks, players) beyond a budget.
+        let mut total: usize = m.values().map(|v| track_bytes(v)).sum();
+        if total > CACHE_BUDGET {
+            let mut idle: Vec<TrackId> = m.iter().filter(|(k, v)| **k != id && Arc::strong_count(v) == 1).map(|(k, _)| *k).collect();
+            idle.sort();
+            for k in idle {
+                if total <= CACHE_BUDGET {
+                    break;
+                }
+                if let Some(v) = m.remove(&k) {
+                    total -= track_bytes(&v);
+                }
+            }
+        }
     }
 
     pub fn invalidate(&self, id: TrackId) {
