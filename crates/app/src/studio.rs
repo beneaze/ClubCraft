@@ -1272,4 +1272,27 @@ mod tests {
         s.changed();
         assert!(s.redo.is_empty());
     }
+
+    #[test]
+    fn transition_drags_keep_the_music_in_place() {
+        let mut s = StudioView::default();
+        let mut m = mix();
+        m.tracks[1].mix_in = 10.0;
+        s.set_mix(m);
+        s.timeline = MixTimeline::build(&s.mix, &|_| None); // 120 BPM fallback grids: a beat = 0.5 s
+        let before = s.mix.transitions[0].value(Side::In, Param::Stem(clubcraft_core::StemKind::Vocals), 28.0);
+        // grow at the start by a bar: window 36 beats, both tracks keep their place in the mix
+        s.resize_transition_start(0, -4);
+        assert_eq!(s.mix.transitions[0].beats, 36);
+        assert!((s.mix.tracks[0].mix_out - 58.0).abs() < 1e-9 && (s.mix.tracks[1].mix_in - 8.0).abs() < 1e-9);
+        let after = s.mix.transitions[0].value(Side::In, Param::Stem(clubcraft_core::StemKind::Vocals), 32.0);
+        assert!((before - after).abs() < 1e-6, "curves stay with the music");
+        assert!(s.mix.transitions[0].lanes.iter().all(|l| l.points[0].0 == 0.0));
+        // grow at the end: curves stretch over the new length
+        s.resize_transition_end(0, 4);
+        assert_eq!(s.mix.transitions[0].beats, 40);
+        // move a bar earlier
+        s.move_transition(0, -4);
+        assert!((s.mix.tracks[0].mix_out - 56.0).abs() < 1e-9);
+    }
 }

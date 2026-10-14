@@ -35,6 +35,8 @@ impl ShowMode {
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Drag {
+    /// Moving transition `k` by its bar.
+    TransitionMove(usize),
     TransitionStart(usize),
     TransitionEnd(usize),
     Clip(usize),
@@ -401,67 +403,76 @@ impl StudioView {
                     .unwrap_or_default();
                 p.with_clip_rect(chip).text(chip.center(), egui::Align2::CENTER_CENTER, label, font, if sel { Color32::BLACK } else { Color32::WHITE });
             }
-            let chip_r = ui.interact(chip, Id::new(("tchip", k)), Sense::click());
+            // the bar (chip) moves the transition, its edges change the length: like DJ.Studio
+            let locked = self.mix.transitions[k].locked;
+            let imitated = self.mix.transitions[k].uses_stems() && !self.stems_ok(sh, k);
+            let bar_r = Rect::from_min_max(pos2(xs + 6.0, tstrip.top()), pos2((xe - 6.0).max(xs + 7.0), tstrip.bottom()));
+            let chip_r = ui.interact(bar_r, Id::new(("tchip", k)), Sense::click_and_drag());
+            if chip_r.hovered() || chip_r.dragged() {
+                ui.ctx().set_cursor_icon(if locked { CursorIcon::NotAllowed } else if chip_r.dragged() { CursorIcon::Grabbing } else { CursorIcon::Grab });
+            }
             if chip_r.clicked() {
                 self.selection = Selection::Transition(k);
             }
-            chip_r.on_hover_text(if tr.uses_stems() && !self.stems_ok(sh, k) {
-                "Click to edit this transition. One of the tracks has no stems yet: its stem curves are imitated with volume and EQ (shown in the clips). Separate its stems for the real sound."
+            if chip_r.drag_started() {
+                self.selection = Selection::Transition(k);
+                if !locked {
+                    self.drag = Some(Drag::TransitionMove(k));
+                    self.drag_acc = 0.0;
+                }
+            }
+            if chip_r.dragged() && self.drag == Some(Drag::TransitionMove(k)) {
+                self.drag_acc += chip_r.drag_delta().x;
+                let fine = ui.input(|i| i.modifiers.shift);
+                if let Some(n) = self.take_beats(k, if fine { 1 } else { 4 }) {
+                    self.move_transition(k, n);
+                }
+            }
+            if chip_r.drag_stopped() {
+                self.drag = None;
+            }
+            chip_r.on_hover_text(if locked {
+                "Locked: unlock it in the transition editor to move it"
+            } else if imitated {
+                "Drag to move (Shift: by beats) · drag an edge to change the length · click to edit. One of the tracks has no stems yet: its stem curves are imitated with volume and EQ."
             } else {
-                "Click to edit this transition"
+                "Drag to move (Shift: by beats) · drag an edge to change the length · click to edit"
             });
-            // handles
+            // edges
             for (end, xx) in [(false, xs), (true, xe)] {
                 let hr = Rect::from_center_size(pos2(xx, tstrip.center().y), vec2(10.0, strip_h - 2.0));
                 p.rect_filled(hr, 3.0, col);
                 p.line_segment([pos2(xx, hr.top() + 5.0), pos2(xx, hr.bottom() - 5.0)], Stroke::new(1.5, Color32::WHITE));
-                let id = Id::new(("thandle", k, end));
-                let r = ui.interact(hr.expand(3.0), id, Sense::click_and_drag());
-                let locked = self.mix.transitions[k].locked;
+                let r = ui.interact(hr.expand(3.0), Id::new(("thandle", k, end)), Sense::click_and_drag());
                 if r.hovered() || r.dragged() {
                     ui.ctx().set_cursor_icon(if locked { CursorIcon::NotAllowed } else { CursorIcon::ResizeHorizontal });
                 }
                 let which = if end { Drag::TransitionEnd(k) } else { Drag::TransitionStart(k) };
-                if r.drag_started() && !locked {
-                    self.drag = Some(which);
-                    self.drag_acc = 0.0;
+                if r.drag_started() {
                     self.selection = Selection::Transition(k);
+                    if !locked {
+                        self.drag = Some(which);
+                        self.drag_acc = 0.0;
+                    }
                 }
                 if r.clicked() {
                     self.selection = Selection::Transition(k);
                 }
                 if r.dragged() && self.drag == Some(which) {
                     self.drag_acc += r.drag_delta().x;
-                    if let Some(bars) = self.take_bars(k) {
+                    let fine = ui.input(|i| i.modifiers.shift);
+                    if let Some(n) = self.take_beats(k, if fine { 1 } else { 4 }) {
                         if end {
-                            let t = &mut self.mix.transitions[k];
-                            let nb = (t.beats as i32 + bars * 4).clamp(4, 256) as u32;
-                            if nb != t.beats {
-                                let lanes = if t.style == clubcraft_core::TransitionStyle::Custom {
-                                    crate::studio::scale_lanes(&t.lanes, t.beats as f32, nb as f32)
-                                } else {
-                                    t.style.lanes(nb as f32)
-                                };
-                                t.beats = nb;
-                                t.lanes = lanes;
-                                self.changed();
-                            }
+                            self.resize_transition_end(k, n);
                         } else {
-                            let bar_len = self.timeline.tracks[k].grid.bar_len();
-                            let dur = self.timeline.tracks[k].duration;
-                            let mt = &mut self.mix.tracks[k];
-                            let nv = mt.mix_out + bars as f64 * bar_len;
-                            if nv > mt.mix_in + bar_len * 2.0 && nv < dur - bar_len {
-                                mt.mix_out = nv;
-                                self.changed();
-                            }
+                            self.resize_transition_start(k, n);
                         }
                     }
                 }
                 if r.drag_stopped() {
                     self.drag = None;
                 }
-                r.on_hover_text(if end { "Drag: transition length (bars)" } else { "Drag: move the transition (bars)" });
+                r.on_hover_text(if end { "Drag: change the length at the end (Shift: by beats)" } else { "Drag: change the length at the start, the music stays in place (Shift: by beats)" });
             }
         }
 
@@ -519,6 +530,69 @@ impl StudioView {
                 out.push(StudioAction::Seek(t.clamp(0.0, self.timeline.total_secs)));
             }
         }
+    }
+
+    /// Convert accumulated drag pixels into steps of `per` beats at the tempo of track `i`;
+    /// returns the number of beats.
+    fn take_beats(&mut self, i: usize, per: i32) -> Option<i32> {
+        let tt = self.timeline.tracks.get(i)?;
+        let px = (tt.grid.beat_len() as f32 * per as f32 * self.zoom).max(1.0);
+        let steps = (self.drag_acc / px).trunc() as i32;
+        if steps != 0 {
+            self.drag_acc -= steps as f32 * px;
+            Some(steps * per)
+        } else {
+            None
+        }
+    }
+
+    /// Move transition `k` by `beats` (the outgoing track's mix-out; the incoming track follows).
+    pub(crate) fn move_transition(&mut self, k: usize, beats: i32) {
+        let (bl, dur) = (self.timeline.tracks[k].grid.beat_len(), self.timeline.tracks[k].duration);
+        let mt = &mut self.mix.tracks[k];
+        let nv = mt.mix_out + beats as f64 * bl;
+        if nv > mt.mix_in + bl * 8.0 && (dur <= 0.0 || nv < dur - bl * 4.0) {
+            mt.mix_out = nv;
+            self.changed();
+        }
+    }
+
+    /// Lengthen (or shorten) transition `k` at its end by `beats`.
+    pub(crate) fn resize_transition_end(&mut self, k: usize, beats: i32) {
+        let t = &mut self.mix.transitions[k];
+        let nb = (t.beats as i32 + beats).clamp(1, 512) as u32;
+        if nb != t.beats {
+            t.set_beats(nb);
+            self.changed();
+        }
+    }
+
+    /// Lengthen (or shorten) transition `k` at its start by `beats`: both tracks keep their place
+    /// in the mix, only the window grows to the left.
+    pub(crate) fn resize_transition_start(&mut self, k: usize, beats: i32) {
+        let (bl_out, bl_in) = (self.timeline.tracks[k].grid.beat_len(), self.timeline.tracks[k + 1].grid.beat_len());
+        let nb = self.mix.transitions[k].beats as i32 - beats;
+        let (out_in, out_out, in_in) = (self.mix.tracks[k].mix_in, self.mix.tracks[k].mix_out, self.mix.tracks[k + 1].mix_in);
+        let (new_out, new_in) = (out_out + beats as f64 * bl_out, in_in + beats as f64 * bl_in);
+        if !(1..=512).contains(&nb) || new_in < 0.0 || new_out < out_in + bl_out * 8.0 {
+            return;
+        }
+        self.mix.tracks[k].mix_out = new_out;
+        self.mix.tracks[k + 1].mix_in = new_in;
+        // the curves keep their place in the music: shift them, then fit the new length
+        let t = &mut self.mix.transitions[k];
+        for l in &mut t.lanes {
+            for p in &mut l.points {
+                p.0 -= beats as f32;
+            }
+            l.points.retain(|p| p.0 >= -1e-3);
+            if l.points.first().is_none_or(|p| p.0 > 1e-3) {
+                let v = l.value_at(0.0);
+                l.points.insert(0, (0.0, v));
+            }
+        }
+        t.beats = nb as u32;
+        self.changed();
     }
 
     /// Convert accumulated drag pixels into whole bars at the tempo of track `i`.

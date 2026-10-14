@@ -235,6 +235,18 @@ impl Transition {
         Transition { style, beats, lanes: style.lanes(beats as f32), locked: false }
     }
 
+    /// Change the length to `beats`, keeping the shape of every curve (points scale with the
+    /// window), like resizing a transition in DJ.Studio.
+    pub fn set_beats(&mut self, beats: u32) {
+        let (from, to) = (self.beats.max(1) as f32, beats.max(1) as f32);
+        for l in &mut self.lanes {
+            for p in &mut l.points {
+                p.0 = p.0 / from * to;
+            }
+        }
+        self.beats = beats.max(1);
+    }
+
     /// Value of `param` for `side` at beat `x` of the transition (neutral when there is no lane).
     pub fn value(&self, side: Side, param: Param, x: f32) -> f32 {
         self.lanes

@@ -211,9 +211,7 @@ impl StudioView {
                 let tr = &mut self.mix.transitions[k];
                 for bars in [4u32, 8, 16, 32] {
                     if ui.selectable_label(tr.beats == bars * 4, format!("{bars}")).on_hover_text("Length in bars").clicked() && tr.beats != bars * 4 {
-                        let lanes = if tr.style == TransitionStyle::Custom { crate::studio::scale_lanes(&tr.lanes, tr.beats as f32, (bars * 4) as f32) } else { tr.style.lanes((bars * 4) as f32) };
-                        tr.beats = bars * 4;
-                        tr.lanes = lanes;
+                        tr.set_beats(bars * 4);
                         changed = true;
                     }
                 }
