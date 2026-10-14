@@ -615,6 +615,10 @@ fn main() -> anyhow::Result<()> {
     let mut dump_onoff = false;
     let mut dump_phase = false;
     let mut dump_chroma = false;
+    let mut only_mik = false;
+    let mut jobs = 4usize;
+    let mut make_stems = false;
+    let mut act_cache: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -628,6 +632,10 @@ fn main() -> anyhow::Result<()> {
             "--dump-onoff" => dump_onoff = true,
             "--dump-phase" => dump_phase = true,
             "--dump-chroma" => dump_chroma = true,
+            "--only-mik" => only_mik = true,
+            "--jobs" => jobs = args.next().unwrap().parse()?,
+            "--make-stems" => make_stems = true,
+            "--act-cache" => act_cache = args.next().map(PathBuf::from),
             _ => anyhow::bail!("unknown argument {a}"),
         }
     }
@@ -640,18 +648,72 @@ fn main() -> anyhow::Result<()> {
     if let Some(f) = &filter {
         truth.retain(|t| t.name.contains(f.as_str()));
     }
+    if only_mik {
+        truth.retain(|t| !t.mik_cues.is_empty());
+    }
+    let flac_path = |t: &Truth| -> Option<PathBuf> {
+        let root = stems_root.as_ref()?;
+        Some(root.join(format!("{}.stems.flac", t.path.file_stem()?.to_string_lossy())))
+    };
     let stem_dir = |t: &Truth| -> Option<PathBuf> {
         let root = stems_root.as_ref()?;
         let stem = t.path.file_stem()?.to_string_lossy().to_string();
+        let f = root.join(format!("{stem}.stems.flac"));
+        if f.exists() {
+            return Some(f);
+        }
         let d = root.join(stem);
         (d.join("drums.mp3").exists() || d.join("drums.wav").exists()).then_some(d)
     };
+    truth.truncate(limit);
+    if make_stems {
+        // Rust HTDemucs (Quality::Fast), one track at a time.
+        let todo: Vec<&Truth> = truth.iter().filter(|t| stem_dir(t).is_none()).collect();
+        if !todo.is_empty() {
+            let sep = clubcraft_stems::Separator::new(clubcraft_stems::Quality::Fast)?;
+            for (i, t) in todo.iter().enumerate() {
+                let Some(dst) = flac_path(t) else { continue };
+                let audio = clubcraft_audio::decode_file(&t.path, 44_100)?;
+                let t0 = Instant::now();
+                let st = sep.separate(&audio, &mut |_| true)?;
+                std::fs::create_dir_all(dst.parent().unwrap())?;
+                clubcraft_stems::save_stems_with_model(&dst, &st, sep.model_name())?;
+                eprintln!("stems {}/{}: {} ({:.1?}, {})", i + 1, todo.len(), t.name, t0.elapsed(), sep.backend_name());
+            }
+        }
+    }
     if only_stems {
         truth.retain(|t| stem_dir(t).is_some());
     }
-    truth.truncate(limit);
     println!("{} DJ.Studio-analysed tracks found locally", truth.len());
-    let results: Vec<(Res, Option<Res>)> = truth
+    let model: std::sync::OnceLock<Option<clubcraft_analysis::allinone::Model>> = std::sync::OnceLock::new();
+    let model_lock = std::sync::Mutex::new(());
+    let get_act = |t: &Truth, st: &clubcraft_analysis::OwnedStems| -> Option<clubcraft_analysis::allinone::Activations> {
+        let cache = act_cache.as_ref().map(|d| d.join(format!("{}.act.npy", t.path.file_stem().unwrap().to_string_lossy())));
+        if let Some(c) = &cache {
+            if let Ok(a) = clubcraft_stems::npy::read_npy(c) {
+                return Some(clubcraft_analysis::allinone::Activations::from_flat(&a.data));
+            }
+        }
+        let m = model.get_or_init(|| clubcraft_analysis::allinone::Model::load_default().map_err(|e| eprintln!("model: {e:#}")).ok()).as_ref()?;
+        // One model run at a time (memory).
+        let _g = model_lock.lock().unwrap();
+        let t0 = Instant::now();
+        let a = m.activations(&st.as_ref()).map_err(|e| eprintln!("model {}: {e:#}", t.name)).ok()?;
+        eprintln!("model {}: {:.1?}", t.name, t0.elapsed());
+        if let Some(c) = &cache {
+            let mut flat = Vec::with_capacity(a.len() * 13);
+            for i in 0..a.len() {
+                flat.extend_from_slice(&[a.beat[i], a.downbeat[i], a.section[i]]);
+                flat.extend_from_slice(&a.labels[i]);
+            }
+            let _ = std::fs::create_dir_all(c.parent().unwrap());
+            let _ = clubcraft_stems::npy::write_npy(c, &[a.len(), 13], &flat);
+        }
+        Some(a)
+    };
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(jobs.max(1)).build()?;
+    let results: Vec<(Res, Option<Res>, Option<Res>)> = pool.install(|| truth
         .par_iter()
         .with_max_len(1)
         .filter_map(|t| {
@@ -756,16 +818,28 @@ fn main() -> anyhow::Result<()> {
                     println!("{line}  {}", t.name);
                 }
             }
-            let rs = stem_dir(t)
-                .and_then(|d| common::load_stems(&d, &audio).ok())
-                .map(|st| {
+            let stems = stem_dir(t).and_then(|d| {
+                if d.extension().is_some_and(|e| e == "flac") {
+                    clubcraft_stems::load_stems(&d).ok().map(|s| clubcraft_analysis::OwnedStems { stems: s.stems })
+                } else {
+                    common::load_stems(&d, &audio).ok()
+                }
+            });
+            let (mut rs, mut rm) = (None, None);
+            if let Some(st) = &stems {
+                let rules = AnalyzeOptions { structure: clubcraft_analysis::StructureSource::Rules, ..AnalyzeOptions::default() };
+                let t0 = Instant::now();
+                let a = analyze(&audio, Some(&st.as_ref()), &rules);
+                rs = Some(evaluate(t, &a, true, t0.elapsed().as_secs_f64(), verbose));
+                if let Some(act) = get_act(t, st) {
                     let t0 = Instant::now();
-                    let a = analyze(&audio, Some(&st.as_ref()), &opts);
-                    evaluate(t, &a, true, t0.elapsed().as_secs_f64(), verbose)
-                });
-            Some((r, rs))
+                    let a = clubcraft_analysis::analyze_with_activations(&audio, Some(&st.as_ref()), &AnalyzeOptions::default(), Some(&act));
+                    rm = Some(evaluate(t, &a, true, t0.elapsed().as_secs_f64(), verbose));
+                }
+            }
+            Some((r, rs, rm))
         })
-        .collect();
+        .collect());
     let mut plain: Vec<Res> = results.iter().map(|r| r.0.clone()).collect();
     plain.sort_by(|a, b| a.name.cmp(&b.name));
     println!(
@@ -805,10 +879,20 @@ fn main() -> anyhow::Result<()> {
         .iter()
         .filter_map(|r| r.1.clone().map(|s| (r.0.clone(), s)))
         .collect();
+    let modeled: Vec<(Res, Res, Res)> = results
+        .iter()
+        .filter_map(|r| Some((r.0.clone(), r.1.clone()?, r.2.clone()?)))
+        .collect();
     if !stemmed.is_empty() {
-        println!("\n--- with stems ---");
+        println!("\n--- with stems, rule-based structure ---");
         for (_, s) in &stemmed {
             print(s);
+        }
+    }
+    if !modeled.is_empty() {
+        println!("\n--- with stems, All-In-One structure ---");
+        for (_, _, m) in &modeled {
+            print(m);
         }
     }
     summarize("without stems", &plain);
@@ -816,7 +900,13 @@ fn main() -> anyhow::Result<()> {
         let a: Vec<Res> = stemmed.iter().map(|x| x.0.clone()).collect();
         let b: Vec<Res> = stemmed.iter().map(|x| x.1.clone()).collect();
         summarize("stem subset, mix only", &a);
-        summarize("stem subset, with stems", &b);
+        summarize("stem subset, with stems (rules)", &b);
+    }
+    if !modeled.is_empty() {
+        let b: Vec<Res> = modeled.iter().map(|x| x.1.clone()).collect();
+        let c: Vec<Res> = modeled.iter().map(|x| x.2.clone()).collect();
+        summarize("model subset, with stems (rules)", &b);
+        summarize("model subset, with stems (All-In-One)", &c);
     }
     if let Some(p) = csv {
         let mut s = String::from("name,stems,bpm,bpm_gt,phase_ms,bar_off,key,key_gt,key_rel,mik_bar,mik_recall,seg_recall,energy,mik_energy,lufs,secs\n");

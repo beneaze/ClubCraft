@@ -169,6 +169,10 @@ pub enum Command {
     MixResume,
     /// Stop mix playback (decks pause, automation is reset).
     MixStop,
+    /// Hand the audio of mix track `index` to the playing schedule `schedule`
+    /// ([`MixSchedule::id`]). Ignored (and the track returned for off-thread dropping) when the
+    /// schedule is no longer playing or the slot is already filled.
+    MixTrackReady { schedule: u64, index: usize, track: Arc<LoadedTrack> },
     /// Update the studio lane mixer (gain, mute/solo, EQ, filter) of the playing mix. Cheap and
     /// allocation free: send it on every knob movement.
     SetMixLanes([clubcraft_core::LaneSettings; clubcraft_core::MIX_LANES]),

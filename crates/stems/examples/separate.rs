@@ -3,7 +3,7 @@
 //! ```text
 //! cargo run --release -p clubcraft-stems --example separate -- <audio file> [fast|high|ultra] <out_dir>
 //!     [--backend auto|coreml|ort] [--start SECONDS] [--seconds SECONDS] [--shift-samples A,B,..]
-//!     [--model htdemucs|htdemucs_ft|htdemucs_6s] [--dump-input] [--cache]
+//!     [--model htdemucs|htdemucs_ft|htdemucs_6s] [--dump-input] [--cache] [--progressive SECONDS]
 //! ```
 //! `--dump-input` also writes the decoded (and cropped) input as `input.npy` ([2, N] f32) so the
 //! result can be compared with Python Demucs on the identical signal; `--cache` additionally writes
@@ -24,6 +24,7 @@ fn main() -> Result<()> {
     let mut cache = false;
     let mut shift_samples: Option<Vec<usize>> = None;
     let mut model: Option<String> = None;
+    let mut progressive: Option<f64> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -44,6 +45,7 @@ fn main() -> Result<()> {
             }
             "--model" => model = Some(args.next().context("--model")?),
             "--dump-input" => dump = true,
+            "--progressive" => progressive = Some(args.next().context("--progressive")?.parse()?),
             "--cache" => cache = true,
             _ => pos.push(a),
         }
@@ -81,6 +83,26 @@ fn main() -> Result<()> {
     let sep = Separator::with_options(&clubcraft_core::paths::models_dir(), opts)?;
     println!("loaded {} on {} in {:.2} s", sep.model_name(), sep.backend_name(), t.elapsed().as_secs_f64());
 
+    if let Some(at) = progressive {
+        // Live-deck latency: time until the stem chunk under `at` seconds is published.
+        let target = clubcraft_core::StemTrack::new(audio.frames(), sep.model_name());
+        let start = ((at * sr) as usize).min(audio.frames().saturating_sub(1));
+        let c0 = start / clubcraft_core::STEM_CHUNK_FRAMES;
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let t = Instant::now();
+        let mut first: Option<f64> = None;
+        sep.separate_into(&audio, &target, start, &mut |_| {
+            if first.is_none() && target.is_chunk_ready(c0) {
+                first = Some(t.elapsed().as_secs_f64());
+            }
+        }, &cancel)?;
+        println!(
+            "progressive from {at:.1} s: chunk under playhead ready after {:.2} s, complete after {:.2} s",
+            first.unwrap_or(f64::NAN),
+            t.elapsed().as_secs_f64()
+        );
+        return Ok(());
+    }
     let t = Instant::now();
     let mut last = -1i32;
     let stems = sep.separate(&audio, &mut |p| {

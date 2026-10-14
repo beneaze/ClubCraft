@@ -121,8 +121,8 @@ fn cancel_stops() {
 }
 
 #[test]
-#[ignore]
-fn zz_best_determinism() {
+#[ignore = "slow: two full Best runs"]
+fn best_is_deterministic() {
     let Some(dir) = models() else { return };
     let sep = Separator::with_options(&dir, Quality::Best.options()).unwrap();
     let audio = test_audio(26 * 44100 + 11);

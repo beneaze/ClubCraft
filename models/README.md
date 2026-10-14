@@ -24,3 +24,27 @@ The `htdemucs_ref_*.npy` tensors are used by `cargo test -p clubcraft-stems --te
 | `Quality::Fast` | `htdemucs` | 1 shift, overlap 0.25 | ~17 s (18x realtime) |
 | `Quality::High` (default) | `htdemucs_ft` | 1 shift, overlap 0.25 | ~80 s (4x) |
 | `Quality::Ultra` | `htdemucs_ft` | 2 shifts, overlap 0.5 | ~245 s (1.3x) |
+
+## Mel-Band RoFormer vocals (`Quality::Best`)
+
+`melroformer.{json,mlmodelc,onnx}` is Kimberley Jensen's Mel-Band RoFormer vocal model
+(<https://huggingface.co/KimberleyJSN/melbandroformer>, `MelBandRoformer.ckpt`, **MIT**). The
+model code it runs with is the MIT-licensed implementation from ZFTurbo's
+Music-Source-Separation-Training (itself based on lucidrains' BS-RoFormer, MIT), vendored with its
+licence in `tools/model-export/mel_band_roformer/`. The architecture is from Wang, Lu & Won
+(ByteDance), "Mel-Band RoFormer for Music Source Separation" (2023). (Kim's GitHub repository has
+no licence file, so it is not used; only the checkpoint, which the HF repo publishes under MIT.)
+
+```sh
+cd tools/model-export
+uv pip install --python .venv/bin/python rotary-embedding-torch beartype librosa
+.venv/bin/python export_melroformer.py --out ../../models --reference   # downloads the 913 MB checkpoint
+```
+
+The exported graph is the network between the mel band gather and the mask scatter
+(`x [1, 801, 7916] -> mask [1, 801, 7916]`, fp32, 228 M parameters, ~870 MB). STFT
+(n_fft 2048, hop 441), band gather/scatter-average, masking and iSTFT run in Rust
+(`crates/stems/src/roformer.rs`); chunking follows the checkpoint's reference inference
+(8 s chunks, `num_overlap` 2, linear fades). fp16 CoreML was tried (1.4x faster) but only
+matches PyTorch to 39 dB, so fp32 is used. `melroformer_ref_*.npy` feed
+`cargo test -p clubcraft-stems --test roformer`.

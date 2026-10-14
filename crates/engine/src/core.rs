@@ -171,6 +171,11 @@ impl EngineCore {
         self.conductor.time
     }
 
+    /// Mix playback state (same as `snapshot().mix`, without building the whole snapshot).
+    pub fn mix_state(&self) -> crate::state::MixPlaybackState {
+        self.conductor.state()
+    }
+
     fn dispose(garbage: &mut Option<rtrb::Producer<Garbage>>, g: Garbage) {
         if let Some(p) = garbage {
             // On a full ring (should never happen) the object is dropped here as a last resort.
@@ -379,7 +384,7 @@ impl EngineCore {
             }
             PlayMix { schedule, start } => {
                 let mut ok = schedule.decks.iter().all(|d| *d < MAX_DECKS) && schedule.decks[0] != schedule.decks[1];
-                ok &= !schedule.tracks.is_empty();
+                ok &= !schedule.is_empty();
                 if ok {
                     for &d in &schedule.decks {
                         self.sync[d] = false;
@@ -387,7 +392,9 @@ impl EngineCore {
                             self.deck_count = MAX_DECKS;
                         }
                     }
-                    if let Some(old) = self.conductor.start(schedule, start, &mut self.decks, &mut self.mixer) {
+                    let garbage = &mut self.garbage;
+                    let old = self.conductor.start(schedule, start, &mut self.decks, &mut self.mixer, &mut |t| Self::dispose(garbage, Garbage::Track(t)));
+                    if let Some(old) = old {
                         Self::dispose(&mut self.garbage, Garbage::Schedule(old));
                     }
                 } else {
@@ -402,13 +409,20 @@ impl EngineCore {
             }
             MixPause => self.conductor.pause(&mut self.decks),
             SetMixLanes(l) => self.conductor.set_lanes(l),
+            MixTrackReady { schedule, index, track } => {
+                if let Some(t) = self.conductor.set_track(schedule, index, track) {
+                    Self::dispose(&mut self.garbage, Garbage::Track(t));
+                }
+            }
             MixResume => {
                 if self.conductor.sched.is_some() {
                     self.conductor.playing = true;
                 }
             }
             MixStop => {
-                if let Some(old) = self.conductor.stop(&mut self.decks, &mut self.mixer) {
+                let garbage = &mut self.garbage;
+                let old = self.conductor.stop(&mut self.decks, &mut self.mixer, &mut |t| Self::dispose(garbage, Garbage::Track(t)));
+                if let Some(old) = old {
                     Self::dispose(&mut self.garbage, Garbage::Schedule(old));
                 }
             }

@@ -1,0 +1,31 @@
+{
+  "name": "allin1",
+  "source": "mir-aidj/all-in-one harmonix-fold0..7 (MIT)",
+  "input": "spec [1,4,T,81]",
+  "stems": [
+    "bass",
+    "drums",
+    "other",
+    "vocals"
+  ],
+  "fps": 100,
+  "frame_size": 2048,
+  "hop": 441,
+  "bands_per_octave": 12,
+  "fmin": 30,
+  "fmax": 17000,
+  "min_frames": 10240,
+  "output": "act [1,T,13] = sigmoid(beat, downbeat, section), softmax(10 functions)",
+  "labels": [
+    "start",
+    "end",
+    "intro",
+    "outro",
+    "break",
+    "bridge",
+    "inst",
+    "solo",
+    "verse",
+    "chorus"
+  ]
+}

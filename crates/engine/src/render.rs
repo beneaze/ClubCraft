@@ -6,8 +6,8 @@ use crate::conductor::MixSchedule;
 use crate::core::EngineCore;
 use crate::track::LoadedTrack;
 use crate::wav::{WavFormat, WavSink};
-use anyhow::Result;
-use clubcraft_core::{Mix, MixTimeline, TrackId};
+use anyhow::{anyhow, bail, Result};
+use clubcraft_core::{Analysis, Mix, MixTimeline, TrackId};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
@@ -43,18 +43,27 @@ pub struct RenderReport {
     pub timeline: MixTimeline,
 }
 
-/// Render `mix` to a WAV file. `progress(fraction)` is called regularly; return `false` to
-/// cancel (the partial file is kept and the report says how much was rendered).
+/// Render `mix` to a WAV file.
+///
+/// * `analyses` gives each track's metadata (grid, duration, cues, gain) for the timeline;
+///   it is called once per track up front and must be cheap (no audio).
+/// * `loader` returns the audio + stems; it is called **just before** a track starts (in mix
+///   order, once per track), and each track is dropped as soon as its part of the mix has
+///   passed, so at most 2–3 tracks are resident at any time.
+///
+/// `progress(fraction)` is called regularly; return `false` to cancel (the partial file is kept
+/// and the report says how much was rendered).
 pub fn render_mix(
     mix: &Mix,
-    tracks: &dyn Fn(TrackId) -> Option<Arc<LoadedTrack>>,
+    analyses: &dyn Fn(TrackId) -> Option<Analysis>,
+    loader: &dyn Fn(TrackId) -> Option<Arc<LoadedTrack>>,
     out: &Path,
     opts: &RenderOptions,
     progress: &mut dyn FnMut(f32) -> bool,
 ) -> Result<RenderReport> {
     let mut sink = WavSink::create(out, opts.sample_rate, opts.format)?;
     let mut err = None;
-    let report = render_with(mix, tracks, opts, progress, &mut |buf| {
+    let report = render_with(mix, analyses, loader, opts, progress, &mut |buf| {
         if err.is_none() {
             if let Err(e) = sink.write(buf) {
                 err = Some(e);
@@ -68,23 +77,36 @@ pub fn render_mix(
     Ok(report)
 }
 
-/// Render to memory (interleaved stereo). Handy for previews and tests.
-pub fn render_mix_to_vec(mix: &Mix, tracks: &dyn Fn(TrackId) -> Option<Arc<LoadedTrack>>, opts: &RenderOptions) -> Result<(Vec<f32>, RenderReport)> {
+/// Render to memory (interleaved stereo). Handy for previews and tests. Same loading rules as
+/// [`render_mix`].
+pub fn render_mix_to_vec(
+    mix: &Mix,
+    analyses: &dyn Fn(TrackId) -> Option<Analysis>,
+    loader: &dyn Fn(TrackId) -> Option<Arc<LoadedTrack>>,
+    opts: &RenderOptions,
+) -> Result<(Vec<f32>, RenderReport)> {
     let mut v = Vec::new();
-    let r = render_with(mix, tracks, opts, &mut |_| true, &mut |b| v.extend_from_slice(b))?;
+    let r = render_with(mix, analyses, loader, opts, &mut |_| true, &mut |b| v.extend_from_slice(b))?;
     Ok((v, r))
 }
 
 fn render_with(
     mix: &Mix,
-    tracks: &dyn Fn(TrackId) -> Option<Arc<LoadedTrack>>,
+    analyses: &dyn Fn(TrackId) -> Option<Analysis>,
+    loader: &dyn Fn(TrackId) -> Option<Arc<LoadedTrack>>,
     opts: &RenderOptions,
     progress: &mut dyn FnMut(f32) -> bool,
     out: &mut dyn FnMut(&[f32]),
 ) -> Result<RenderReport> {
-    let schedule = MixSchedule::new(mix, tracks, [0, 1])?;
+    let schedule = MixSchedule::lazy(mix, analyses, [0, 1]);
+    if schedule.is_empty() {
+        bail!("empty mix");
+    }
+    let id = schedule.id;
+    let ids = schedule.track_ids.clone();
     let timeline = schedule.timeline.clone();
     let total = timeline.total_secs;
+    let sr = opts.sample_rate as f64;
     let mut core = EngineCore::new(opts.sample_rate, 2);
     core.apply(Command::SetLimiter { enabled: opts.limiter, ceiling_db: opts.ceiling_db });
     core.apply(Command::SetMasterGain(opts.master_gain_db));
@@ -94,11 +116,22 @@ fn render_with(
     let mut cue = vec![0f32; chunk * 2];
     let mut frames = 0u64;
     let mut peak = 0f32;
+    let mut loaded = vec![false; ids.len()];
     let t0 = Instant::now();
-    let tail_frames = (opts.tail_secs * opts.sample_rate as f64) as u64;
+    let tail_frames = (opts.tail_secs * sr) as u64;
     let mut tail_left: Option<u64> = None;
     let mut last_report = 0u64;
     loop {
+        // just-in-time loading: everything that starts before the end of this chunk
+        let t = core.mix_time();
+        let horizon = t + chunk as f64 / sr + 0.05;
+        for (i, tr) in timeline.tracks.iter().enumerate() {
+            if !loaded[i] && tr.start_sec <= horizon && tr.end_sec > t {
+                let track = loader(ids[i]).ok_or_else(|| anyhow!("track {} not available", ids[i]))?;
+                core.apply(Command::MixTrackReady { schedule: id, index: i, track });
+                loaded[i] = true;
+            }
+        }
         core.process(&mut master, &mut cue);
         for s in &master {
             peak = peak.max(s.abs());
@@ -122,6 +155,6 @@ fn render_with(
         }
     }
     progress(1.0);
-    let secs = frames as f64 / opts.sample_rate as f64;
+    let secs = frames as f64 / sr;
     Ok(RenderReport { frames, seconds: secs, peak, speed: secs / t0.elapsed().as_secs_f64().max(1e-9), timeline })
 }

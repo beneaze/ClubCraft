@@ -344,10 +344,14 @@ def cmd_export(args):
     # padding branches are not taken; the runtime only uses the model for tracks >= MIN_FRAMES.
     x = torch.randn(1, 4, MIN_FRAMES + 500, 81).abs()
     onnx_path = out / "allin1.onnx"
-    torch.onnx.export(
-        ens, (x,), str(onnx_path), input_names=["spec"], output_names=["act"],
-        dynamic_axes={"spec": {2: "frames"}, "act": {1: "frames"}}, opset_version=17,
-    )
+    with torch.no_grad():
+        torch.onnx.export(
+            ens, (x,), str(onnx_path), input_names=["spec"], output_names=["act"],
+            dynamic_axes={"spec": {2: "frames"}, "act": {1: "frames"}}, opset_version=17,
+        )
+    print("exported", onnx_path, flush=True)
+    if args.no_check:
+        return write_manifest(out)
     import onnxruntime as ort
     sess = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
     for T in (MIN_FRAMES, 30017):
@@ -355,16 +359,20 @@ def cmd_export(args):
         with torch.no_grad():
             ref = ens(x).numpy()
         got = sess.run(None, {"spec": x.numpy()})[0]
-        print(f"ONNX check T={T}: max abs diff {np.abs(ref - got).max():.2e}")
+        print(f"ONNX check T={T}: max abs diff {np.abs(ref - got).max():.2e}", flush=True)
+    write_manifest(out)
+
+
+def write_manifest(out):
     man = {
         "name": "allin1", "source": "mir-aidj/all-in-one harmonix-fold0..7 (MIT)", "input": "spec [1,4,T,81]",
         "stems": ["bass", "drums", "other", "vocals"], "fps": 100, "frame_size": 2048, "hop": 441,
         "bands_per_octave": 12, "fmin": 30, "fmax": 17000,
         "min_frames": MIN_FRAMES,
+        "min_frames": MIN_FRAMES,
         "output": "act [1,T,13] = sigmoid(beat, downbeat, section), softmax(10 functions)", "labels": LABELS,
     }
     (out / "allin1.json").write_text(json.dumps(man, indent=2))
-    print("wrote", onnx_path)
 
 
 def main():
@@ -377,6 +385,7 @@ def main():
     r.add_argument("--force", action="store_true")
     e = sub.add_parser("export")
     e.add_argument("--out", required=True)
+    e.add_argument("--no-check", action="store_true")
     a = p.parse_args()
     {"ref": cmd_ref, "export": cmd_export}[a.cmd](a)
 

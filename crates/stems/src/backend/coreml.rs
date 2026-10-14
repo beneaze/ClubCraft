@@ -17,6 +17,19 @@ use objc2_foundation::{NSArray, NSDictionary, NSError, NSNumber, NSString, NSURL
 use std::ffi::c_void;
 use std::ptr::NonNull;
 
+/// CoreML predictions are serialised process-wide: running two models on the GPU at the same
+/// time (Best: RoFormer on the prep thread, Demucs on the inference thread) made results
+/// non-deterministic (up to 6e-3 run to run) and gains nothing, since the GPU is the bottleneck.
+static PREDICT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn predict(
+    model: &MLModel,
+    input: &ProtocolObject<dyn MLFeatureProvider>,
+) -> Result<Retained<ProtocolObject<dyn MLFeatureProvider>>> {
+    let _g = PREDICT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    unsafe { model.predictionFromFeatures_error(input).map_err(ns_err) }
+}
+
 struct Model(Retained<MLModel>);
 // SAFETY: MLModel prediction is documented thread-safe; we never mutate the model after loading.
 unsafe impl Send for Model {}
@@ -224,7 +237,7 @@ impl super::SingleBackend for CoreMlSingle {
             let dict: Retained<NSDictionary<NSString, AnyObject>> = NSDictionary::from_slices(&[&*key], &[&*val]);
             let provider = MLDictionaryFeatureProvider::initWithDictionary_error(MLDictionaryFeatureProvider::alloc(), &dict)
                 .map_err(ns_err)?;
-            let result = self.model.0.predictionFromFeatures_error(ProtocolObject::from_ref(&*provider)).map_err(ns_err)?;
+            let result = predict(&self.model.0, ProtocolObject::from_ref(&*provider))?;
             let o = result
                 .featureValueForName(&NSString::from_str(&self.output.0))
                 .and_then(|v| v.multiArrayValue())
@@ -339,7 +352,7 @@ impl Backend for CoreMlBackend {
             let provider = MLDictionaryFeatureProvider::initWithDictionary_error(MLDictionaryFeatureProvider::alloc(), &dict)
                 .map_err(ns_err)?;
             let input: &ProtocolObject<dyn MLFeatureProvider> = ProtocolObject::from_ref(&*provider);
-            let result = self.models[m].0.predictionFromFeatures_error(input).map_err(ns_err)?;
+            let result = predict(&self.models[m].0, input)?;
             let get = |name: &str| -> Result<Retained<MLMultiArray>> {
                 result
                     .featureValueForName(&NSString::from_str(name))

@@ -186,7 +186,7 @@ impl App {
             self.studio.edited = false;
             if self.eng.studio_player.is_some() {
                 self.studio.refresh_timeline(&self.sh);
-                self.eng.studio_update(&self.studio.mix);
+                self.eng.studio_update(&self.studio.mix, &self.sh);
             }
         }
         let anything_playing = st.decks.iter().any(|d| d.playing) || st.mix.active || self.eng.export.is_some() || self.eng.loading_mix.is_some();
@@ -357,7 +357,7 @@ impl App {
                     if self.eng.loading_mix.is_none() && !self.studio.mix.tracks.is_empty() {
                         self.eng.stop_mix(LIVE_DECKS);
                         self.status = "Preparing mix preview…".into();
-                        self.eng.play_mix(&self.studio.mix, STUDIO_DECKS, self.studio.position);
+                        self.eng.play_mix(&self.studio.mix, STUDIO_DECKS, self.studio.position, &self.sh);
                     }
                 } else {
                     self.eng.studio_pause(self.studio.playing);
@@ -372,13 +372,13 @@ impl App {
                 let _ = std::fs::create_dir_all(&dir);
                 let name: String = self.studio.mix.name.chars().map(|c| if c == '/' || c == ':' { '-' } else { c }).collect();
                 if let Some(out) = rfd::FileDialog::new().set_directory(&dir).set_file_name(format!("{name}.wav")).add_filter("WAV", &["wav"]).save_file() {
-                    self.eng.export_mix(&self.studio.mix, out);
+                    self.eng.export_mix(&self.studio.mix, out, &self.sh);
                     self.status = "Rendering mix…".into();
                 }
             }
             A::SendToLive => {
                 self.eng.stop_mix(STUDIO_DECKS);
-                self.eng.play_mix(&self.studio.mix, LIVE_DECKS, 0.0);
+                self.eng.play_mix(&self.studio.mix, LIVE_DECKS, 0.0, &self.sh);
                 self.view = View::Live;
                 self.status = format!("Playing '{}' live with automix", self.studio.mix.name);
             }
@@ -502,9 +502,7 @@ impl App {
             "mix-seek" => {
                 if let Ok(t) = arg.trim().parse::<f64>() {
                     if self.eng.live_player.is_some() {
-                        if let (Some(p), Some(h)) = (self.eng.live_player.as_ref(), self.eng.handle.as_mut()) {
-                            let _ = p.seek(h, t);
-                        }
+                        self.eng.live_mix_seek(t);
                     } else {
                         self.eng.studio_seek(t);
                     }
@@ -514,7 +512,7 @@ impl App {
             "studio-export" => {
                 let out = clubcraft_core::paths::exports_dir().join(format!("{}.wav", self.studio.mix.name));
                 let _ = std::fs::create_dir_all(clubcraft_core::paths::exports_dir());
-                self.eng.export_mix(&self.studio.mix, out);
+                self.eng.export_mix(&self.studio.mix, out, &self.sh);
             }
             "process-all" => {
                 for t in &self.sh.tracks {

@@ -22,6 +22,8 @@ pub const FPS: f64 = 100.0;
 pub const HOP: usize = 441;
 pub const N_FFT: usize = 2048;
 pub const N_BANDS: usize = 81;
+/// Shortest input the exported graph accepts (its longest attention window, 102.4 s).
+pub const MIN_FRAMES: usize = 10240;
 /// Functional labels in output order.
 pub const LABELS: [&str; 10] = ["start", "end", "intro", "outro", "break", "bridge", "inst", "solo", "verse", "chorus"];
 
@@ -269,10 +271,46 @@ impl Model {
     /// Spectrogram + inference for a track's stems.
     pub fn activations(&self, stems: &StemsRef) -> anyhow::Result<Activations> {
         let (t, spec) = stem_spectrograms(stems);
-        if t < 500 {
-            anyhow::bail!("track too short for the structure model");
+        if t < MIN_FRAMES {
+            anyhow::bail!("track too short for the structure model ({t} < {MIN_FRAMES} frames)");
         }
         self.run(t, &spec)
+    }
+}
+
+/// Activations from the process-wide model (loaded once from `models/allin1.onnx`); `None`
+/// when the feature is disabled, the model is missing or the track is too short.
+pub fn shared_activations(stems: &StemsRef) -> Option<Activations> {
+    #[cfg(feature = "allinone")]
+    {
+        static MODEL: std::sync::OnceLock<Option<Model>> = std::sync::OnceLock::new();
+        let model = MODEL.get_or_init(|| match Model::load_default() {
+            Ok(m) => Some(m),
+            Err(e) => {
+                log::info!("All-In-One structure model unavailable ({e:#}); using rule-based structure");
+                None
+            }
+        });
+        let m = model.as_ref()?;
+        if stems.frames().div_ceil(HOP) < MIN_FRAMES {
+            return None;
+        }
+        let t = std::time::Instant::now();
+        match m.activations(stems) {
+            Ok(a) => {
+                log::debug!("All-In-One model {:.2?}", t.elapsed());
+                Some(a)
+            }
+            Err(e) => {
+                log::warn!("All-In-One model failed: {e:#}");
+                None
+            }
+        }
+    }
+    #[cfg(not(feature = "allinone"))]
+    {
+        let _ = stems;
+        None
     }
 }
 

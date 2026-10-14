@@ -5,27 +5,48 @@
 //! is audible, makes sure it is loaded on its deck (`tracks[i]` → `decks[i % 2]`), positions it
 //! (re-seeking only if it drifted > 3 ms), sets the deck speed so that the deck lands *exactly*
 //! on the timeline position at the end of the block (beat-locked, drift-free), and applies the
-//! transition lanes (volume, stem gains, EQ, filter, echo) to the deck and its mixer channel.
-//! The next track is preloaded and parked on the idle deck as soon as that deck is free.
+//! transition lanes (volume, stem gains, EQ, filter, echo) and the studio lane mixer to the deck
+//! and its mixer channel. The next track is preloaded and parked on the idle deck as soon as
+//! that deck is free.
+//!
+//! ## Memory: lazily loaded tracks
+//! A [`MixSchedule`] holds only per-track metadata (the timeline) plus one *slot*
+//! (`Option<Arc<LoadedTrack>>`) per track. Slots can be filled while the mix runs
+//! ([`crate::Command::MixTrackReady`]); a track whose slot is still empty plays silence and
+//! starts in sync as soon as its audio arrives. With `release_finished` (lazy schedules) the
+//! conductor empties every slot outside [`MixSchedule::window_at`] — the current track(s) plus
+//! the next one — and hands the `Arc` back for dropping off the audio thread, so only 2–3 tracks
+//! are resident at any time.
 //!
 //! The same machinery serves the offline renderer ([`crate::render`]), the real-time studio
 //! preview with seeking ([`crate::MixPlayer`]) and live automix ([`crate::automix`]).
 
 use crate::command::DeckId;
 use crate::deck::Deck;
+use crate::dsp::eq_combine;
 use crate::mixer::{CrossfaderAssign, Mixer};
-use crate::state::MixPlaybackState;
+use crate::state::{MixPlaybackState, MIX_RESIDENT_WORDS};
 use crate::track::LoadedTrack;
 use anyhow::{anyhow, Result};
-use crate::dsp::eq_combine;
-use clubcraft_core::{LaneSettings, Mix, MixTimeline, Param, Side, StemKind, TrackId, Transition, MIX_LANES};
+use clubcraft_core::{Analysis, LaneSettings, Mix, MixTimeline, Param, Side, StemKind, TrackId, Transition, MIX_LANES};
+use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+/// Tracks kept resident ahead of the first unfinished track (current + next).
+pub const MIX_WINDOW: usize = 3;
+
+static NEXT_SCHEDULE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Everything the audio thread needs to play a mix. Built on the UI thread.
 pub struct MixSchedule {
+    /// Unique id (process wide); [`crate::Command::MixTrackReady`] must carry it.
+    pub id: u64,
     pub timeline: MixTimeline,
-    /// One loaded track per timeline track.
-    pub tracks: Vec<Arc<LoadedTrack>>,
+    /// Library id of every timeline track.
+    pub track_ids: Vec<TrackId>,
+    /// Audio + stems per track; `None` = not loaded (plays silence).
+    pub slots: Vec<Option<Arc<LoadedTrack>>>,
     /// `transitions[k]` joins track k and k + 1.
     pub transitions: Vec<Transition>,
     pub keylock: bool,
@@ -34,16 +55,25 @@ pub struct MixSchedule {
     pub lanes: [LaneSettings; MIX_LANES],
     /// Decks used for even / odd tracks.
     pub decks: [DeckId; 2],
+    /// Empty (and hand back) slots outside [`Self::window_at`] while playing.
+    pub release_finished: bool,
 }
 
 impl std::fmt::Debug for MixSchedule {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MixSchedule").field("tracks", &self.tracks.len()).field("duration", &self.timeline.total_secs).field("decks", &self.decks).finish()
+        f.debug_struct("MixSchedule")
+            .field("id", &self.id)
+            .field("tracks", &self.slots.len())
+            .field("resident", &self.slots.iter().filter(|s| s.is_some()).count())
+            .field("duration", &self.timeline.total_secs)
+            .field("decks", &self.decks)
+            .finish()
     }
 }
 
 impl MixSchedule {
-    /// Build from a studio mix. `tracks` resolves every `MixTrack::track_id`.
+    /// Eager schedule: `tracks` resolves (loads) every `MixTrack::track_id` now and all of them
+    /// stay resident. Fine for short mixes or callers that hold the tracks anyway.
     pub fn new(mix: &Mix, tracks: &dyn Fn(TrackId) -> Option<Arc<LoadedTrack>>, decks: [DeckId; 2]) -> Result<Self> {
         let mut mix = mix.clone();
         mix.normalize();
@@ -51,12 +81,43 @@ impl MixSchedule {
         for mt in &mix.tracks {
             loaded.push(tracks(mt.track_id).ok_or_else(|| anyhow!("track {} not available", mt.track_id))?);
         }
-        let lookup = |id: TrackId| {
-            mix.tracks.iter().position(|m| m.track_id == id).map(|i| loaded[i].analysis())
-        };
-        let timeline = MixTimeline::build(&mix, &lookup);
+        let lookup = |id: TrackId| mix.tracks.iter().position(|m| m.track_id == id).map(|i| loaded[i].analysis());
+        let mut s = Self::build(&mix, &lookup, decks);
+        s.slots = loaded.into_iter().map(Some).collect();
+        s.release_finished = false;
+        Ok(s)
+    }
+
+    /// Lazy schedule: only metadata from `analyses` (grid, duration, cues — what the timeline
+    /// needs); every slot starts empty and the conductor releases finished tracks.
+    pub fn lazy(mix: &Mix, analyses: &dyn Fn(TrackId) -> Option<Analysis>, decks: [DeckId; 2]) -> Self {
+        let mut mix = mix.clone();
+        mix.normalize();
+        Self::build(&mix, analyses, decks)
+    }
+
+    fn build(mix: &Mix, analyses: &dyn Fn(TrackId) -> Option<Analysis>, decks: [DeckId; 2]) -> Self {
+        let timeline = MixTimeline::build(mix, analyses);
         let lanes = std::array::from_fn(|i| mix.lanes.get(i).copied().unwrap_or_default());
-        Ok(MixSchedule { timeline, tracks: loaded, transitions: mix.transitions.clone(), keylock: mix.keylock, lanes, decks })
+        MixSchedule {
+            id: NEXT_SCHEDULE_ID.fetch_add(1, Ordering::Relaxed),
+            timeline,
+            track_ids: mix.tracks.iter().map(|t| t.track_id).collect(),
+            slots: vec![None; mix.tracks.len()],
+            transitions: mix.transitions.clone(),
+            keylock: mix.keylock,
+            lanes,
+            decks,
+            release_finished: true,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.slots.is_empty()
     }
 
     pub fn duration(&self) -> f64 {
@@ -79,6 +140,32 @@ impl MixSchedule {
     pub fn time_of_track_pos(&self, i: usize, pos: f64) -> f64 {
         self.timeline.sec_at_beat(self.timeline.beat_of_track_pos(i, pos))
     }
+
+    /// Tracks that should be resident at mix time `t` (see [`window_at`]).
+    pub fn window_at(&self, t: f64) -> Range<usize> {
+        window_at(&self.timeline, t)
+    }
+
+    /// Bit set of filled slots (first 64 × [`MIX_RESIDENT_WORDS`] tracks).
+    pub fn resident_bits(&self) -> [u64; MIX_RESIDENT_WORDS] {
+        let mut bits = [0u64; MIX_RESIDENT_WORDS];
+        for (i, s) in self.slots.iter().enumerate().take(64 * MIX_RESIDENT_WORDS) {
+            if s.is_some() {
+                bits[i / 64] |= 1 << (i % 64);
+            }
+        }
+        bits
+    }
+}
+
+/// The tracks that should be resident at mix time `t`: from the first track that has not
+/// finished yet, [`MIX_WINDOW`] tracks (the current one, the incoming one during a transition,
+/// and the next). Shared by the conductor (release) and [`crate::MixPlayer`] (prefetch) so the
+/// two never disagree.
+pub fn window_at(tl: &MixTimeline, t: f64) -> Range<usize> {
+    let b = tl.beat_at_sec(t.max(0.0));
+    let lo = tl.tracks.iter().position(|tr| tr.end_beat > b).unwrap_or(tl.tracks.len());
+    lo..(lo + MIX_WINDOW).min(tl.tracks.len())
 }
 
 /// Lane values applied to one side.
@@ -118,12 +205,53 @@ pub(crate) struct Conductor {
     state: MixPlaybackState,
 }
 
+fn unload_if_holding(deck: &mut Deck, t: &Arc<LoadedTrack>, drop_track: &mut dyn FnMut(Arc<LoadedTrack>)) {
+    if deck.track().is_some_and(|x| Arc::ptr_eq(x, t)) {
+        if let Some(old) = deck.unload() {
+            drop_track(old);
+        }
+    }
+}
+
 impl Conductor {
-    /// Install a new schedule. Returns the previous one (to drop elsewhere).
-    pub fn start(&mut self, sched: Box<MixSchedule>, start: f64, decks: &mut [Deck], mixer: &mut Mixer) -> Option<Box<MixSchedule>> {
-        let old = self.stop(decks, mixer);
+    /// Install a new schedule. Tracks already resident in the previous schedule are moved over
+    /// (matched by track id), so rebuilding after an edit does not reload audio. Returns the
+    /// previous schedule (to drop elsewhere).
+    pub fn start(
+        &mut self,
+        mut sched: Box<MixSchedule>,
+        start: f64,
+        decks: &mut [Deck],
+        mixer: &mut Mixer,
+        drop_track: &mut dyn FnMut(Arc<LoadedTrack>),
+    ) -> Option<Box<MixSchedule>> {
+        // keep the decks loaded: tracks carried over below stay on their decks
+        let mut old = self.stop_inner(decks, mixer, None);
+        if let Some(o) = old.as_mut() {
+            for i in 0..sched.slots.len() {
+                if sched.slots[i].is_none() {
+                    let id = sched.track_ids[i];
+                    if let Some(j) = (0..o.slots.len()).find(|&j| o.track_ids[j] == id && o.slots[j].is_some()) {
+                        sched.slots[i] = o.slots[j].take();
+                    }
+                }
+            }
+        }
         for &d in &sched.decks {
             if let Some(deck) = decks.get_mut(d) {
+                // a deck holding a track of the old (lazy) schedule that was not carried over
+                if let Some(o) = old.as_ref() {
+                    let held = deck.track().cloned();
+                    if let Some(t) = held {
+                        let in_old = o.slots.iter().flatten().any(|x| Arc::ptr_eq(x, &t));
+                        let in_new = sched.slots.iter().flatten().any(|x| Arc::ptr_eq(x, &t));
+                        if o.release_finished && in_old && !in_new {
+                            if let Some(x) = deck.unload() {
+                                drop_track(x);
+                            }
+                        }
+                    }
+                }
                 deck.set_keylock(sched.keylock);
                 deck.pause();
             }
@@ -142,11 +270,24 @@ impl Conductor {
         old
     }
 
-    /// Stop playback, pause the decks and reset automation. Returns the schedule.
-    pub fn stop(&mut self, decks: &mut [Deck], mixer: &mut Mixer) -> Option<Box<MixSchedule>> {
+    /// Stop playback, pause the decks and reset automation. For lazy schedules the decks are
+    /// unloaded too (their tracks go to `drop_track`), so nothing of the mix stays resident.
+    /// Returns the schedule.
+    pub fn stop(&mut self, decks: &mut [Deck], mixer: &mut Mixer, drop_track: &mut dyn FnMut(Arc<LoadedTrack>)) -> Option<Box<MixSchedule>> {
+        self.stop_inner(decks, mixer, Some(drop_track))
+    }
+
+    fn stop_inner(&mut self, decks: &mut [Deck], mixer: &mut Mixer, mut drop_track: Option<&mut dyn FnMut(Arc<LoadedTrack>)>) -> Option<Box<MixSchedule>> {
         let s = self.sched.take()?;
         for &d in &s.decks {
             if let Some(deck) = decks.get_mut(d) {
+                if let Some(dt) = drop_track.as_deref_mut() {
+                    if s.release_finished && deck.track().is_some_and(|t| s.slots.iter().flatten().any(|x| Arc::ptr_eq(x, t))) {
+                        if let Some(old) = deck.unload() {
+                            dt(old);
+                        }
+                    }
+                }
                 deck.pause();
                 deck.set_tempo_override(None);
                 for st in StemKind::ALL {
@@ -181,36 +322,69 @@ impl Conductor {
         }
     }
 
+    /// Fill slot `index` of schedule `schedule`. Returns the track when it was not taken (wrong
+    /// schedule, out of range, already filled) so the caller can dispose of it off-thread.
+    pub fn set_track(&mut self, schedule: u64, index: usize, track: Arc<LoadedTrack>) -> Option<Arc<LoadedTrack>> {
+        match self.sched.as_mut() {
+            Some(s) if s.id == schedule && index < s.slots.len() && s.slots[index].is_none() => {
+                s.slots[index] = Some(track);
+                None
+            }
+            _ => Some(track),
+        }
+    }
+
     pub fn state(&self) -> MixPlaybackState {
         self.state
     }
 
     /// Advance by one block of `n` frames at `sr`. Old tracks are passed to `drop_track`.
     pub fn step(&mut self, decks: &mut [Deck], mixer: &mut Mixer, n: usize, sr: f64, drop_track: &mut dyn FnMut(Arc<LoadedTrack>)) {
-        let Some(s) = self.sched.as_ref() else {
+        let Some(s) = self.sched.as_mut() else {
             self.state = MixPlaybackState { serial: self.serial, finished: self.finished, ..Default::default() };
             return;
         };
-        let tl = &s.timeline;
+        let s: &mut MixSchedule = s;
         let dt = n as f64 / sr;
         let t0 = self.time;
         let t1 = t0 + dt;
-        let b0 = tl.beat_at_sec(t0);
-        let b1 = tl.beat_at_sec(t1);
+        let (b0, b1) = (s.timeline.beat_at_sec(t0), s.timeline.beat_at_sec(t1));
         let mut on_air = 0usize;
         let mut cur_transition = None;
-        if self.playing {
-            if t0 >= tl.total_secs {
-                self.playing = false;
-                self.finished = true;
-                for &d in &s.decks {
-                    if let Some(deck) = decks.get_mut(d) {
-                        deck.pause();
+        let mut waiting = false;
+        if self.playing && t0 >= s.timeline.total_secs {
+            self.playing = false;
+            self.finished = true;
+            for &d in &s.decks {
+                if let Some(deck) = decks.get_mut(d) {
+                    deck.pause();
+                }
+            }
+        }
+        // release tracks outside the residency window (lazy schedules)
+        if s.release_finished {
+            let w = window_at(&s.timeline, t0);
+            for i in 0..s.slots.len() {
+                if w.contains(&i) {
+                    continue;
+                }
+                if let Some(t) = s.slots[i].take() {
+                    for &d in &s.decks {
+                        if let Some(deck) = decks.get_mut(d) {
+                            unload_if_holding(deck, &t, drop_track);
+                        }
                     }
+                    for st in self.slot_track.iter_mut() {
+                        if *st == Some(i) {
+                            *st = None;
+                        }
+                    }
+                    drop_track(t);
                 }
             }
         }
         if self.playing {
+            let tl = &s.timeline;
             for (i, tr) in tl.tracks.iter().enumerate() {
                 let slot = i % 2;
                 let d = s.decks[slot];
@@ -226,9 +400,19 @@ impl Conductor {
                     }
                     continue;
                 }
+                let Some(track) = s.slots[i].as_ref() else {
+                    // audio not here yet: silence on this deck until it arrives
+                    waiting = true;
+                    if deck.is_playing() {
+                        deck.pause();
+                    }
+                    mixer.channels[d].lane_volume = 0.0;
+                    self.slot_track[slot] = None;
+                    continue;
+                };
                 // load if needed
-                if !deck.track().is_some_and(|t| Arc::ptr_eq(t, &s.tracks[i])) {
-                    if let Some(old) = deck.load(s.tracks[i].clone()) {
+                if !deck.track().is_some_and(|t| Arc::ptr_eq(t, track)) {
+                    if let Some(old) = deck.load(track.clone()) {
                         drop_track(old);
                     }
                 }
@@ -237,7 +421,7 @@ impl Conductor {
                     deck.set_keylock(s.keylock);
                     deck.set_key_shift(tr.key_shift as f32);
                     let ch = &mut mixer.channels[d];
-                    ch.auto_gain_db = s.tracks[i].gain_db.unwrap_or(0.0);
+                    ch.auto_gain_db = track.gain_db.unwrap_or(0.0);
                     ch.fader = 1.0;
                 }
                 let p0 = tl.track_pos(i, b0);
@@ -248,7 +432,7 @@ impl Conductor {
                 }
                 let speed = ((p1 - deck.position()) / dt).clamp(0.05, 4.0);
                 deck.set_tempo_override(Some(speed));
-                // lanes
+                // transition lanes
                 let mut lanes = LaneValues::neutral();
                 if i > 0 {
                     let x = &tl.transitions[i - 1];
@@ -285,8 +469,9 @@ impl Conductor {
                 // (through the channel's gain smoothers: click free), lane EQ is a base the
                 // transition EQ modulates (gains multiply), and a non-neutral transition filter
                 // overrides the lane filter.
-                let lane = s.lane_of(i);
-                if !s.lane_audible(i) {
+                let lane = s.lanes[i % MIX_LANES];
+                let any_solo = s.lanes.iter().any(|l| l.solo);
+                if lane.mute || (any_solo && !lane.solo) {
                     vol = 0.0;
                 }
                 let ch = &mut mixer.channels[d];
@@ -306,10 +491,10 @@ impl Conductor {
                 let slot = i % 2;
                 if self.slot_track[slot].is_none() {
                     let d = s.decks[slot];
-                    if let Some(deck) = decks.get_mut(d) {
+                    if let (Some(deck), Some(track)) = (decks.get_mut(d), s.slots[i].as_ref()) {
                         let park = tl.track_pos(i, tr.start_beat).max(0.0);
-                        if !deck.track().is_some_and(|t| Arc::ptr_eq(t, &s.tracks[i])) {
-                            if let Some(old) = deck.load(s.tracks[i].clone()) {
+                        if !deck.track().is_some_and(|t| Arc::ptr_eq(t, track)) {
+                            if let Some(old) = deck.load(track.clone()) {
                                 drop_track(old);
                             }
                         }
@@ -332,12 +517,15 @@ impl Conductor {
             active: true,
             playing: self.playing,
             time: self.time,
-            duration: tl.total_secs,
+            duration: s.timeline.total_secs,
             current_track: on_air,
             transition: cur_transition,
-            bpm: tl.bpm_at_beat(b0),
+            bpm: s.timeline.bpm_at_beat(b0),
             finished: self.finished,
             serial: self.serial,
+            schedule_id: s.id,
+            resident: s.resident_bits(),
+            waiting,
         };
     }
 }

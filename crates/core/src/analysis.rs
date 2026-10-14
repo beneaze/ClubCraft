@@ -45,7 +45,10 @@ impl StemKind {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct BeatGrid {
     pub bpm: f64,
-    /// Time (s) of the first downbeat at or after the start of the track.
+    /// Time (s) of the grid anchor: the first downbeat with music (bar 0; phrases count from it).
+    /// Normally the first downbeat at or after the start of the track; it may be up to 30 ms
+    /// negative (a bar starting right at the file start) or later than the first beat when the
+    /// file starts with silence.
     pub downbeat: f64,
     pub beats_per_bar: u32,
 }

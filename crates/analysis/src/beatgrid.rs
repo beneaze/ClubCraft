@@ -26,7 +26,10 @@
 //!    DJ.Studio in 96 % and Mixed In Key's cues in 90 % of the reference tracks. Novelty-based
 //!    evidence (bar / phrase-level novelty, `phase_features`) only breaks ties when no
 //!    beat with music is found; it proved less reliable than the start-of-music rule.
-//! 7. `BeatGrid::downbeat` is the first bar-1 beat at or after t = 0.
+//! 7. `BeatGrid::downbeat` (the grid anchor, bar 0) is that first downbeat with music. It is
+//!    normally the first downbeat at or after t = 0, may lie up to 30 ms before 0 (a bar that
+//!    starts right at the file start, shifted by encoder delay), and is later when the file
+//!    starts with silent bars. Phrases (8/16/32 bars) and the mix cues count from it.
 //!
 //! Accuracy on 135 DJ.Studio-analysed tracks: BPM within 0.05 on 100 % of constant-grid
 //! references, beat phase within 5 ms on 95 % (15 ms: 98.5 %).
@@ -197,7 +200,14 @@ pub(crate) fn estimate(prep: &crate::Prepared, opts: &BeatOptions) -> Option<Gri
         first_s
     };
     let (bar_off, bar_scores) = bar_phase(prep, &env, fps, first_s, beat_s);
-    let grid = BeatGrid::new(bpm, first_s + bar_off as f64 * beat_s);
+    // Anchor the grid on the first downbeat *with music*, so bar 0 = phrase origin = the
+    // Start cue. It may lie up to 30 ms before t = 0 (encoder delay / tight edits) and is later
+    // than the first grid beat when the file starts with silence.
+    let anchor = match first_music_beat(prep, first_s, beat_s) {
+        Some(k) if (k - bar_off as i64).rem_euclid(4) == 0 => first_s + k as f64 * beat_s,
+        _ => first_s + bar_off as f64 * beat_s,
+    };
+    let grid = BeatGrid::new(bpm, anchor);
     Some(GridEstimate {
         grid,
         confidence: conf,
@@ -625,7 +635,7 @@ pub(crate) fn phase_features(
     let start_k: i64 = if first_s - beat_s >= -0.03 { -1 } else { 0 };
     let mut music = [0.0f32; 4];
     for k in start_k..(nbeats as i64) {
-        if beat_level(first_s + k as f64 * beat_s) > -65.0 {
+        if beat_level(first_s + k as f64 * beat_s) > MUSIC_DBFS {
             music[k.rem_euclid(4) as usize] = 1.0;
             break;
         }
@@ -658,6 +668,27 @@ pub(crate) fn phase_features(
 /// Weights of the phase features (log-odds style linear combination).
 const PHASE_WEIGHTS: [f32; N_PHASE_FEATS] =
     [0.0, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.01];
+
+/// Mean-square level threshold for "music has started" (dBFS of the mono mix over one beat).
+const MUSIC_DBFS: f32 = -65.0;
+
+/// Index (relative to `first_s`; -1 = the beat up to 30 ms before t = 0) of the first beat
+/// whose beat-long window contains music.
+fn first_music_beat(prep: &crate::Prepared, first_s: f64, beat_s: f64) -> Option<i64> {
+    let sr = prep.sr;
+    let level = |t: f64| -> f32 {
+        let a = (t.max(0.0) * sr) as usize;
+        let b = (((t + beat_s) * sr) as usize).min(prep.mono.len());
+        if b <= a {
+            return -200.0;
+        }
+        let ms = prep.mono[a..b].iter().map(|v| (v * v) as f64).sum::<f64>() / (b - a) as f64;
+        (10.0 * ms.max(1e-30).log10()) as f32
+    };
+    let start_k: i64 = if first_s - beat_s >= -0.03 { -1 } else { 0 };
+    let n = ((prep.duration() - first_s) / beat_s).floor() as i64;
+    (start_k..n).find(|&k| level(first_s + k as f64 * beat_s) > MUSIC_DBFS)
+}
 
 /// Choose which of the 4 beats starting at `first_s` is beat 1 of the bar.
 fn bar_phase(

@@ -191,6 +191,19 @@ pub struct AnalyzeOptions {
     pub max_gain_db: f32,
     /// Name of the stems model (stored in `Analysis::stems_model` when stems are given).
     pub stems_model: Option<String>,
+    /// Where section boundaries come from (see [`StructureSource`]).
+    pub structure: StructureSource,
+}
+
+/// Source of the section boundaries / labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StructureSource {
+    /// The All-In-One model when stems are given, the track is long enough (≥ 102.4 s) and
+    /// `models/allin1.onnx` loads; the rule-based segmentation otherwise.
+    #[default]
+    Auto,
+    /// Always the rule-based segmentation.
+    Rules,
 }
 
 impl Default for AnalyzeOptions {
@@ -200,6 +213,7 @@ impl Default for AnalyzeOptions {
             target_lufs: -10.0,
             max_gain_db: 12.0,
             stems_model: None,
+            structure: StructureSource::Auto,
         }
     }
 }
@@ -255,6 +269,17 @@ impl<'a> Prepared<'a> {
 /// same audio. The result has `version = Analysis::CURRENT_VERSION`; cues are
 /// [`clubcraft_core::CueSource::Auto`].
 pub fn analyze(audio: &AudioBuffer, stems: Option<&StemsRef>, opts: &AnalyzeOptions) -> Analysis {
+    analyze_with_activations(audio, stems, opts, None)
+}
+
+/// Like [`analyze`], with precomputed All-In-One activations (e.g. cached). `None` runs the
+/// model itself when [`AnalyzeOptions::structure`] and the inputs allow it.
+pub fn analyze_with_activations(
+    audio: &AudioBuffer,
+    stems: Option<&StemsRef>,
+    opts: &AnalyzeOptions,
+    activations: Option<&allinone::Activations>,
+) -> Analysis {
     let stems = stems.copied();
     let duration = audio.duration();
     let mut out = Analysis {
@@ -268,7 +293,9 @@ pub fn analyze(audio: &AudioBuffer, stems: Option<&StemsRef>, opts: &AnalyzeOpti
     let t0 = std::time::Instant::now();
     let prep = Prepared::new(audio, stems);
     let t1 = t0.elapsed();
-    let ((est, key), lufs) = rayon::join(
+    let want_model = opts.structure == StructureSource::Auto && activations.is_none();
+    let (((est, key), lufs), model_act) = rayon::join(
+        || rayon::join(
         || {
             rayon::join(
                 || {
@@ -286,7 +313,13 @@ pub fn analyze(audio: &AudioBuffer, stems: Option<&StemsRef>, opts: &AnalyzeOpti
             )
         },
         || loudness::integrated_lufs(&audio.left, &audio.right, audio.sample_rate),
+        ),
+        || match (want_model, stems.as_ref()) {
+            (true, Some(st)) => allinone::shared_activations(st),
+            _ => None,
+        },
     );
+    let act = if opts.structure == StructureSource::Rules { None } else { activations.or(model_act.as_ref()) };
     let t2 = t0.elapsed();
     out.key = key;
     out.loudness_lufs = lufs;
@@ -295,7 +328,10 @@ pub fn analyze(audio: &AudioBuffer, stems: Option<&StemsRef>, opts: &AnalyzeOpti
         let grid = est.grid;
         out.grid = Some(grid);
         let bars = structure::bar_features(&prep, &grid);
-        out.sections = structure::segment(&bars, &grid, duration);
+        out.sections = match act {
+            Some(a) if a.len() >= allinone::MIN_FRAMES => structure::segment_with_model(&bars, &grid, duration, a),
+            _ => structure::segment(&bars, &grid, duration),
+        };
         out.cues = cues::generate_from(&grid, &out.sections, &bars, duration);
         out.energy = Some(energy::rating_from(lufs, &bars, &out.sections, grid.bpm));
         log::debug!(

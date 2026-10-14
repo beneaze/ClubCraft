@@ -99,6 +99,16 @@ impl TrackCache {
     }
 }
 
+/// Load a track without putting it in the shared cache (used by renders).
+fn load_uncached(id: TrackId) -> Result<Arc<LoadedTrack>> {
+    let lib = Library::open_default()?;
+    let t = lib.track(id)?.context("unknown track")?;
+    let analysis = lib.analysis(id)?.unwrap_or_default();
+    let audio = Arc::new(clubcraft_audio::decode_file(&t.path, clubcraft_core::SAMPLE_RATE)?);
+    let stems = clubcraft_stems::load_stem_track(&stems_path(&t.hash)).ok().filter(|st| st.frames.abs_diff(audio.frames()) < 4096).map(Arc::new);
+    Ok(Arc::new(LoadedTrack::from_parts(&t, &analysis, stems, audio).with_user_cues(&lib.cues(id)?)))
+}
+
 /// Background separation of tracks loaded on a deck before their stems were cached.
 /// Uses the fast model so stems are available within seconds; the result is saved to the
 /// cache (the library job queue may later upgrade it to the high-quality model).
@@ -169,7 +179,6 @@ impl LiveSeparator {
 
 enum LoadResult {
     Deck(usize, u64, Result<Arc<LoadedTrack>>),
-    Mix { serial: u64, decks: [usize; 2], mix: Box<Mix>, from: f64, result: Result<()> },
 }
 
 pub struct Export {
@@ -254,34 +263,46 @@ impl LiveEngine {
         self.pending[deck] != 0
     }
 
-    /// Prepare all tracks of `mix` in the background and start playing it on `decks`.
-    pub fn play_mix(&mut self, mix: &Mix, decks: [usize; 2], from: f64) {
-        self.serial += 1;
-        self.loading_mix = Some(self.serial);
-        let (cache, tx, serial, mix) = (self.cache.clone(), self.tx.clone(), self.serial, mix.clone());
-        std::thread::spawn(move || {
-            let mut result = Ok(());
-            for t in &mix.tracks {
-                if let Err(e) = cache.load(t.track_id, None) {
-                    result = Err(e);
-                    break;
-                }
+    /// Start playing `mix` on `decks`. Tracks are loaded just in time (only the current and the
+    /// next couple of tracks are kept in memory).
+    pub fn play_mix(&mut self, mix: &Mix, decks: [usize; 2], from: f64, sh: &Shared) {
+        self.stop_mix(STUDIO_DECKS);
+        self.stop_mix(LIVE_DECKS);
+        let mix = playable_mix(mix, &|id| sh.analyses.get(&id).is_some_and(|a| a.stems_model.is_some()));
+        let mut p = MixPlayer::lazy(&mix, &|id| sh.analyses.get(&id).cloned(), decks);
+        if let Some(h) = self.handle.as_mut() {
+            if let Err(e) = p.play(h, from) {
+                log::warn!("mix: {e:#}");
             }
-            let mix = playable_mix(&mix, &cache);
-            let _ = tx.send(LoadResult::Mix { serial, decks, mix: Box::new(mix), from, result });
-        });
+        }
+        if decks == STUDIO_DECKS {
+            self.studio_player = Some(p);
+        } else {
+            self.live_player = Some(p);
+        }
+    }
+
+    fn loader(&self) -> clubcraft_engine::player::TrackLoader {
+        let cache = self.cache.clone();
+        Arc::new(move |id| cache.load(id, None).map_err(|e| log::warn!("mix track {id}: {e:#}")).ok())
     }
 
     pub fn stop_mix(&mut self, decks: [usize; 2]) {
         let player = if decks == STUDIO_DECKS { self.studio_player.take() } else { self.live_player.take() };
-        if let (Some(p), Some(h)) = (player, self.handle.as_mut()) {
+        if let (Some(mut p), Some(h)) = (player, self.handle.as_mut()) {
             let _ = p.stop(h);
         }
         self.loading_mix = None;
     }
 
     pub fn studio_seek(&mut self, t: f64) {
-        if let (Some(p), Some(h)) = (self.studio_player.as_ref(), self.handle.as_mut()) {
+        if let (Some(p), Some(h)) = (self.studio_player.as_mut(), self.handle.as_mut()) {
+            let _ = p.seek(h, t);
+        }
+    }
+
+    pub fn live_mix_seek(&mut self, t: f64) {
+        if let (Some(p), Some(h)) = (self.live_player.as_mut(), self.handle.as_mut()) {
             let _ = p.seek(h, t);
         }
     }
@@ -293,34 +314,34 @@ impl LiveEngine {
     }
 
     /// Push mix edits into a running studio preview.
-    pub fn studio_update(&mut self, mix: &Mix) {
-        let cache = self.cache.clone();
+    pub fn studio_update(&mut self, mix: &Mix, sh: &Shared) {
         let state = self.state();
+        let mix = playable_mix(mix, &|id| sh.analyses.get(&id).is_some_and(|a| a.stems_model.is_some()));
         if let (Some(p), Some(h)) = (self.studio_player.as_mut(), self.handle.as_mut()) {
-            if let Err(e) = p.update(mix, &|id| cache.get(id), h, &state) {
+            if let Err(e) = p.update_lazy(&mix, &|id| sh.analyses.get(&id).cloned(), h, &state) {
                 log::warn!("mix update: {e:#}");
             }
         }
     }
 
-    pub fn export_mix(&mut self, mix: &Mix, out: PathBuf) {
+    pub fn export_mix(&mut self, mix: &Mix, out: PathBuf, sh: &Shared) {
         let progress = Arc::new(AtomicU32::new(0));
         let done = Arc::new(Mutex::new(None));
         self.export = Some(Export { progress: progress.clone(), done: done.clone() });
-        let (cache, mix) = (self.cache.clone(), mix.clone());
+        let analyses: HashMap<TrackId, clubcraft_core::Analysis> = mix.tracks.iter().filter_map(|t| sh.analyses.get(&t.track_id).map(|a| (t.track_id, a.clone()))).collect();
+        let mix = playable_mix(mix, &|id| analyses.get(&id).is_some_and(|a| a.stems_model.is_some()));
+        let cache = self.cache.clone();
         std::thread::spawn(move || {
             let r = (|| -> Result<PathBuf> {
-                for t in &mix.tracks {
-                    cache.load(t.track_id, None)?;
-                }
-                let mix = playable_mix(&mix, &cache);
                 let opts = RenderOptions { format: WavFormat::Pcm24, ..Default::default() };
-                let report = clubcraft_engine::render_mix(&mix, &|id| cache.get(id), &out, &opts, &mut |p| {
+                // Tracks are loaded just before they play and dropped afterwards (bounded memory);
+                // nothing is added to the shared cache.
+                let report = clubcraft_engine::render_mix(&mix, &|id| analyses.get(&id).cloned(), &|id| cache.get(id).or_else(|| load_uncached(id).ok()), &out, &opts, &mut |p| {
                     progress.store((p.clamp(0.0, 1.0) * 1000.0) as u32, Ordering::Relaxed);
                     true
                 })?;
                 log::info!("rendered {:?}", report);
-                write_cue_sheet(&mix, &cache, &out)?;
+                write_cue_sheet(&mix, &analyses, &out)?;
                 Ok(out)
             })();
             *done.lock() = Some(r.map_err(|e| format!("{e:#}")));
@@ -348,32 +369,6 @@ impl LiveEngine {
                         Err(e) => messages.push(format!("Load failed: {e:#}")),
                     }
                 }
-                LoadResult::Mix { serial, decks, mix, from, result } => {
-                    if self.loading_mix != Some(serial) {
-                        continue;
-                    }
-                    self.loading_mix = None;
-                    if let Err(e) = result {
-                        messages.push(format!("Mix: {e:#}"));
-                        continue;
-                    }
-                    let cache = self.cache.clone();
-                    match MixPlayer::new(&mix, &|id| cache.get(id), decks) {
-                        Ok(p) => {
-                            if let Some(h) = self.handle.as_mut() {
-                                if let Err(e) = p.play(h, from) {
-                                    messages.push(format!("Mix: {e:#}"));
-                                }
-                            }
-                            if decks == STUDIO_DECKS {
-                                self.studio_player = Some(p);
-                            } else {
-                                self.live_player = Some(p);
-                            }
-                        }
-                        Err(e) => messages.push(format!("Mix: {e:#}")),
-                    }
-                }
             }
         }
         while let Ok(id) = self.sep.done.try_recv() {
@@ -381,8 +376,24 @@ impl LiveEngine {
             self.touched.push(id);
             jobs.analyze_only(id); // re-analyse with stems for better cues
         }
-        // Persist hot cues the user set or moved.
+        // Prefetch upcoming tracks of a playing mix.
         let st = self.state();
+        let loader = self.loader();
+        for which in 0..2 {
+            let (player, h) = if which == 0 { (self.studio_player.as_mut(), self.handle.as_mut()) } else { (self.live_player.as_mut(), self.handle.as_mut()) };
+            if let (Some(p), Some(h)) = (player, h) {
+                match p.poll(h, &st, &loader) {
+                    Ok(status) => {
+                        if !status.failed.is_empty() {
+                            messages.push(format!("{} mix track(s) could not be loaded", status.failed.len()));
+                            p.clear_failures();
+                        }
+                    }
+                    Err(e) => log::warn!("mix prefetch: {e:#}"),
+                }
+            }
+        }
+        // Persist hot cues the user set or moved.
         for d in 0..2 {
             let ds = &st.decks[d];
             let Some(id) = ds.track_id else { continue };
@@ -538,7 +549,7 @@ impl LiveEngine {
                     let queue = self.automix_queue.clone();
                     if queue.len() >= 2 {
                         let planned = clubcraft_core::planner::plan_mix("Automix", &queue, &|id| sh.analyses.get(&id).cloned(), &Default::default());
-                        self.play_mix(&planned, LIVE_DECKS, 0.0);
+                        self.play_mix(&planned, LIVE_DECKS, 0.0, sh);
                     }
                 } else {
                     self.stop_mix(LIVE_DECKS);
@@ -551,10 +562,10 @@ impl LiveEngine {
 
 /// Stem-based transition styles need stems on both tracks. For transitions where a track has
 /// none (yet), play a bass-swap blend instead so the tracks never just overlap at full volume.
-pub fn playable_mix(mix: &Mix, cache: &TrackCache) -> Mix {
+pub fn playable_mix(mix: &Mix, has_stems: &dyn Fn(TrackId) -> bool) -> Mix {
     use clubcraft_core::{Param, TransitionStyle};
     let mut m = mix.clone();
-    let has = |i: usize| m.tracks.get(i).and_then(|t| cache.get(t.track_id)).is_some_and(|t| t.stems.as_ref().is_some_and(|s| s.is_complete()));
+    let has = |i: usize| m.tracks.get(i).is_some_and(|t| has_stems(t.track_id));
     let flags: Vec<bool> = (0..m.tracks.len()).map(has).collect();
     for (k, tr) in m.transitions.iter_mut().enumerate() {
         let uses_stems = tr.lanes.iter().any(|l| matches!(l.param, Param::Stem(_)));
@@ -593,13 +604,14 @@ fn chrono_like_now() -> String {
 }
 
 /// `.cue` sheet next to an exported mix (75 frames per second).
-fn write_cue_sheet(mix: &Mix, cache: &TrackCache, wav: &std::path::Path) -> Result<()> {
-    let tl = clubcraft_core::MixTimeline::build(mix, &|id| cache.get(id).map(|t| t.analysis()));
+fn write_cue_sheet(mix: &Mix, analyses: &HashMap<TrackId, clubcraft_core::Analysis>, wav: &std::path::Path) -> Result<()> {
+    let tl = clubcraft_core::MixTimeline::build(mix, &|id| analyses.get(&id).cloned());
+    let lib = Library::open_default()?;
     let mut s = format!("PERFORMER \"ClubCraft\"\nTITLE \"{}\"\nFILE \"{}\" WAVE\n", mix.name.replace('"', "'"), wav.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default());
     for (i, t) in tl.tracks.iter().enumerate() {
         // a track "starts" in the middle of the transition that brings it in
         let start = if i == 0 { 0.0 } else { (tl.transitions[i - 1].start_sec + tl.transitions[i - 1].end_sec) / 2.0 };
-        let (title, artist) = cache.get(t.track_id).map(|l| (l.title.clone(), l.artist.clone())).unwrap_or_default();
+        let (title, artist) = lib.track(t.track_id).ok().flatten().map(|l| (l.title, l.artist)).unwrap_or_default();
         let frames = (start * 75.0).round() as u64;
         s += &format!(
             "  TRACK {:02} AUDIO\n    TITLE \"{}\"\n    PERFORMER \"{}\"\n    INDEX 01 {:02}:{:02}:{:02}\n",

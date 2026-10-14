@@ -48,13 +48,13 @@ pub mod wav;
 
 pub use automix::AutomixOptions;
 pub use command::{Command, DeckId, EqBand};
-pub use conductor::MixSchedule;
+pub use conductor::{window_at, MixSchedule, MIX_WINDOW};
 pub use core::EngineCore;
 pub use deck::Deck;
 pub use engine::{devices, AudioConfig, CommandSender, DeviceInfo, Engine, EngineHandle, HeadphoneRouting, StreamInfo};
 pub use fx::FxKind;
 pub use mixer::{CrossfaderAssign, CrossfaderCurve, FaderCurve};
-pub use player::{CommandSink, MixPlayer};
+pub use player::{CommandSink, MixPlayer, PrefetchStatus, TrackLoader};
 pub use render::{render_mix, render_mix_to_vec, RenderOptions, RenderReport};
 pub use state::*;
 pub use track::LoadedTrack;

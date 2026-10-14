@@ -13,6 +13,8 @@ pub const MAX_DECKS: usize = 4;
 pub const HOT_CUES: usize = clubcraft_core::HOT_CUES;
 /// Effect slots per deck.
 pub const FX_SLOTS: usize = 3;
+/// `MixPlaybackState::resident` covers the first `64 * MIX_RESIDENT_WORDS` mix tracks.
+pub const MIX_RESIDENT_WORDS: usize = 4;
 
 /// Cue button behaviour (VirtualDJ `cueMode`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -247,6 +249,24 @@ pub struct MixPlaybackState {
     pub finished: bool,
     /// Distinguishes successive mixes.
     pub serial: u64,
+    /// [`crate::MixSchedule::id`] of the schedule being played (0 = none).
+    pub schedule_id: u64,
+    /// Bit set of mix tracks whose audio is resident on the audio thread
+    /// (bit `i % 64` of word `i / 64`).
+    pub resident: [u64; MIX_RESIDENT_WORDS],
+    /// A track that should be audible right now has no audio yet (playing silence).
+    pub waiting: bool,
+}
+
+impl MixPlaybackState {
+    /// Whether mix track `i` is resident (always `false` beyond the bit set).
+    pub fn is_resident(&self, i: usize) -> bool {
+        i < 64 * MIX_RESIDENT_WORDS && self.resident[i / 64] & (1 << (i % 64)) != 0
+    }
+
+    pub fn resident_count(&self) -> u32 {
+        self.resident.iter().map(|w| w.count_ones()).sum()
+    }
 }
 
 /// Recording state.

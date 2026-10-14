@@ -19,8 +19,7 @@
 //!   the drums are back but the bass is not yet (tolerating the 1-2 bar drop-out before the
 //!   drop), or the last 4/8 bars of a drumless breakdown when they get denser (snare roll /
 //!   riser); everything else (grooves without the full drop energy, vocal parts) is *Verse*.
-//!   Consecutive drop / breakdown / verse phrases are kept as separate sections (one per
-//!   phrase group); consecutive intro / build / outro parts are merged.
+//!   Adjacent sections with the same label are merged, so labels always alternate.
 
 use crate::dsp;
 use crate::frontend::N_MELS;
@@ -30,8 +29,8 @@ use clubcraft_core::{BeatGrid, Section, SectionKind, StemKind};
 #[derive(Debug, Clone, Default)]
 pub struct BarFeatures {
     pub first_bar: i32,
-    /// Grid bar index where phrases are counted from: the first bar with music (normally 0;
-    /// -1 when the music's first downbeat lies a few ms before t = 0).
+    /// Grid bar index where phrases are counted from. Always 0: the grid anchor is the first
+    /// downbeat with music (kept as a field for callers that build bar features by hand).
     pub phrase_origin: i32,
     pub start: Vec<f64>,
     /// Stem activity 0..1 in StemKind order.
@@ -249,10 +248,8 @@ pub(crate) fn bar_features(prep: &crate::Prepared, grid: &BeatGrid) -> BarFeatur
         timbre,
         ..Default::default()
     };
-    out.phrase_origin = (0..n)
-        .find(|&i| starts[i] >= -0.03 && level[i] - lref > -40.0)
-        .map(|i| first_bar + i as i32)
-        .unwrap_or(0);
+    // The grid anchor is the first downbeat with music, so phrases count from bar 0.
+    out.phrase_origin = 0;
     for i in 0..n {
         let lv = (level[i] - lref).max(-60.0);
         out.level_db.push(lv);
@@ -445,14 +442,63 @@ pub fn sections(
 
 /// Segment and label bars into sections.
 pub fn segment(b: &BarFeatures, grid: &BeatGrid, duration: f64) -> Vec<Section> {
-    let n = b.len();
-    if n < 4 {
+    if b.len() < 4 {
         return vec![];
     }
+    let bounds = boundaries(b, SEG_LAMBDA);
+    finish(b, grid, bounds, duration, None)
+}
+
+/// Section boundaries from the All-In-One model: its boundary peaks snapped to the bar grid
+/// (to a 4-bar line when within one bar), at least 2 bars apart (stronger peak wins).
+pub fn model_boundaries(b: &BarFeatures, grid: &BeatGrid, act: &crate::allinone::Activations) -> Vec<usize> {
+    let n = b.len();
+    let mut cands: Vec<(usize, f32)> = Vec::new();
+    for c in crate::allinone::boundaries(act) {
+        let bar = grid.bar_at(c.time).round() as i32;
+        let rel = bar - b.phrase_origin;
+        let b4 = (rel as f64 / 4.0).round() as i32 * 4;
+        let snapped = if (rel - b4).abs() <= 1 { b4 + b.phrase_origin } else { bar };
+        let i = snapped - b.first_bar;
+        if i > 0 && (i as usize) < n {
+            cands.push((i as usize, c.strength));
+        }
+    }
+    cands.sort_by(|x, y| y.1.total_cmp(&x.1));
+    let mut keep: Vec<usize> = Vec::new();
+    for (i, _) in cands {
+        if keep.iter().all(|k| k.abs_diff(i) >= 2) {
+            keep.push(i);
+        }
+    }
+    keep.push(0);
+    keep.push(n);
+    keep.sort();
+    keep.dedup();
+    keep
+}
+
+/// Sections from model boundaries; labels from the activity rules, refined by the model's
+/// functional labels (break / bridge, chorus / inst / solo, intro, outro).
+pub fn segment_with_model(b: &BarFeatures, grid: &BeatGrid, duration: f64, act: &crate::allinone::Activations) -> Vec<Section> {
+    if b.len() < 4 {
+        return vec![];
+    }
+    let bounds = model_boundaries(b, grid, act);
+    finish(b, grid, bounds, duration, Some(act))
+}
+
+fn finish(
+    b: &BarFeatures,
+    grid: &BeatGrid,
+    mut bounds: Vec<usize>,
+    duration: f64,
+    act: Option<&crate::allinone::Activations>,
+) -> Vec<Section> {
     let _ = grid;
-    let mut bounds = boundaries(b, SEG_LAMBDA);
-    // A partial lead-in bar (before the first downbeat) belongs to the first section.
-    if bounds.len() > 2 && bounds[1] == 1 && b.start[0] < 0.0 {
+    let n = b.len();
+    // A partial lead-in bar (starting well before t = 0) belongs to the first section.
+    if bounds.len() > 2 && bounds[1] == 1 && b.start[0] < -0.03 {
         bounds.remove(1);
     }
     // Likewise a trailing fragment of <= 2 bars belongs to the last section.
@@ -467,7 +513,10 @@ pub fn segment(b: &BarFeatures, grid: &BeatGrid, duration: f64) -> Vec<Section> 
         .map(|s| s.energy)
         .fold(0.0f32, f32::max)
         .max(1e-6);
-    let kinds = label(&mut segs, emax, b);
+    let mut kinds = label(&mut segs, emax, b);
+    if let Some(act) = act {
+        apply_model_labels(&segs, &mut kinds, emax, b, duration, act);
+    }
     let mut out: Vec<Section> = Vec::new();
     for (s, k) in segs.iter().zip(kinds) {
         let start = b.start[s.a].max(0.0);
@@ -484,15 +533,9 @@ pub fn segment(b: &BarFeatures, grid: &BeatGrid, duration: f64) -> Vec<Section> 
             energy: (s.energy / emax).clamp(0.0, 1.0),
             stems: s.stems,
         };
-        // Merge adjacent intro / build / outro parts (drops, breaks and verses keep their
-        // phrase boundaries).
+        // Never two consecutive sections with the same label: merge them.
         if let Some(last) = out.last_mut() {
-            if last.kind == sec.kind
-                && matches!(
-                    sec.kind,
-                    SectionKind::Intro | SectionKind::Outro | SectionKind::Buildup
-                )
-            {
+            if last.kind == sec.kind {
                 let (l1, l2) = (last.bars as f32, sec.bars as f32);
                 let t = (l1 + l2).max(1.0);
                 last.energy = (last.energy * l1 + sec.energy * l2) / t;
@@ -507,6 +550,36 @@ pub fn segment(b: &BarFeatures, grid: &BeatGrid, duration: f64) -> Vec<Section> 
         out.push(sec);
     }
     out
+}
+
+/// Refine rule labels with the model's functional label distribution of each section.
+fn apply_model_labels(
+    segs: &[Seg],
+    kinds: &mut [SectionKind],
+    emax: f32,
+    b: &BarFeatures,
+    duration: f64,
+    act: &crate::allinone::Activations,
+) {
+    use SectionKind::*;
+    let n = b.len();
+    let last = segs.len().saturating_sub(1);
+    for (i, s) in segs.iter().enumerate() {
+        let t0 = b.start[s.a].max(0.0);
+        let t1 = if s.e >= n { duration } else { b.start[s.e] };
+        let p = crate::allinone::mean_labels(act, t0, t1);
+        let top = (2..10).max_by(|x, y| p[*x].total_cmp(&p[*y])).unwrap_or(8);
+        let rel = s.energy / emax;
+        let groove = s.stems[0] >= 0.5 && s.stems[1] >= 0.5;
+        match (top, kinds[i]) {
+            // intro / outro only at the edges of the track
+            (2, Verse | Breakdown) if i == 0 => kinds[i] = Intro,
+            (3, Verse | Breakdown | Drop) if i == last && i > 0 => kinds[i] = Outro,
+            (4 | 5, Verse) => kinds[i] = Breakdown,
+            (6 | 7 | 9, Verse) if groove && rel >= 0.75 => kinds[i] = Drop,
+            _ => {}
+        }
+    }
 }
 
 fn label(segs: &mut Vec<Seg>, emax: f32, b: &BarFeatures) -> Vec<SectionKind> {

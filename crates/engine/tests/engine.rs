@@ -129,8 +129,8 @@ fn render_mix_aligns_beats_in_overlap() {
         // render each track alone in the mix context (timing does not depend on the audio)
         let only_a = |id: i64| Some(if id == 1 { track(&a, 120.0, 0.0) } else { track(&silent, 126.0, 0.0) });
         let only_b = |id: i64| Some(if id == 1 { track(&silent, 120.0, 0.0) } else { track(&b, 126.0, 0.0) });
-        let (ra, rep) = render_mix_to_vec(&mix, &only_a, &opts).unwrap();
-        let (rb, _) = render_mix_to_vec(&mix, &only_b, &opts).unwrap();
+        let (ra, rep) = render_mix_to_vec(&mix, &|id| only_a(id).map(|t| t.analysis()), &only_a, &opts).unwrap();
+        let (rb, _) = render_mix_to_vec(&mix, &|id| only_b(id).map(|t| t.analysis()), &only_b, &opts).unwrap();
         let tl = &rep.timeline;
         let x = &tl.transitions[0];
         assert!((x.start_sec - 20.0).abs() < 1e-9);
@@ -169,7 +169,7 @@ fn render_mix_writes_wav() {
     let path = dir.join("mix.wav");
     let tr = |id: i64| Some(if id == 1 { track(&a, 120.0, 0.0) } else { track(&b, 124.0, 0.0) });
     let mut calls = 0;
-    let rep = render_mix(&mix, &tr, &path, &RenderOptions { format: WavFormat::Pcm16, ..Default::default() }, &mut |_| {
+    let rep = render_mix(&mix, &|id| tr(id).map(|t| t.analysis()), &tr, &path, &RenderOptions { format: WavFormat::Pcm16, ..Default::default() }, &mut |_| {
         calls += 1;
         true
     })
@@ -297,7 +297,7 @@ fn mix_player_seek_repositions_decks() {
     let b = click_track(128.0, 40.0, 0.0);
     let mix = two_track_mix(TransitionStyle::StemBlend, true);
     let tr = |id: i64| Some(if id == 1 { track(&a, 120.0, 0.0) } else { track(&b, 128.0, 0.0) });
-    let player = MixPlayer::new(&mix, &tr, [2, 3]).unwrap();
+    let mut player = MixPlayer::new(&mix, &tr, [2, 3]).unwrap();
     let mut core = EngineCore::new(48000, 4);
     player.play(&mut core, 0.0).unwrap();
     let mut m = vec![0f32; 480 * 2];
@@ -539,7 +539,7 @@ fn lane_mute_and_solo_silence_their_tracks() {
     let tr = |id: i64| Some(if id == 1 { track(&a, 120.0, 0.0) } else { track(&b, 120.0, 0.0) });
     let mut lanes = [clubcraft_core::LaneSettings::default(); 2];
     lanes[1].mute = true;
-    let (out, rep) = render_mix_to_vec(&lane_mix(TransitionStyle::Crossfade, lanes), &tr, &no_limiter()).unwrap();
+    let (out, rep) = render_mix_to_vec(&lane_mix(TransitionStyle::Crossfade, lanes), &|id| tr(id).map(|t| t.analysis()), &tr, &no_limiter()).unwrap();
     let end = rep.timeline.transitions[0].end_sec;
     let before = rms(&out, 2.0, 18.0);
     let after = rms(&out, end + 0.2, end + 8.0);
@@ -549,7 +549,7 @@ fn lane_mute_and_solo_silence_their_tracks() {
     // solo lane 2: track 1 silent, track 2 audible
     let mut lanes = [clubcraft_core::LaneSettings::default(); 2];
     lanes[1].solo = true;
-    let (out, _) = render_mix_to_vec(&lane_mix(TransitionStyle::Crossfade, lanes), &tr, &no_limiter()).unwrap();
+    let (out, _) = render_mix_to_vec(&lane_mix(TransitionStyle::Crossfade, lanes), &|id| tr(id).map(|t| t.analysis()), &tr, &no_limiter()).unwrap();
     assert!(rms(&out, 2.0, 18.0) < 1e-5, "non-soloed lane silent");
     assert!(rms(&out, end + 0.2, end + 8.0) > 0.15, "soloed lane audible");
 }
@@ -559,10 +559,10 @@ fn lane_gain_minus_6db_halves_amplitude() {
     let a = sine(440.0, 40.0, 0.3);
     let b = sine(660.0, 40.0, 0.3);
     let tr = |id: i64| Some(if id == 1 { track(&a, 120.0, 0.0) } else { track(&b, 120.0, 0.0) });
-    let (r0, _) = render_mix_to_vec(&lane_mix(TransitionStyle::Crossfade, Default::default()), &tr, &no_limiter()).unwrap();
+    let (r0, _) = render_mix_to_vec(&lane_mix(TransitionStyle::Crossfade, Default::default()), &|id| tr(id).map(|t| t.analysis()), &tr, &no_limiter()).unwrap();
     let mut lanes = [clubcraft_core::LaneSettings::default(); 2];
     lanes[0].gain_db = -6.0;
-    let (r1, rep) = render_mix_to_vec(&lane_mix(TransitionStyle::Crossfade, lanes), &tr, &no_limiter()).unwrap();
+    let (r1, rep) = render_mix_to_vec(&lane_mix(TransitionStyle::Crossfade, lanes), &|id| tr(id).map(|t| t.analysis()), &tr, &no_limiter()).unwrap();
     let ratio = rms(&r1, 2.0, 18.0) / rms(&r0, 2.0, 18.0);
     let end = rep.timeline.transitions[0].end_sec;
     let other = rms(&r1, end + 0.2, end + 8.0) / rms(&r0, end + 0.2, end + 8.0);
@@ -580,7 +580,7 @@ fn lane_eq_low_combines_with_transition_bass_swap() {
     let render = |low: f32| {
         let mut lanes = [clubcraft_core::LaneSettings::default(); 2];
         lanes[1].eq[0] = low;
-        render_mix_to_vec(&lane_mix(TransitionStyle::BassSwap, lanes), &tr, &no_limiter()).unwrap()
+        render_mix_to_vec(&lane_mix(TransitionStyle::BassSwap, lanes), &|id| tr(id).map(|t| t.analysis()), &tr, &no_limiter()).unwrap()
     };
     let (r_ref, rep) = render(0.5);
     let (r_m12, _) = render(0.25); // -12 dB
@@ -651,4 +651,222 @@ fn live_lane_edits_apply_immediately_without_clicks() {
     eprintln!("live lane edits: max step {max_step:.4} (sine slope {sine_step:.4})");
     assert!(max_step < sine_step * 1.5, "click: step {max_step}");
     assert!(out[out.len() - 2000..].iter().any(|v| v.abs() > 0.05), "unmuted again");
+}
+
+// ------------------------------------------------------------------ bounded memory (lazy tracks)
+
+fn six_track_mix() -> Mix {
+    let mut mix = Mix { keylock: false, tempo: TempoMode::Glide, ..Default::default() };
+    for i in 0..6 {
+        mix.tracks.push(MixTrack { track_id: 1 + i, mix_in: if i == 0 { 0.0 } else { 2.0 }, mix_out: 20.0, key_shift: 0, gain_db: 0.0 });
+    }
+    mix.normalize();
+    for t in mix.transitions.iter_mut() {
+        *t = Transition::new(TransitionStyle::Crossfade, 16);
+    }
+    mix
+}
+
+/// Metadata only (no audio): what a library lookup would return.
+fn meta(_id: i64) -> Option<clubcraft_core::Analysis> {
+    Some(clubcraft_core::Analysis { version: 1, duration: 30.0, grid: Some(BeatGrid::new(120.0, 0.0)), ..Default::default() })
+}
+
+fn synth_track(id: i64) -> Arc<LoadedTrack> {
+    let v = sine(200.0 + 50.0 * id as f64, 30.0, 0.2);
+    let mut t = LoadedTrack::new(format!("t{id}"), mono(&v)).with_grid(BeatGrid::new(120.0, 0.0));
+    t.track_id = Some(id);
+    Arc::new(t)
+}
+
+#[test]
+fn render_loads_tracks_just_in_time_and_keeps_at_most_3() {
+    use std::cell::{Cell, RefCell};
+    use std::sync::Weak;
+    let mix = six_track_mix();
+    let tl = clubcraft_core::MixTimeline::build(&mix, &meta);
+    let progress_now = Cell::new(0f32);
+    let calls: RefCell<Vec<(i64, f32, usize)>> = RefCell::new(Vec::new());
+    let alive: RefCell<Vec<Weak<LoadedTrack>>> = RefCell::new(Vec::new());
+    let count_alive = |a: &RefCell<Vec<Weak<LoadedTrack>>>| a.borrow().iter().filter(|w| w.strong_count() > 0).count();
+    let max_alive = Cell::new(0usize);
+    let loader = |id: i64| {
+        let before = count_alive(&alive);
+        calls.borrow_mut().push((id, progress_now.get(), before));
+        let t = synth_track(id);
+        alive.borrow_mut().push(Arc::downgrade(&t));
+        max_alive.set(max_alive.get().max(before + 1));
+        Some(t)
+    };
+    let dir = std::env::temp_dir().join("clubcraft-engine-test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("six.wav");
+    let rep = render_mix(&mix, &meta, &loader, &path, &RenderOptions { tail_secs: 0.2, ..Default::default() }, &mut |p| {
+        progress_now.set(p);
+        max_alive.set(max_alive.get().max(count_alive(&alive)));
+        true
+    })
+    .unwrap();
+    std::fs::remove_file(&path).ok();
+    let calls = calls.into_inner();
+    eprintln!("loader calls (id, progress, alive before): {calls:?}; max alive {}", max_alive.get());
+    // once per track, in mix order
+    assert_eq!(calls.iter().map(|c| c.0).collect::<Vec<_>>(), vec![1, 2, 3, 4, 5, 6]);
+    // just in time: each call happens within ~1 s (progress granularity) before the track starts
+    for (k, (_, p, _)) in calls.iter().enumerate() {
+        let start = tl.tracks[k].start_sec / tl.total_secs;
+        let slack = 1.5 / tl.total_secs;
+        assert!((*p as f64) <= start + 1e-6 && (*p as f64) >= start - slack, "track {k} loaded at {p}, starts at {start}");
+    }
+    assert!(max_alive.get() <= 3, "{} tracks alive at once", max_alive.get());
+    assert_eq!(count_alive(&alive), 0, "everything dropped after the render");
+    assert!((rep.timeline.total_secs - tl.total_secs).abs() < 1e-9);
+}
+
+#[test]
+fn mix_player_prefetches_lazily_and_seeks() {
+    use parking_lot::Mutex;
+    use std::sync::Weak;
+    let mix = six_track_mix();
+    let calls: Arc<Mutex<Vec<i64>>> = Arc::new(Mutex::new(Vec::new()));
+    let alive: Arc<Mutex<Vec<Weak<LoadedTrack>>>> = Arc::new(Mutex::new(Vec::new()));
+    let (c2, a2) = (calls.clone(), alive.clone());
+    let loader: TrackLoader = Arc::new(move |id| {
+        std::thread::sleep(std::time::Duration::from_millis(20)); // decoding takes time
+        c2.lock().push(id);
+        let t = synth_track(id);
+        a2.lock().push(Arc::downgrade(&t));
+        Some(t)
+    });
+    let count_alive = || alive.lock().iter().filter(|w| w.strong_count() > 0).count();
+    let mut player = MixPlayer::lazy(&mix, &meta, [0, 1]);
+    assert!(player.is_lazy());
+    let mut core = EngineCore::new(SR, 2);
+    let mut m = vec![0f32; 512 * 2];
+    let mut c = vec![0f32; 512 * 2];
+    player.play(&mut core, 0.0).unwrap();
+    let mut max_alive = 0;
+    let mut saw_waiting = false;
+    // run "frames": a block of audio, then a UI poll (like the app at ~86 fps)
+    let mut frame = |core: &mut EngineCore, player: &mut MixPlayer, max_alive: &mut usize| -> (EngineState, PrefetchStatus) {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        core.process(&mut m, &mut c);
+        let st = core.snapshot();
+        let status = player.poll(core, &st, &loader).unwrap();
+        *max_alive = (*max_alive).max(count_alive());
+        (st, status)
+    };
+    let mut started = None;
+    for _ in 0..2000 {
+        let (st, status) = frame(&mut core, &mut player, &mut max_alive);
+        saw_waiting |= st.mix.waiting;
+        assert!(status.wanted == (0..3), "window at the start");
+        if st.decks[0].playing {
+            started = Some(st);
+            break;
+        }
+    }
+    let st = started.expect("track 1 started once its audio arrived");
+    assert!(saw_waiting, "deck played silence while the first track was loading");
+    let tl = player.timeline();
+    let b = tl.beat_at_sec(st.mix.time);
+    assert!((st.decks[0].position - tl.track_pos(0, b)).abs() < 0.004, "joined in sync");
+    // let the prefetcher fill the window: tracks 1..3, never beyond
+    for _ in 0..1000 {
+        let (st, _) = frame(&mut core, &mut player, &mut max_alive);
+        if st.mix.resident_count() == 3 {
+            break;
+        }
+    }
+    for _ in 0..20 {
+        frame(&mut core, &mut player, &mut max_alive);
+    }
+    let st = core.snapshot();
+    assert_eq!(st.mix.resident_count(), 3);
+    assert!((0..3).all(|i| st.mix.is_resident(i)));
+    assert_eq!(*calls.lock(), vec![1, 2, 3]);
+    // seek into track 5 (index 4): the old window is released, the new one prefetched
+    let x = &player.timeline().transitions[3];
+    let target = x.end_sec + 2.0; // track index 4 alone
+    player.seek(&mut core, target).unwrap();
+    let mut joined = None;
+    for _ in 0..3000 {
+        let (st, status) = frame(&mut core, &mut player, &mut max_alive);
+        assert!(st.mix.resident_count() <= 3);
+        if st.mix.is_resident(4) && st.decks[0].playing && status.wanted.start == 4 {
+            joined = Some(st);
+            break;
+        }
+    }
+    let st = joined.expect("track 5 arrived after the seek");
+    let tl = player.timeline();
+    let b = tl.beat_at_sec(st.mix.time);
+    assert!((st.decks[0].position - tl.track_pos(4, b)).abs() < 0.004, "in sync after seek: {} vs {}", st.decks[0].position, tl.track_pos(4, b));
+    assert!(st.mix.time > target, "time kept running while loading");
+    for _ in 0..1000 {
+        let (st, _) = frame(&mut core, &mut player, &mut max_alive);
+        if st.mix.resident_count() == 2 && st.mix.is_resident(5) {
+            break;
+        }
+    }
+    for _ in 0..20 {
+        frame(&mut core, &mut player, &mut max_alive);
+    }
+    let calls_now = calls.lock().clone();
+    eprintln!("prefetch calls {calls_now:?}, max alive {max_alive}");
+    assert_eq!(&calls_now[..3], &[1, 2, 3]);
+    let mut tail = calls_now[3..].to_vec();
+    tail.sort();
+    assert_eq!(tail, vec![5, 6], "only the new window was loaded");
+    assert!(max_alive <= 3, "{max_alive} tracks alive at once");
+    assert!(!(0..4).any(|i| core.snapshot().mix.is_resident(i)), "old tracks released");
+    player.stop(&mut core).unwrap();
+    core.process(&mut m, &mut c);
+    // stop drops everything except what the prefetch thread may still hold briefly
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert_eq!(count_alive(), 0);
+}
+
+#[test]
+fn structural_edit_during_lazy_preview_reuses_resident_tracks() {
+    use parking_lot::Mutex;
+    let mix = six_track_mix();
+    let calls: Arc<Mutex<Vec<i64>>> = Arc::new(Mutex::new(Vec::new()));
+    let c2 = calls.clone();
+    let loader: TrackLoader = Arc::new(move |id| {
+        c2.lock().push(id);
+        Some(synth_track(id))
+    });
+    let mut player = MixPlayer::lazy(&mix, &meta, [0, 1]);
+    let mut core = EngineCore::new(SR, 2);
+    let mut m = vec![0f32; 512 * 2];
+    let mut c = vec![0f32; 512 * 2];
+    player.play(&mut core, 0.0).unwrap();
+    let mut step = |core: &mut EngineCore, player: &mut MixPlayer| {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        core.process(&mut m, &mut c);
+        let st = core.snapshot();
+        player.poll(core, &st, &loader).unwrap();
+        st
+    };
+    for _ in 0..2000 {
+        if step(&mut core, &mut player).mix.resident_count() == 3 {
+            break;
+        }
+    }
+    assert_eq!(calls.lock().len(), 3);
+    // edit a later transition (structure change → schedule rebuild)
+    let mut edited = mix.clone();
+    edited.transitions[3] = Transition::new(TransitionStyle::Cut, 8);
+    let st = core.snapshot();
+    let old_id = st.mix.schedule_id;
+    player.update_lazy(&edited, &meta, &mut core, &st).unwrap();
+    for _ in 0..50 {
+        step(&mut core, &mut player);
+    }
+    let st = core.snapshot();
+    assert_ne!(st.mix.schedule_id, old_id, "new schedule running");
+    assert_eq!(st.mix.resident_count(), 3, "resident tracks carried over");
+    assert_eq!(calls.lock().len(), 3, "no reload after the edit: {:?}", calls.lock());
+    assert!(st.decks[0].playing && !st.mix.waiting);
 }

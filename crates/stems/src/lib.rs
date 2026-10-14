@@ -1,7 +1,9 @@
-//! # clubcraft-stems — HTDemucs stem separation in Rust
+//! # clubcraft-stems — HTDemucs / Mel-Band RoFormer stem separation in Rust
 //!
 //! Splits a track into **drums, bass, other ("Melody"), vocals** ([`clubcraft_core::StemKind`]
-//! order) with Meta's Hybrid Transformer Demucs v4, reproducing `demucs.apply.apply_model` +
+//! order). [`Quality::Best`] takes the vocals from Kimberley Jensen's Mel-Band RoFormer
+//! ([`roformer`]) and drums/bass from htdemucs_ft run on the instrumental; the other presets use
+//! Meta's Hybrid Transformer Demucs v4 alone, reproducing `demucs.apply.apply_model` +
 //! `demucs.separate` exactly (normalisation, 7.8 s segments with triangular cross-fades, shift
 //! trick, bag-of-models weights). The STFT / iSTFT run in Rust ([`stft`]), the network runs on
 //!
@@ -19,7 +21,9 @@
 //! each [`clubcraft_core::STEM_CHUNK_FRAMES`] chunk as soon as every segment overlapping it is done
 //! (with `Quality::Fast` the chunk under the playhead is ready after 2 model runs, ~0.7 s on an
 //! M1 Pro; with `High` after 8 runs). Published data equals [`Separator::separate`] output
-//! (bit-identical for `Fast`/`High`; ≤1 ulp-level differences with several shifts).
+//! (bit-identical for `Fast`/`High`/`Best`; ≤1 ulp-level differences with several shifts).
+//! With `Best` the vocal model runs lazily for the regions the Demucs windows need, so the
+//! chunk under the playhead is ready after ~3 RoFormer chunks + 2 Demucs windows (~6 s).
 //!
 //! ```no_run
 //! use clubcraft_stems::{Quality, Separator};
@@ -311,6 +315,7 @@ impl Separator {
     /// continues forward, then wraps to the start, and publishes every `STEM_CHUNK_FRAMES` chunk of
     /// `target` (via [`StemTrack::set_chunk`]) as soon as all segments overlapping it are done.
     /// Published chunks equal the result of [`Separator::separate`] (up to float summation order).
+    /// With [`Quality::Best`] the vocal model is run on demand for the regions being processed.
     /// `target` must have `audio.frames()` frames; audio must be 44.1 kHz. Setting `cancel` stops
     /// early with a [`Cancelled`] error (already published chunks stay valid).
     pub fn separate_into(

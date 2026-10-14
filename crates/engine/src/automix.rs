@@ -76,7 +76,7 @@ pub fn schedule(playlist: &[Arc<LoadedTrack>], opts: &AutomixOptions) -> Result<
 pub fn start(playlist: &[Arc<LoadedTrack>], opts: &AutomixOptions, from: Option<(usize, f64)>) -> Result<Command> {
     let s = schedule(playlist, opts)?;
     let start = match from {
-        Some((i, pos)) if i < s.tracks.len() => s.time_of_track_pos(i, pos).max(0.0),
+        Some((i, pos)) if i < s.len() => s.time_of_track_pos(i, pos).max(0.0),
         _ => 0.0,
     };
     Ok(Command::PlayMix { schedule: Box::new(s), start })
