@@ -7,3 +7,4 @@ tools/model-export/cache
 models/*
 !models/README.md
 !models/*.json
+/dist
