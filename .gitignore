@@ -8,3 +8,4 @@ models/*
 !models/README.md
 !models/*.json
 /dist
+*.log
