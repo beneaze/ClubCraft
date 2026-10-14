@@ -43,6 +43,8 @@ pub enum Drag {
 pub const HEADER_W: f32 = 214.0;
 /// Zoom range of the studio timeline in pixels per second (3000 px/s ≈ one beat over 1500 px).
 pub const MIN_ZOOM: f32 = 0.2;
+/// Height of the beat ruler at the top of each clip.
+const RULER_H: f32 = 14.0;
 pub const MAX_ZOOM: f32 = 3000.0;
 pub const EQ_COLORS: [Color32; 3] = [Color32::from_rgb(255, 90, 90), Color32::from_rgb(120, 230, 120), Color32::from_rgb(110, 200, 255)];
 pub const FILTER_COLOR: Color32 = Color32::from_rgb(200, 140, 255);
@@ -490,14 +492,17 @@ impl StudioView {
             p.rect_stroke(r, 4.0, Stroke::new(if sel { 2.0 } else { 1.0 }, if sel { theme::ACCENT } else { accent.linear_multiply(0.5) }), StrokeKind::Inside);
             return;
         }
+        // beat ruler (the track's own bar numbers) and alternating phrase shading
+        let ruler = Rect::from_min_size(body.min, vec2(body.width(), RULER_H.min(body.height() * 0.3)));
+        let body = Rect::from_min_max(pos2(body.left(), ruler.bottom()), body.max);
+        self.draw_clip_ruler(p, ruler, body, i, x_of);
         // waveform
         let t0 = self.timeline.track_pos(i, tt.start_beat);
         let t1 = self.timeline.track_pos(i, tt.end_beat);
         if let (Some(wf), Some(a)) = (sh.waveforms.get(&tt.track_id), a) {
             let wp = WaveParams { wf, grid: a.grid, cues: &[], sections: &[], style: WaveStyle::Stems, stem_gains: if audible { [1.0; 4] } else { [0.0; 4] }, loop_region: None, accent };
-            waveform::paint_wave(p, body.shrink2(vec2(0.0, 4.0)), &wp, t0, t1, true);
+            waveform::paint_wave(p, body.shrink2(vec2(0.0, 3.0)), &wp, t0, t1, true);
         }
-        // bar ticks under the header
         let bar_px = (tt.grid.bar_len() as f32 * self.zoom).max(0.1);
         if bar_px >= 60.0 {
             // beat lines when zoomed in
@@ -508,15 +513,6 @@ impl StudioView {
                     p.line_segment([pos2(x, body.top()), pos2(x, body.bottom())], Stroke::new(1.0, Color32::from_white_alpha(18)));
                 }
                 b += 1.0;
-            }
-        }
-        if bar_px >= 7.0 {
-            let mut b = (tt.start_beat / 4.0).ceil() * 4.0;
-            while b < tt.end_beat {
-                let x = x_of(self.timeline.sec_at_beat(b));
-                let phrase = ((b - tt.start_beat + tt.track_beat0) / 4.0).round() as i64 % 8 == 0;
-                p.line_segment([pos2(x, body.top()), pos2(x, body.top() + if phrase { 8.0 } else { 4.0 })], Stroke::new(1.0, Color32::from_white_alpha(if phrase { 140 } else { 60 })));
-                b += 4.0;
             }
         }
         // section markers from the analysis (drop / break / vocal)
@@ -547,6 +543,66 @@ impl StudioView {
             p.rect_filled(r, 4.0, Color32::from_black_alpha(110));
         }
         p.rect_stroke(r, 4.0, Stroke::new(if sel { 2.0 } else { 1.0 }, if sel { theme::ACCENT } else { accent.linear_multiply(0.5) }), StrokeKind::Inside);
+    }
+
+    /// Ruler strip at the top of a clip: bar numbers of the track (bar 1 = first downbeat), bar and
+    /// beat ticks by zoom level, plus alternating shading of 4-bar phrases behind the waveform.
+    fn draw_clip_ruler(&self, p: &egui::Painter, ruler: Rect, body: Rect, i: usize, x_of: &dyn Fn(f64) -> f32) {
+        let tt = &self.timeline.tracks[i];
+        let bpb = tt.grid.beats_per_bar.max(1) as f64;
+        let beat_px = (tt.grid.beat_len() as f32 * self.zoom).max(0.01);
+        let bar_px = beat_px * bpb as f32;
+        p.rect_filled(ruler, 0.0, Color32::from_rgb(24, 25, 30));
+        let clip = p.clip_rect().intersect(ruler.union(body));
+        let p = &p.with_clip_rect(clip); // labels near the clip end must not spill over
+        // track beat (relative to the downbeat) <-> mix beat
+        let to_mix = |tb: f64| tb - tt.track_beat0 + tt.start_beat;
+        let tb0 = tt.track_beat0;
+        let tb1 = tt.track_beat0 + (tt.end_beat - tt.start_beat);
+        let x_tb = |tb: f64| x_of(self.timeline.sec_at_beat(to_mix(tb)));
+        // labels every `label` bars, at least ~44 px apart
+        let label = [1u32, 2, 4, 8, 16, 32, 64, 128].into_iter().find(|&n| bar_px * n as f32 >= 44.0).unwrap_or(256) as f64;
+        // phrase shading: alternating bands of max(4, label) bars
+        let band = label.max(4.0) * bpb;
+        if band as f32 * beat_px >= 10.0 {
+            let mut b = (tb0 / band).floor() * band;
+            while b < tb1 {
+                if ((b / band).round() as i64).rem_euclid(2) == 1 {
+                    let (x0, x1) = (x_tb(b.max(tb0)).max(clip.left()), x_tb((b + band).min(tb1)).min(clip.right()));
+                    if x1 > x0 {
+                        p.rect_filled(Rect::from_x_y_ranges(x0..=x1, body.top()..=body.bottom()), 0.0, Color32::from_white_alpha(7));
+                    }
+                }
+                b += band;
+            }
+        }
+        // ticks: 16ths, beats or bars, whichever are far enough apart (else every `label / 4` bars)
+        let step = if beat_px >= 48.0 { 0.25 } else if beat_px >= 6.0 { 1.0 } else if bar_px >= 6.0 { bpb } else { (label / 4.0).max(1.0) * bpb };
+        let mut b = (tb0 / step).ceil() * step;
+        while b < tb1 {
+            let x = x_tb(b);
+            if x >= clip.left() - 1.0 && x <= clip.right() + 1.0 {
+                let bar = (b / bpb).round();
+                let on_bar = (b / bpb - bar).abs() < 1e-6;
+                let labelled = on_bar && (bar / label - (bar / label).round()).abs() < 1e-6;
+                let on_beat = (b - b.round()).abs() < 1e-6;
+                let (h, a) = if labelled {
+                    (ruler.height(), 150)
+                } else if on_bar {
+                    (ruler.height() * 0.45, 90)
+                } else if on_beat {
+                    (ruler.height() * 0.25, 55)
+                } else {
+                    (ruler.height() * 0.12, 35)
+                };
+                p.line_segment([pos2(x, ruler.bottom() - h), pos2(x, ruler.bottom())], Stroke::new(1.0, Color32::from_white_alpha(a)));
+                if labelled {
+                    p.text(pos2(x + 2.0, ruler.center().y), egui::Align2::LEFT_CENTER, format!("{}", bar as i64 + 1), egui::FontId::proportional(9.5), Color32::from_white_alpha(170));
+                }
+            }
+            b += step;
+        }
+        p.line_segment([ruler.left_bottom(), ruler.right_bottom()], Stroke::new(1.0, Color32::from_white_alpha(14)));
     }
 
     #[allow(clippy::too_many_arguments)]
