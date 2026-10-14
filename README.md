@@ -221,10 +221,14 @@ Your library, stems, waveforms, exports and recordings live in `~/Music/ClubCraf
 
 ## Downloads
 
-| Platform | Build | Notes |
+**[Latest release: v0.1](../../releases/tag/v0.1)**
+
+| Platform | File | Notes |
 |---|---|---|
-| macOS (Apple Silicon) | `tools/bundle-macos.sh` → `ClubCraft.app` | Models bundled, ad-hoc signed |
-| Windows 10/11 (x64) | `ClubCraft-windows-x64` artifact of every [CI run](../../actions) | Includes `DirectML.dll`; add the ONNX models to `models\` |
+| macOS 13+ (Apple Silicon) | `ClubCraft-0.1-macos-arm64.dmg` | All CoreML stem models bundled. Ad-hoc signed: right-click › Open the first time |
+| Windows 10/11 (x64) | `ClubCraft-0.1-windows-x64.zip` | `ClubCraft.exe`, `DirectML.dll` and the ONNX stem models |
+
+Development builds: `tools/bundle-macos.sh` (macOS), and the `ClubCraft-windows-x64` artifact of every [CI run](../../actions) (Windows, without models).
 
 ## License
 
