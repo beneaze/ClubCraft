@@ -202,6 +202,30 @@ The cue generator places Mix In at least 32 beats before the first drop or vocal
 - **Clean-room:** ClubCraft is independent. Behaviour and file formats of DJ.Studio and VirtualDJ were only studied for interoperability (importing projects, exporting cues). No code, models or assets from either product are used.
 - **Tested:** 74 unit and integration tests, plus evaluations against Python Demucs and a 137-track analysis corpus.
 
+## Talk to it: built-in MCP server
+
+ClubCraft includes a [Model Context Protocol](https://modelcontextprotocol.io) server, so Claude or any other MCP client can work with your library in plain language. For example: *"build a 45-minute warm-up from my 120–124 BPM tracks with energy rising, use stem blends, and export it"*. It runs headless on the same library as the app, and changes appear in an open ClubCraft window right away.
+
+```sh
+# Claude Code
+claude mcp add clubcraft -- /Applications/ClubCraft.app/Contents/MacOS/ClubCraft mcp
+```
+
+For Claude Desktop or other clients, add it to the MCP config (on Windows, the command is the path to `ClubCraft.exe`):
+
+```json
+{ "mcpServers": { "clubcraft": { "command": "/Applications/ClubCraft.app/Contents/MacOS/ClubCraft", "args": ["mcp"] } } }
+```
+
+| Tools | |
+|---|---|
+| Library | `library_overview`, `search_tracks` (text, BPM, key, harmonic match, energy, stems), `get_track` (grid, key, loudness, sections, hot cues), `import_tracks` |
+| Processing | `analyze_tracks`, `separate_stems` (Fast to Best, with progress and cancel), `set_hot_cue` |
+| Studio | `list_mixes`, `get_mix`, `create_mix` (harmonic ordering), `edit_mix`, `set_transition`, `set_mix_points` |
+| Export | `export_mix` (WAV plus cue sheet), `export_virtualdj` (grids, keys and cues into `database.xml`) |
+
+Separation and rendering share a lock with the app, so only one heavy job runs at a time.
+
 ## Get started
 
 ```sh

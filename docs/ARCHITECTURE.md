@@ -21,7 +21,7 @@ automix with the planned mix points.
 | `clubcraft-stems` | HTDemucs stem separation in Rust: STFT/iSTFT + CoreML (GPU) backend, ONNX Runtime CPU fallback; segmenting/overlap-add/shifts; stem file cache |
 | `clubcraft-analysis` | beat grid, key, loudness, energy, waveform summary, structure (sections) and cue generation — uses stems when present |
 | `clubcraft-engine` | real-time audio engine (cpal): decks, mixer, EQ, filter, FX, time-stretch, sync, loops, stems mixing, headphone cue, recording, automix; plus the offline mix renderer |
-| `clubcraft` (app) | egui GUI: Library, Studio, Live; background job queue; importers (DJ.Studio, VirtualDJ) and exporters |
+| `clubcraft` (app) | egui GUI: Library, Studio, Live; background job queue; importers (DJ.Studio, VirtualDJ) and exporters; `clubcraft mcp` (MCP server on stdio, `mcp.rs`) |
 
 Dependency direction: `core` ← `audio` ← (`stems`, `analysis`, `engine`) ← `app`.
 
@@ -47,3 +47,13 @@ The DJ.Studio importer (`crates/app/src/interop/djstudio.rs`) reads DJ.Studio's 
 library JSON read-only; the VirtualDJ exporter (`interop/virtualdj.rs`) merges cues into a
 `database.xml`. Both are written from observed file formats only; no code or assets from either
 product are used.
+
+## MCP server
+
+`clubcraft mcp` speaks JSON-RPC 2.0 over stdio (newline-delimited; protocol 2025-06-18, also
+2025-03-26 / 2024-11-05). Tool calls run on their own threads with their own SQLite connection,
+report `notifications/progress` when the client sends a progress token, and stop on
+`notifications/cancelled`. Separation, deep analysis and rendering take `jobs::heavy()`, an
+in-process mutex plus an OS file lock on `<data>/heavy.lock` shared with the app. After every write
+the server touches `<data>/.library-changed`; the app polls its mtime once per second and reloads
+the library, and the open mix too if it has no unsaved edits.

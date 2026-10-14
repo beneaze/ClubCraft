@@ -11,6 +11,7 @@ mod interop;
 mod jobs;
 mod library_view;
 mod live;
+mod mcp;
 mod menu;
 mod pipeline;
 mod platform;
@@ -24,6 +25,15 @@ mod waveform;
 mod widgets;
 
 fn main() -> eframe::Result<()> {
+    // `clubcraft mcp`: Model Context Protocol server on stdio (no window).
+    if std::env::args().nth(1).as_deref() == Some("mcp") {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).target(env_logger::Target::Stderr).init();
+        if let Err(e) = mcp::run() {
+            eprintln!("clubcraft mcp: {e:#}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let opts = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()

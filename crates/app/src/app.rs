@@ -96,6 +96,8 @@ pub struct App {
     applied_prefs: Option<crate::prefs::Prefs>,
     pub mix_summaries: Vec<crate::home::MixSummary>,
     prepared: (i64, usize),
+    /// Last seen change from `clubcraft mcp` (marker mtime) and when it was checked.
+    external: (Option<std::time::SystemTime>, f64),
     queued: std::collections::HashSet<TrackId>,
 }
 
@@ -128,7 +130,7 @@ impl App {
         }
         let audio_cfg: clubcraft_engine::AudioConfig = cc.storage.and_then(|s| eframe::get_value(s, "audio")).unwrap_or_default();
         let midi_port: Option<String> = cc.storage.and_then(|s| eframe::get_value(s, "midi_port"));
-        let mut app = App { lib, sh, jobs, view, library: LibraryView::default(), status: String::new(), devctl: crate::devctl::DevCtl::from_env(), live: Default::default(), decks: vec![Default::default(); 2], mixer: Default::default(), browser: LibraryView::default(), studio: Default::default(), mixes: Vec::new(), eng: crate::live::adapter::LiveEngine::start(audio_cfg.clone()), settings: crate::settings::Settings::new(audio_cfg, midi_port), home: Default::default(), prefs, applied_prefs: None, menu: crate::menu::AppMenu::install(&cc.egui_ctx), ui_ctx_cmd: None, mix_summaries: Vec::new(), prepared: (-1, 0), queued: Default::default() };
+        let mut app = App { lib, sh, jobs, view, library: LibraryView::default(), status: String::new(), devctl: crate::devctl::DevCtl::from_env(), live: Default::default(), decks: vec![Default::default(); 2], mixer: Default::default(), browser: LibraryView::default(), studio: Default::default(), mixes: Vec::new(), eng: crate::live::adapter::LiveEngine::start(audio_cfg.clone()), settings: crate::settings::Settings::new(audio_cfg, midi_port), home: Default::default(), prefs, applied_prefs: None, menu: crate::menu::AppMenu::install(&cc.egui_ctx), ui_ctx_cmd: None, mix_summaries: Vec::new(), prepared: (-1, 0), queued: Default::default(), external: (std::fs::metadata(crate::mcp::change_marker()).and_then(|m| m.modified()).ok(), 0.0) };
         app.settings.connect_midi(app.eng.handle.as_ref());
         if let Some(e) = &app.eng.error {
             app.status = e.clone();
@@ -150,6 +152,26 @@ impl App {
                 Event::TrackUpdated(id) => self.sh.reload_track(&self.lib, id),
                 Event::Error { message, .. } => self.status = message,
                 _ => {}
+            }
+        }
+        // Changes made by `clubcraft mcp` (another process) arrive through a marker file.
+        let now = ctx.input(|i| i.time);
+        if now - self.external.1 > 1.0 {
+            self.external.1 = now;
+            let m = std::fs::metadata(crate::mcp::change_marker()).and_then(|m| m.modified()).ok();
+            if m != self.external.0 {
+                self.external.0 = m;
+                reload_all = true;
+                // Pick up edits to the open mix unless it has unsaved changes of its own.
+                if !self.studio.dirty && self.studio.mix.id != 0 {
+                    if let Ok(Some(mut mix)) = self.lib.mix(self.studio.mix.id) {
+                        mix.normalize();
+                        if mix != self.studio.mix {
+                            self.studio.mix = mix;
+                            self.studio.timeline_dirty = true;
+                        }
+                    }
+                }
             }
         }
         if reload_all {
@@ -852,7 +874,7 @@ fn live_browser(ui: &mut egui::Ui, browser: &mut LibraryView, sh: &Shared, queue
     });
 }
 
-fn prefs_job_settings(p: &crate::prefs::Prefs) -> crate::pipeline::Settings {
+pub(crate) fn prefs_job_settings(p: &crate::prefs::Prefs) -> crate::pipeline::Settings {
     crate::pipeline::Settings {
         separate_stems: p.separate_stems,
         quality: p.stem_quality.clone(),

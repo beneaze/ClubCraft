@@ -100,7 +100,7 @@ impl TrackCache {
 }
 
 /// Load a track without putting it in the shared cache (used by renders).
-fn load_uncached(id: TrackId) -> Result<Arc<LoadedTrack>> {
+pub(crate) fn load_uncached(id: TrackId) -> Result<Arc<LoadedTrack>> {
     let lib = Library::open_default()?;
     let t = lib.track(id)?.context("unknown track")?;
     let analysis = lib.analysis(id)?.unwrap_or_default();
@@ -613,7 +613,7 @@ fn knob_db(v: f32, unity: f32) -> f32 {
 
 
 /// `.cue` sheet next to an exported mix (75 frames per second).
-fn write_cue_sheet(mix: &Mix, analyses: &HashMap<TrackId, clubcraft_core::Analysis>, wav: &std::path::Path) -> Result<()> {
+pub(crate) fn write_cue_sheet(mix: &Mix, analyses: &HashMap<TrackId, clubcraft_core::Analysis>, wav: &std::path::Path) -> Result<()> {
     let tl = clubcraft_core::MixTimeline::build(mix, &|id| analyses.get(&id).cloned());
     let lib = Library::open_default()?;
     let mut s = format!("PERFORMER \"ClubCraft\"\nTITLE \"{}\"\nFILE \"{}\" WAVE\n", mix.name.replace('"', "'"), wav.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default());

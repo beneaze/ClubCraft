@@ -177,6 +177,24 @@ impl Jobs {
 /// one job is up to ~3 GB; running several at once ran a 16 GB Mac out of memory.
 pub static HEAVY: Mutex<()> = parking_lot::const_mutex(());
 
+/// Held while memory-heavy work runs: the in-process [`HEAVY`] lock plus an OS file lock on
+/// `<data>/heavy.lock`, so the app and `clubcraft mcp` never separate at the same time either.
+pub struct HeavyGuard {
+    _lock: parking_lot::MutexGuard<'static, ()>,
+    _file: Option<std::fs::File>,
+}
+
+pub fn heavy() -> HeavyGuard {
+    let lock = HEAVY.lock();
+    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(clubcraft_core::paths::data_dir().join("heavy.lock")).ok();
+    if let Some(f) = &file {
+        if let Err(e) = f.lock() {
+            log::warn!("heavy.lock: {e}");
+        }
+    }
+    HeavyGuard { _lock: lock, _file: file }
+}
+
 fn worker(q: Arc<Queue>, other: Arc<Queue>, tx: Sender<Event>, settings: Arc<Mutex<pipeline::Settings>>, cancel: Arc<AtomicBool>, gpu: bool) {
     let lib = match clubcraft_core::Library::open_default() {
         Ok(l) => l,
@@ -230,7 +248,7 @@ fn worker(q: Arc<Queue>, other: Arc<Queue>, tx: Sender<Event>, settings: Arc<Mut
                 let _ = tx.send(Event::Finished { track: None, stage: Stage::Import });
             }
             Job::Separate(id) => {
-                let _heavy = HEAVY.lock();
+                let _heavy = heavy();
                 let r = pipeline::separate(&lib, &mut ctx, id, &s, &cancel, &mut |frac, label| {
                     let _ = tx.send(Event::Progress { track: Some(id), stage: Stage::Separate, frac, label: label.to_string() });
                 });
@@ -250,7 +268,7 @@ fn worker(q: Arc<Queue>, other: Arc<Queue>, tx: Sender<Event>, settings: Arc<Mut
                 // Only analysis with stems (and the optional structure model) is heavy; the quick
                 // analysis of a fresh import must not wait behind a long separation.
                 let has_stems = lib.track(id).ok().flatten().is_some_and(|t| clubcraft_core::library::stems_path(&t.hash).exists());
-                let _heavy = if has_stems { Some(HEAVY.lock()) } else { None };
+                let _heavy = if has_stems { Some(heavy()) } else { None };
                 let r = pipeline::analyze(&lib, id, &s, &mut |frac, label| {
                     let _ = tx.send(Event::Progress { track: Some(id), stage: Stage::Analyze, frac, label: label.to_string() });
                 });
