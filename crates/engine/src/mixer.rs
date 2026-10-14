@@ -83,6 +83,8 @@ pub struct Channel {
     /// curve preference, so studio transitions sound the same for everyone).
     pub lane_volume: f32,
     fader_gain: Smoother,
+    /// Jump to the next automation values without smoothing (set when a mix track starts).
+    pub snap_next: bool,
     pub assign: CrossfaderAssign,
     pub pfl: bool,
     meter: Meter,
@@ -108,6 +110,7 @@ impl Channel {
             fader: 1.0,
             lane_volume: 1.0,
             fader_gain: Smoother::new(1.0, 0.005, sr),
+            snap_next: false,
             assign: CrossfaderAssign::Thru,
             pfl: false,
             meter: Meter::new(sr),
@@ -141,6 +144,9 @@ impl Channel {
     pub fn process(&mut self, buf: &mut [f32], post: &mut [f32], ctx: &FxCtx, curve: FaderCurve, xf: f32, auto_gain_on: bool) {
         let n = buf.len() / 2;
         self.gain.set(db_to_gain(self.trim_db + if auto_gain_on { self.auto_gain_db } else { 0.0 }));
+        if self.snap_next {
+            self.gain.reset(self.gain.target);
+        }
         if !(self.gain.settled() && self.gain.value == 1.0) {
             for f in buf.chunks_exact_mut(2) {
                 let g = self.gain.next();
@@ -149,14 +155,24 @@ impl Channel {
             }
         }
         self.eq.set_knobs(self.eq_knobs[0], self.eq_knobs[1], self.eq_knobs[2]);
+        if self.snap_next {
+            self.eq.snap();
+        }
         self.eq.process(buf);
         self.filter.set_resonance(self.filter_resonance);
         self.filter.set(self.filter_knob);
+        if self.snap_next {
+            self.filter.snap();
+        }
         self.filter.process(buf);
         for s in self.fx.iter_mut() {
             s.process(buf, ctx);
         }
         self.fader_gain.set(curve.gain(self.fader) * FaderCurve::Smooth.gain(self.lane_volume) * xf);
+        if self.snap_next {
+            self.fader_gain.reset(self.fader_gain.target);
+            self.snap_next = false;
+        }
         for (i, f) in buf.chunks_exact(2).enumerate() {
             let g = self.fader_gain.next();
             post[i * 2] = f[0] * g;

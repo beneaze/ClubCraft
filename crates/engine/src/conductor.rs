@@ -212,6 +212,38 @@ impl LaneValues {
     }
 }
 
+/// Stem gains of track `i` at mix beat `b` (track position `p` s): from the transition it is
+/// in, and the track's own stem lanes for the stems that transition leaves alone.
+fn stems_at(s: &MixSchedule, i: usize, b: f64, p: f64) -> [f32; 4] {
+    let tl = &s.timeline;
+    let mut window: Option<(&Transition, Side, f32)> = None;
+    if i > 0 {
+        if let Some(x) = tl.transitions.get(i - 1) {
+            if b < x.start_beat + x.beats {
+                window = Some((&s.transitions[i - 1], Side::In, (b - x.start_beat) as f32));
+            }
+        }
+    }
+    if let Some(x) = tl.transitions.get(i) {
+        if b >= x.start_beat {
+            window = Some((&s.transitions[i], Side::Out, (b - x.start_beat) as f32));
+        }
+    }
+    let mut g = match window {
+        Some((t, side, xb)) => StemKind::ALL.map(|st| t.value(side, Param::Stem(st), xb)),
+        None => [1.0; 4],
+    };
+    if let Some(mt) = s.mix_tracks.get(i).filter(|m| !m.stems.is_empty()) {
+        for (k, st) in StemKind::ALL.iter().enumerate() {
+            let driven = window.is_some_and(|(t, side, _)| t.lanes.iter().any(|l| l.side == side && l.param == Param::Stem(*st)));
+            if let (false, Some(v)) = (driven, mt.stem_at(*st, p)) {
+                g[k] = v;
+            }
+        }
+    }
+    g
+}
+
 /// Audio-thread mix player state.
 #[derive(Default)]
 pub(crate) struct Conductor {
@@ -447,7 +479,9 @@ impl Conductor {
                         drop_track(old);
                     }
                 }
-                if self.slot_track[slot] != Some(i) {
+                // a track starting now jumps straight to its automation (no glide from neutral)
+                let fresh = self.slot_track[slot] != Some(i);
+                if fresh {
                     self.slot_track[slot] = Some(i);
                     deck.set_keylock(s.keylock);
                     deck.set_key_shift(tr.key_shift as f32);
@@ -457,6 +491,16 @@ impl Conductor {
                 }
                 let p0 = tl.track_pos(i, b0);
                 let p1 = tl.track_pos(i, b1);
+                if p1 <= 0.0 {
+                    // before the start of the file (a lead-in): silence until position 0
+                    if deck.is_playing() {
+                        deck.pause();
+                    }
+                    if deck.position() != 0.0 {
+                        deck.seek(0.0);
+                    }
+                    continue;
+                }
                 if !deck.is_playing() || (deck.position() - p0).abs() > 0.003 {
                     deck.seek(p0.max(0.0));
                     deck.play();
@@ -480,28 +524,28 @@ impl Conductor {
                 } else {
                     on_air = on_air.max(i);
                 }
-                let mut window = (i > 0 && b0 < tl.transitions[i - 1].start_beat + tl.transitions[i - 1].beats).then(|| (&s.transitions[i - 1], Side::In));
                 if let Some(x) = tl.transitions.get(i) {
                     if b0 >= x.start_beat {
                         let xb = (b0 - x.start_beat) as f32;
                         lanes = LaneValues::from_transition(&s.transitions[i], Side::Out, xb);
                         cur_transition = Some((i, xb));
-                        window = Some((&s.transitions[i], Side::Out));
                     }
                 }
-                // the track's own stem lanes, where the transition has none for that stem
-                if let Some(mt) = s.mix_tracks.get(i).filter(|m| !m.stems.is_empty()) {
-                    for (k, st) in StemKind::ALL.iter().enumerate() {
-                        let driven = window.is_some_and(|(t, side)| t.lanes.iter().any(|l| l.side == side && l.param == Param::Stem(*st)));
-                        if let (false, Some(g)) = (driven, mt.stem_at(*st, p0)) {
-                            lanes.stems[k] = g;
-                        }
-                    }
-                }
+                lanes.stems = stems_at(s, i, b0, p0);
                 let mut vol = lanes.volume;
                 if deck.has_stems() {
+                    // stems are mixed before the time-stretcher, which reads ahead of what is
+                    // heard: their gains follow the read position, so they change on time
+                    // (at the middle of this block, so a switch lands within half a block)
+                    let lead = deck.feed_lead_secs() + (p1 - p0) * 0.5;
+                    let stems = if lead > 0.0 {
+                        let pf = p0 + lead;
+                        stems_at(s, i, tl.beat_of_track_pos(i, pf), pf)
+                    } else {
+                        lanes.stems
+                    };
                     for (k, st) in StemKind::ALL.iter().enumerate() {
-                        deck.set_stem_automation(*st, lanes.stems[k]);
+                        deck.set_stem_automation(*st, stems[k]);
                     }
                 } else if lanes.stems.iter().any(|g| (g - 1.0).abs() > 1e-4) {
                     // no stems: emulate the stem gains with the volume and EQ
@@ -528,6 +572,10 @@ impl Conductor {
                 }
                 ch.filter_knob = if (lanes.filter - Param::Filter.neutral()).abs() > 1e-4 { lanes.filter } else { lane.filter };
                 ch.echo_send = lanes.echo;
+                if fresh {
+                    ch.snap_next = true;
+                    deck.snap_stem_gains();
+                }
             }
             // preload the next track on a free deck, parked at its mix-in
             for (i, tr) in tl.tracks.iter().enumerate() {

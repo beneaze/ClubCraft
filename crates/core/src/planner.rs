@@ -307,7 +307,7 @@ pub fn plan_mix(name: &str, order: &[TrackId], analysis: &dyn Fn(TrackId) -> Opt
             }
         }
         cumulative_shift = key_shift;
-        mix.tracks.push(MixTrack { track_id: id, mix_in, mix_out: mix_out.max(mix_in + 1.0), key_shift, gain_db: 0.0, stems: Vec::new() });
+        mix.tracks.push(MixTrack { track_id: id, mix_in, mix_out: mix_out.max(mix_in + 1.0), key_shift, gain_db: 0.0, stems: Vec::new(), line_bpm: None });
     }
     for i in 0..order.len().saturating_sub(1) {
         let (out, inc) = (analyses[i].clone().unwrap_or_default(), analyses[i + 1].clone().unwrap_or_default());

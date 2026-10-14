@@ -251,6 +251,13 @@ impl Eq3 {
         self.gains[2].set(eq_knob_gain(high));
     }
 
+    /// Jump to the knob settings without smoothing (a track starting mid-automation).
+    pub fn snap(&mut self) {
+        for g in self.gains.iter_mut() {
+            g.reset(g.target);
+        }
+    }
+
     pub fn process(&mut self, buf: &mut [f32]) {
         for f in buf.chunks_exact_mut(2) {
             let gl = self.gains[0].next();
@@ -325,6 +332,11 @@ pub struct DjFilter {
 impl DjFilter {
     pub fn new(sr: f32) -> Self {
         DjFilter { sr, knob: Smoother::new(0.5, 0.03, sr), resonance: 0.3, s1: Svf::default(), s2: Svf::default(), counter: 0, wet: 0.0, hp: false }
+    }
+
+    /// Jump to the knob without smoothing.
+    pub fn snap(&mut self) {
+        self.knob.reset(self.knob.target);
     }
 
     pub fn set(&mut self, knob: f32) {

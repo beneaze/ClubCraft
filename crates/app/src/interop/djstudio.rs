@@ -194,6 +194,24 @@ fn lane_points(root: &Path, ae_key: &str, side: usize, control: &str) -> Option<
     (!pts.is_empty()).then_some(pts)
 }
 
+/// The BPM DJ.Studio's tempo line uses for a track inside transitions: the mix's forced BPM, or
+/// the track's library BPM line when constant (`accurateBpmForGrid`), or its library BPM. It
+/// can differ slightly from the beat grid (e.g. 122.20 for a 122.00 grid), and DJ.Studio plays
+/// the transitions at that tempo.
+fn line_bpm(root: &Path, library_key: &str, md: &Value) -> Option<f64> {
+    if let Some(b) = md.get("mixBpm").and_then(|v| v.as_f64()).filter(|b| *b > 1.0) {
+        return Some(b);
+    }
+    let lib = read_json(&root.join("audio-library-table").join(bucket(library_key)).join(library_key))?;
+    let line: Vec<f64> = lib.get("bpmLine").and_then(|l| l.as_array()).map(|a| a.iter().filter_map(|p| p.get("value").and_then(|v| v.as_f64())).collect()).unwrap_or_default();
+    let constant = match line.as_slice() {
+        [v] => Some(*v),
+        [a, b] if (a - b).abs() < 1e-9 => Some(*a),
+        _ => None,
+    };
+    constant.or_else(|| lib.get("bpm").and_then(|v| v.as_f64())).filter(|b| (20.0..500.0).contains(b))
+}
+
 /// A track's own stem lanes (`<proj>/<item>/virtual-stems-*`, in local track beats = `mixMap`
 /// indices) in track seconds. Only lanes that do something are kept; the 4-stem lanes win over
 /// the HQ vocals / instrumental ones.
@@ -473,7 +491,16 @@ pub fn transition_from(root: &Path, ae: &Value) -> Transition {
         }
     }
     let locked = ae.get("locked").and_then(|l| l.as_bool()).unwrap_or(false);
-    Transition { style, beats: d.round().max(1.0) as u32, lanes, locked }
+    // DJ.Studio's BPM line: a ramp centred at `bpmLinePos` over `bpmLineLen` of the window
+    // (mode 0 / 1), or a jump halfway without beat sync (mode 2); its tempo steps once per beat
+    let num_ae = |k: &str, dv: f64| ae.get(k).and_then(|v| v.as_f64()).unwrap_or(dv) as f32;
+    let tempo = clubcraft_core::TempoRamp {
+        pos: num_ae("bpmLinePos", 0.75),
+        len: num_ae("bpmLineLen", 0.5),
+        per_beat: true,
+        jump: ae.get("bpmLineMode").and_then(|v| v.as_i64()) == Some(2),
+    };
+    Transition { style, beats: d.round().max(1.0) as u32, lanes, locked, tempo: Some(tempo) }
 }
 
 pub struct ImportReport {
@@ -534,11 +561,12 @@ pub fn project_to_mix(root: &Path, project_key: &str, tracks: &HashMap<String, T
     let effects: Vec<Value> = pv.get("autoEffects").and_then(|e| e.as_array()).cloned().unwrap_or_default();
     let list = pv.get("mixList").and_then(|l| l.as_array()).cloned().unwrap_or_default();
     let mut item_keys = Vec::new();
+    let mut first_beat: Option<f64> = None;
     for item in &list {
         let lk = item.get("libraryKey").and_then(|k| k.as_str()).unwrap_or_default();
         let ik = item.get("key").and_then(|k| k.as_str()).unwrap_or_default();
         let Some(&tid) = tracks.get(lk) else { continue }; // jingles and missing files are skipped
-        let mut mt = MixTrack { track_id: tid, mix_in: 0.0, mix_out: 0.0, key_shift: 0, gain_db: 0.0, stems: Vec::new() };
+        let mut mt = MixTrack { track_id: tid, mix_in: 0.0, mix_out: 0.0, key_shift: 0, gain_db: 0.0, stems: Vec::new(), line_bpm: None };
         if let Some(md) = read_json(&root.join("mix-data-table").join(ik)) {
             let sys = md.pointer("/cueData/systemCuePoints").and_then(|c| c.as_array()).cloned().unwrap_or_default();
             let time = |i: usize| sys.get(i).and_then(|c| c.get("time")).and_then(|t| t.as_f64());
@@ -549,6 +577,10 @@ pub fn project_to_mix(root: &Path, project_key: &str, tracks: &HashMap<String, T
             // loudness itself (auto-gain), so importing it would attenuate tracks twice.
             mt.gain_db = 0.0;
             mt.stems = track_stem_lanes(root, ik, &md);
+            mt.line_bpm = line_bpm(root, lk, &md);
+            if mix.tracks.is_empty() {
+                first_beat = md.pointer("/mixMap/0/time").and_then(|t| t.as_f64());
+            }
         }
         mix.tracks.push(mt);
         item_keys.push(ik.to_string());
@@ -561,9 +593,10 @@ pub fn project_to_mix(root: &Path, project_key: &str, tracks: &HashMap<String, T
         };
         mix.transitions.push(t);
     }
-    // DJ.Studio plays the first track from its beginning (its cue-in only anchors transitions).
+    // DJ.Studio starts the mix at the first track's first beat (its cue-in only anchors
+    // transitions); a first beat before the start of the file is a short lead-in of silence.
     if let Some(first) = mix.tracks.first_mut() {
-        first.mix_in = 0.0;
+        first.mix_in = first_beat.unwrap_or(0.0);
     }
     mix.normalize();
     Ok(mix)

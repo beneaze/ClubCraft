@@ -26,11 +26,15 @@ pub struct LibraryView {
     pub last_clicked: Option<TrackId>,
     /// Restrict to a playlist.
     pub playlist: Option<i64>,
+    /// Show only the tracks of this mix (project), in mix order unless sorted otherwise.
+    pub mix: Option<i64>,
+    /// The mix's tracks are shown in mix order (until a column is clicked to sort).
+    pub mix_ordered: bool,
 }
 
 impl Default for LibraryView {
     fn default() -> Self {
-        LibraryView { search: String::new(), sort: SortBy::Artist, ascending: true, selected: HashSet::new(), last_clicked: None, playlist: None }
+        LibraryView { search: String::new(), sort: SortBy::Artist, ascending: true, selected: HashSet::new(), last_clicked: None, playlist: None, mix: None, mix_ordered: false }
     }
 }
 
@@ -60,11 +64,19 @@ pub fn matches(t: &Track, q: &str) -> bool {
 
 impl LibraryView {
     pub fn visible<'a>(&self, sh: &'a Shared) -> Vec<&'a Track> {
-        let ids: Option<HashSet<TrackId>> = self.playlist.and_then(|p| sh.playlist_tracks.get(&p)).map(|v| v.iter().copied().collect());
+        let mix_order: Option<&Vec<TrackId>> = self.mix.and_then(|m| sh.mix_tracks.iter().find(|x| x.0 == m)).map(|x| &x.2);
+        let ids: Option<HashSet<TrackId>> = match mix_order {
+            Some(v) => Some(v.iter().copied().collect()),
+            None => self.playlist.and_then(|p| sh.playlist_tracks.get(&p)).map(|v| v.iter().copied().collect()),
+        };
         let mut v: Vec<&Track> = sh.tracks.iter().filter(|t| matches(t, &self.search) && ids.as_ref().is_none_or(|s| s.contains(&t.id))).collect();
         let an = &sh.analyses;
         let bpm = |t: &Track| an.get(&t.id).and_then(|a| a.bpm()).or(t.tag_bpm).unwrap_or(0.0);
         let key = |t: &Track| an.get(&t.id).and_then(|a| a.key).map(|k| k.camelot_number() as i32 * 2 + (!k.minor) as i32).unwrap_or(99);
+        if let (true, Some(order)) = (self.mix_ordered, mix_order) {
+            v.sort_by_key(|t| order.iter().position(|id| *id == t.id).unwrap_or(usize::MAX));
+            return v;
+        }
         match self.sort {
             SortBy::Artist => v.sort_by(|a, b| a.artist.to_lowercase().cmp(&b.artist.to_lowercase()).then(a.title.cmp(&b.title))),
             SortBy::Title => v.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase())),
@@ -88,17 +100,43 @@ impl LibraryView {
                 self.search.clear();
             }
             ui.separator();
-            let label = match self.playlist {
-                None => "All tracks".to_string(),
-                Some(p) => sh.playlists.iter().find(|x| x.0 == p).map(|x| x.1.clone()).unwrap_or_default(),
+            let label = match (self.mix, self.playlist) {
+                (Some(m), _) => sh.mix_tracks.iter().find(|x| x.0 == m).map(|x| x.1.clone()).unwrap_or_default(),
+                (None, Some(p)) => sh.playlists.iter().find(|x| x.0 == p).map(|x| x.1.clone()).unwrap_or_default(),
+                (None, None) => "All tracks".to_string(),
             };
-            egui::ComboBox::from_id_salt(("pl", compact)).selected_text(label).show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.playlist, None, "All tracks");
-                for (id, name) in &sh.playlists {
-                    ui.selectable_value(&mut self.playlist, Some(*id), name);
+            egui::ComboBox::from_id_salt(("pl", compact)).selected_text(crate::studio::truncate(&label, 34)).width(230.0).show_ui(ui, |ui| {
+                ui.set_min_width(260.0);
+                if ui.selectable_label(self.mix.is_none() && self.playlist.is_none(), "All tracks").clicked() {
+                    self.mix = None;
+                    self.playlist = None;
+                }
+                if !sh.playlists.is_empty() {
+                    ui.separator();
+                    ui.label(RichText::new("Playlists").size(11.0).color(theme::TEXT_DIM));
+                    for (id, name) in &sh.playlists {
+                        if ui.selectable_label(self.mix.is_none() && self.playlist == Some(*id), name).clicked() {
+                            self.playlist = Some(*id);
+                            self.mix = None;
+                        }
+                    }
+                }
+                if !sh.mix_tracks.is_empty() {
+                    ui.separator();
+                    ui.label(RichText::new("Mixes").size(11.0).color(theme::TEXT_DIM));
+                    egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                        for (id, name, tracks) in &sh.mix_tracks {
+                            if ui.selectable_label(self.mix == Some(*id), format!("{name}  ({})", tracks.len())).clicked() {
+                                self.mix = Some(*id);
+                                self.playlist = None;
+                                self.mix_ordered = true;
+                            }
+                        }
+                    });
                 }
             });
-            ui.label(RichText::new(format!("{} tracks", sh.tracks.len())).color(theme::TEXT_DIM));
+            let n = if self.mix.is_some() || self.playlist.is_some() || !self.search.is_empty() { self.visible(sh).len() } else { sh.tracks.len() };
+            ui.label(RichText::new(format!("{n} tracks")).color(theme::TEXT_DIM));
         });
         let rows = self.visible(sh);
         let row_ids: Vec<TrackId> = rows.iter().map(|t| t.id).collect();
@@ -120,9 +158,10 @@ impl LibraryView {
             table = table.column(Column::remainder().at_least(60.0));
         }
         let mut header = |ui: &mut egui::Ui, name: &str, s: Option<SortBy>| {
-            let active = s == Some(self.sort);
+            let active = s == Some(self.sort) && !self.mix_ordered;
             let txt = if active { format!("{name} {}", if self.ascending { "⏶" } else { "⏷" }) } else { name.to_string() };
             if ui.add(egui::Label::new(RichText::new(txt).strong().size(11.5)).sense(egui::Sense::click())).clicked() {
+                self.mix_ordered = false;
                 if let Some(s) = s {
                     if self.sort == s {
                         self.ascending = !self.ascending;

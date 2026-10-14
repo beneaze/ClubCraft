@@ -21,6 +21,8 @@ pub struct Shared {
     pub analyses: HashMap<TrackId, Analysis>,
     pub playlists: Vec<(i64, String)>,
     pub playlist_tracks: HashMap<i64, Vec<TrackId>>,
+    /// Every mix (project) with its tracks in order, for the library's mix filter.
+    pub mix_tracks: Vec<(i64, String, Vec<TrackId>)>,
     pub job_status: HashMap<Option<TrackId>, JobStatus>,
     pub cue_counts: HashMap<TrackId, usize>,
     pub waveforms: HashMap<TrackId, std::sync::Arc<clubcraft_core::Waveform>>,
@@ -360,6 +362,7 @@ impl App {
 
     pub fn refresh_mixes(&mut self) {
         self.mixes = self.lib.mixes().unwrap_or_default();
+        self.sh.mix_tracks = self.mixes.iter().filter_map(|(id, name, _)| self.lib.mix(*id).ok().flatten().map(|m| (*id, name.clone(), m.tracks.iter().map(|t| t.track_id).collect()))).collect();
         self.mix_summaries = self
             .mixes
             .iter()
@@ -718,6 +721,15 @@ impl App {
                 let v: Vec<f64> = arg.split_whitespace().filter_map(|x| x.parse().ok()).collect();
                 if v.len() == 3 {
                     self.studio.range = Some(crate::studio_timeline::RangeSel { track: v[0] as usize, b0: v[1], b1: v[2] });
+                }
+            }
+            "lib-mix" => {
+                // `lib-mix <name>`: filter the library to a mix's tracks (tests)
+                let q = arg.trim().to_lowercase();
+                let m = self.sh.mix_tracks.iter().find(|m| m.1.to_lowercase().contains(&q)).map(|m| m.0);
+                for v in [&mut self.library, &mut self.browser] {
+                    v.mix = m;
+                    v.mix_ordered = m.is_some();
                 }
             }
             "stem-range" => {

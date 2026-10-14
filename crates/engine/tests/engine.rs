@@ -111,8 +111,8 @@ fn sync_phase_locks_124_to_126_within_1ms() {
 
 fn two_track_mix(style: TransitionStyle, keylock: bool) -> Mix {
     let mut mix = Mix { keylock, tempo: TempoMode::Glide, ..Default::default() };
-    mix.tracks.push(MixTrack { track_id: 1, mix_in: 0.0, mix_out: 20.0, key_shift: 0, gain_db: 0.0, stems: Vec::new() });
-    mix.tracks.push(MixTrack { track_id: 2, mix_in: 8.0 * 60.0 / 126.0, mix_out: 30.0, key_shift: 0, gain_db: 0.0, stems: Vec::new() });
+    mix.tracks.push(MixTrack { track_id: 1, mix_in: 0.0, mix_out: 20.0, key_shift: 0, gain_db: 0.0, stems: Vec::new(), line_bpm: None });
+    mix.tracks.push(MixTrack { track_id: 2, mix_in: 8.0 * 60.0 / 126.0, mix_out: 30.0, key_shift: 0, gain_db: 0.0, stems: Vec::new(), line_bpm: None });
     mix.normalize();
     mix.transitions[0] = Transition::new(style, 16);
     mix
@@ -520,8 +520,8 @@ fn rms(x: &[f32], t0: f64, t1: f64) -> f64 {
 /// Two 120 BPM tracks, transition of 16 beats starting at 20 s (track 2 mixed in at beat 8).
 fn lane_mix(style: TransitionStyle, lanes: [clubcraft_core::LaneSettings; 2]) -> Mix {
     let mut mix = Mix { keylock: false, tempo: TempoMode::Glide, ..Default::default() };
-    mix.tracks.push(MixTrack { track_id: 1, mix_in: 0.0, mix_out: 20.0, key_shift: 0, gain_db: 0.0, stems: Vec::new() });
-    mix.tracks.push(MixTrack { track_id: 2, mix_in: 4.0, mix_out: 30.0, key_shift: 0, gain_db: 0.0, stems: Vec::new() });
+    mix.tracks.push(MixTrack { track_id: 1, mix_in: 0.0, mix_out: 20.0, key_shift: 0, gain_db: 0.0, stems: Vec::new(), line_bpm: None });
+    mix.tracks.push(MixTrack { track_id: 2, mix_in: 4.0, mix_out: 30.0, key_shift: 0, gain_db: 0.0, stems: Vec::new(), line_bpm: None });
     mix.normalize();
     mix.transitions[0] = Transition::new(style, 16);
     mix.lanes = lanes.to_vec();
@@ -658,7 +658,7 @@ fn live_lane_edits_apply_immediately_without_clicks() {
 fn six_track_mix() -> Mix {
     let mut mix = Mix { keylock: false, tempo: TempoMode::Glide, ..Default::default() };
     for i in 0..6 {
-        mix.tracks.push(MixTrack { track_id: 1 + i, mix_in: if i == 0 { 0.0 } else { 2.0 }, mix_out: 20.0, key_shift: 0, gain_db: 0.0, stems: Vec::new() });
+        mix.tracks.push(MixTrack { track_id: 1 + i, mix_in: if i == 0 { 0.0 } else { 2.0 }, mix_out: 20.0, key_shift: 0, gain_db: 0.0, stems: Vec::new(), line_bpm: None });
     }
     mix.normalize();
     for t in mix.transitions.iter_mut() {
@@ -892,4 +892,37 @@ fn track_stem_lanes_play_without_stems() {
     assert!(vocals_only < full * 0.8, "the lane should take the level down ({full} → {vocals_only})");
     assert!(vocals_only > full * 0.2, "vocals stay audible");
     assert!((rms(11.0, 14.0) / full - 1.0).abs() < 0.1, "back to full after the lane");
+}
+
+#[test]
+fn incoming_track_starts_at_its_automation_not_full_level() {
+    // the incoming track is a loud tone that lives entirely in its vocal stem; the transition
+    // keeps its vocals off for the first half: nothing of it may be heard before that
+    let n = SR as usize * 40;
+    let tone: Vec<f32> = (0..n).map(|i| 0.5 * (i as f32 * 440.0 * std::f32::consts::TAU / SR as f32).sin()).collect();
+    let z = vec![0f32; n];
+    let stems: [(Vec<f32>, Vec<f32>); 4] = [(z.clone(), z.clone()), (z.clone(), z.clone()), (z.clone(), z.clone()), (tone.clone(), tone.clone())];
+    let a = track(&z, 120.0, 0.0);
+    let b = Arc::new(LoadedTrack::new("b", mono(&tone)).with_grid(BeatGrid::new(126.0, 0.0)).with_stems(Arc::new(StemTrack::from_planar("b", &stems))));
+    let mut mix = two_track_mix(TransitionStyle::Crossfade, true);
+    let mut t = Transition::new(TransitionStyle::Custom, 16);
+    t.lanes = vec![clubcraft_core::Lane::new(clubcraft_core::Side::In, clubcraft_core::Param::Stem(StemKind::Vocals), &[(0.0, 0.0), (8.0, 0.0), (8.0, 1.0)])];
+    mix.transitions[0] = t;
+    let tr = |id: i64| Some(if id == 1 { a.clone() } else { b.clone() });
+    let opts = RenderOptions { limiter: false, tail_secs: 0.5, ..Default::default() };
+    let (r, rep) = render_mix_to_vec(&mix, &|id| tr(id).map(|t| t.analysis()), &tr, &opts).unwrap();
+    let x = &rep.timeline.transitions[0];
+    let half = rep.timeline.sec_at_beat(x.start_beat + 8.0);
+    let peak = |t0: f64, t1: f64| r[(t0 * SR as f64) as usize * 2..(t1 * SR as f64) as usize * 2].iter().fold(0f32, |m, v| m.max(v.abs()));
+    let early = peak(x.start_sec - 0.5, half - 0.05);
+    let after = peak(half + 0.1, half + 1.0);
+    eprintln!("incoming before its vocals switch on: peak {early:.5}; after: {after:.3}");
+    assert!(early < 1e-3, "the incoming track leaked at {early} before its automation let it in");
+    assert!(after > 0.2);
+    // and it comes in on the beat (stems are mixed before the stretcher, which reads ahead)
+    let from = ((half - 0.3) * SR as f64) as usize;
+    let on = (from..r.len() / 2).find(|&i| r[i * 2].abs() > 0.05).unwrap();
+    let late_ms = (on as f64 / SR as f64 - half) * 1000.0;
+    eprintln!("vocals switch on {late_ms:+.1} ms from the beat");
+    assert!(late_ms.abs() < 8.0, "switched {late_ms} ms off the beat");
 }

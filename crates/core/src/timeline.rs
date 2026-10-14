@@ -159,16 +159,62 @@ impl MixTimeline {
         match mix.tempo {
             TempoMode::Fixed(b) => push(0.0, tl.total_beats, b, b),
             TempoMode::Glide => {
+                // a track's tempo on the mix's tempo line inside transitions (DJ.Studio: its
+                // library BPM, which can differ slightly from the grid), and outside them (its
+                // own tempo, unless the line forces a tempo 1 % or more away from it)
+                let line = |i: usize| mix.tracks.get(i).and_then(|t| t.line_bpm).filter(|b| *b > 1.0).unwrap_or(native(i));
+                let alone = |i: usize| if (line(i) / native(i) - 1.0).abs() >= 0.01 { line(i) } else { native(i) };
                 let mut cur = 0.0;
                 for (k, tr) in tl.transitions.iter().enumerate() {
                     let (a, c) = (native(k), native(k + 1));
-                    push(cur, tr.start_beat - cur, a, a);
-                    let h = tr.beats / 2.0;
-                    push(tr.start_beat, h, a, a);
-                    push(tr.start_beat + h, tr.beats - h, a, c);
-                    cur = tr.start_beat + tr.beats;
+                    let (s, len) = (tr.start_beat, tr.beats);
+                    match mix.transitions.get(k).and_then(|t| t.tempo) {
+                        None => {
+                            push(cur, s - cur, a, a);
+                            let h = len / 2.0;
+                            push(s, h, a, a);
+                            push(s + h, len - h, a, c);
+                        }
+                        Some(r) => {
+                            push(cur, s - cur, alone(k), alone(k));
+                            let (la, lc) = (line(k), line(k + 1));
+                            if r.jump {
+                                let h = (0.5 * len).round().min(len);
+                                push(s, h, la, la);
+                                push(s + h, len - h, lc, lc);
+                            } else {
+                                let centre = s + r.pos as f64 * len;
+                                let rad = r.len as f64 * len * 0.5;
+                                let (r0, r1) = ((centre - rad).clamp(s, s + len), (centre + rad).clamp(s, s + len));
+                                let bpm_at = |b: f64| {
+                                    if b <= r0 || r1 <= r0 {
+                                        if b < r1 { la } else { lc }
+                                    } else if b >= r1 {
+                                        lc
+                                    } else {
+                                        la + (lc - la) * (b - r0) / (r1 - r0)
+                                    }
+                                };
+                                if r.per_beat {
+                                    // DJ.Studio: every beat lasts 60 / bpm at its start
+                                    let mut j = 0.0;
+                                    while j < len - 1e-9 {
+                                        let v = bpm_at(s + j);
+                                        push(s + j, (len - j).min(1.0), v, v);
+                                        j += 1.0;
+                                    }
+                                } else {
+                                    push(s, r0 - s, la, la);
+                                    push(r0, r1 - r0, la, lc);
+                                    push(r1, s + len - r1, lc, lc);
+                                }
+                            }
+                        }
+                    }
+                    cur = s + len;
                 }
-                let last = native(tl.tracks.len() - 1);
+                let n = tl.tracks.len() - 1;
+                let last = if mix.transitions.last().is_some_and(|t| t.tempo.is_some()) { alone(n) } else { native(n) };
                 push(cur, tl.total_beats - cur, last, last);
             }
         }
@@ -270,8 +316,8 @@ mod tests {
     #[test]
     fn glide_timeline() {
         let mut mix = Mix::default();
-        mix.tracks.push(MixTrack { track_id: 1, mix_in: 0.0, mix_out: 60.0, key_shift: 0, gain_db: 0.0, stems: Vec::new() });
-        mix.tracks.push(MixTrack { track_id: 2, mix_in: 0.0, mix_out: 60.0, key_shift: 0, gain_db: 0.0, stems: Vec::new() });
+        mix.tracks.push(MixTrack { track_id: 1, mix_in: 0.0, mix_out: 60.0, key_shift: 0, gain_db: 0.0, stems: Vec::new(), line_bpm: None });
+        mix.tracks.push(MixTrack { track_id: 2, mix_in: 0.0, mix_out: 60.0, key_shift: 0, gain_db: 0.0, stems: Vec::new(), line_bpm: None });
         mix.normalize();
         mix.transitions[0] = Transition::new(TransitionStyle::Crossfade, 32);
         let tl = MixTimeline::build(&mix, &|id| Some(if id == 1 { an(120.0, 120.0) } else { an(126.0, 180.0) }));

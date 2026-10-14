@@ -228,11 +228,34 @@ pub struct Transition {
     /// points, and not editable until unlocked.
     #[serde(default)]
     pub locked: bool,
+    /// How the tempo moves from the outgoing to the incoming BPM (DJ.Studio's BPM line);
+    /// `None` = ClubCraft's glide over the second half.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tempo: Option<TempoRamp>,
+}
+
+/// The tempo change of a transition, as fractions of its length (DJ.Studio's BPM line: centre
+/// `pos`, length `len`; the default 0.75 / 0.5 is a ramp over the second half).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TempoRamp {
+    pub pos: f32,
+    pub len: f32,
+    /// The tempo changes once per beat (DJ.Studio evaluates its BPM line at every beat start)
+    /// instead of continuously.
+    pub per_beat: bool,
+    /// No beat sync: the tempo jumps to the incoming BPM halfway through.
+    pub jump: bool,
+}
+
+impl Default for TempoRamp {
+    fn default() -> Self {
+        TempoRamp { pos: 0.75, len: 0.5, per_beat: false, jump: false }
+    }
 }
 
 impl Transition {
     pub fn new(style: TransitionStyle, beats: u32) -> Self {
-        Transition { style, beats, lanes: style.lanes(beats as f32), locked: false }
+        Transition { style, beats, lanes: style.lanes(beats as f32), locked: false, tempo: None }
     }
 
     /// Change the length to `beats`, keeping the shape of every curve (points scale with the
@@ -328,7 +351,7 @@ impl Transition {
                 }
             }
         }
-        Transition { style: self.style, beats: self.beats, lanes, locked: self.locked }
+        Transition { style: self.style, beats: self.beats, lanes, locked: self.locked, tempo: self.tempo }
     }
 }
 
@@ -414,11 +437,16 @@ pub struct MixTrack {
     /// transitions; inside one, the transition's own lane for that stem wins.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stems: Vec<StemLane>,
+    /// The track's BPM on the mix's tempo line inside transitions, when it differs from its beat
+    /// grid (DJ.Studio's library BPM can be slightly off its grid, and it plays transitions at
+    /// that tempo). `None` = the grid BPM.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_bpm: Option<f64>,
 }
 
 impl MixTrack {
     pub fn new(track_id: TrackId, mix_in: f64, mix_out: f64) -> Self {
-        MixTrack { track_id, mix_in, mix_out, key_shift: 0, gain_db: 0.0, stems: Vec::new() }
+        MixTrack { track_id, mix_in, mix_out, key_shift: 0, gain_db: 0.0, stems: Vec::new(), line_bpm: None }
     }
 
     /// Set `stem` to `gain` between track times `t0` and `t1` (s), with 10 ms ramps, keeping the
@@ -643,7 +671,7 @@ mod stemless_tests {
     fn each_stem_transition_keeps_its_own_shape() {
         use StemKind::*;
         let side = |d: &[(f32, f32)], rest: f32| {
-            let mut t = Transition { style: TransitionStyle::StemBlend, beats: 32, lanes: vec![], locked: false };
+            let mut t = Transition { style: TransitionStyle::StemBlend, beats: 32, lanes: vec![], locked: false, tempo: None };
             t.lanes.push(Lane::new(Side::Out, Param::Stem(Drums), d));
             for k in [Bass, Other, Vocals] {
                 t.lanes.push(Lane::new(Side::Out, Param::Stem(k), &[(0.0, rest)]));

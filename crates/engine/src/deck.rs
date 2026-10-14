@@ -1187,6 +1187,27 @@ impl Deck {
         self.apply_stem_gains();
     }
 
+    /// Jump the stem gains to their targets without smoothing: a track that starts in the middle
+    /// of a transition must not sound at full level until the gains have glided down (that
+    /// includes the audio the time-stretcher is primed with).
+    pub fn snap_stem_gains(&mut self) {
+        self.apply_stem_gains();
+        for g in self.src.gains.iter_mut().chain(self.src.sends.iter_mut()) {
+            g.reset(g.target);
+        }
+    }
+
+    /// How far (track seconds) the audio being fed into the time-stretcher (stems mixed in) is
+    /// ahead of what is heard: 0 without the stretcher.
+    pub fn feed_lead_secs(&self) -> f64 {
+        let stretching = self.cur_path == Path::Stretch || (self.cur_path == Path::Silent && (self.keylock || self.key_shift != 0.0));
+        if stretching {
+            (self.in_lat as f64 + self.out_lat as f64 * self.cur_rate.abs().max(0.05)) / self.track_sr
+        } else {
+            0.0
+        }
+    }
+
     pub fn has_stems(&self) -> bool {
         self.src.track.as_ref().is_some_and(|t| t.stems.is_some())
     }
