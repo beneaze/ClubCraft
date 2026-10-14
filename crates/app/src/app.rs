@@ -92,6 +92,7 @@ pub struct App {
     pub home: crate::home::HomeView,
     pub prefs: crate::prefs::Prefs,
     menu: Option<crate::menu::AppMenu>,
+    ui_ctx_cmd: Option<egui::ViewportCommand>,
     applied_prefs: Option<crate::prefs::Prefs>,
     pub mix_summaries: Vec<crate::home::MixSummary>,
     prepared: (i64, usize),
@@ -127,7 +128,7 @@ impl App {
         }
         let audio_cfg: clubcraft_engine::AudioConfig = cc.storage.and_then(|s| eframe::get_value(s, "audio")).unwrap_or_default();
         let midi_port: Option<String> = cc.storage.and_then(|s| eframe::get_value(s, "midi_port"));
-        let mut app = App { lib, sh, jobs, view, library: LibraryView::default(), status: String::new(), devctl: crate::devctl::DevCtl::from_env(), live: Default::default(), decks: vec![Default::default(); 2], mixer: Default::default(), browser: LibraryView::default(), studio: Default::default(), mixes: Vec::new(), eng: crate::live::adapter::LiveEngine::start(audio_cfg.clone()), settings: crate::settings::Settings::new(audio_cfg, midi_port), home: Default::default(), prefs, applied_prefs: None, menu: crate::menu::AppMenu::install(&cc.egui_ctx), mix_summaries: Vec::new(), prepared: (-1, 0), queued: Default::default() };
+        let mut app = App { lib, sh, jobs, view, library: LibraryView::default(), status: String::new(), devctl: crate::devctl::DevCtl::from_env(), live: Default::default(), decks: vec![Default::default(); 2], mixer: Default::default(), browser: LibraryView::default(), studio: Default::default(), mixes: Vec::new(), eng: crate::live::adapter::LiveEngine::start(audio_cfg.clone()), settings: crate::settings::Settings::new(audio_cfg, midi_port), home: Default::default(), prefs, applied_prefs: None, menu: crate::menu::AppMenu::install(&cc.egui_ctx), ui_ctx_cmd: None, mix_summaries: Vec::new(), prepared: (-1, 0), queued: Default::default() };
         app.settings.connect_midi(app.eng.handle.as_ref());
         if let Some(e) = &app.eng.error {
             app.status = e.clone();
@@ -563,7 +564,54 @@ impl App {
                     self.handle_live_actions(vec![act]);
                 }
             }
-            "settings" => self.settings.open = true,
+            "settings" => {
+                self.settings.open = true;
+                match arg.trim() {
+                    "decks" => self.settings.tab = crate::settings::Tab::Decks,
+                    "mixer" => self.settings.tab = crate::settings::Tab::Mixer,
+                    "analysis" => self.settings.tab = crate::settings::Tab::Analysis,
+                    "studio" => self.settings.tab = crate::settings::Tab::Studio,
+                    _ => {}
+                }
+            }
+            "settings-close" => self.settings.open = false,
+            "search" => {
+                self.browser.search = arg.trim().to_string();
+                self.library.search = arg.trim().to_string();
+            }
+            "sort" => {
+                use crate::library_view::SortBy;
+                let mut it = arg.split_whitespace();
+                let by = match it.next().unwrap_or("") {
+                    "bpm" => SortBy::Bpm,
+                    "key" => SortBy::Key,
+                    "energy" => SortBy::Energy,
+                    "title" => SortBy::Title,
+                    _ => SortBy::Artist,
+                };
+                let asc = it.next() != Some("desc");
+                for v in [&mut self.browser, &mut self.library] {
+                    v.sort = by;
+                    v.ascending = asc;
+                }
+            }
+            "size" => {
+                let v: Vec<f32> = arg.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+                if v.len() == 2 {
+                    self.ui_ctx_cmd = Some(egui::ViewportCommand::InnerSize(egui::vec2(v[0], v[1])));
+                }
+            }
+            "zoom" => {
+                if let Ok(z) = arg.trim().parse::<f32>() {
+                    self.studio.zoom = z;
+                }
+            }
+            "scroll" => {
+                if let Ok(x) = arg.trim().parse::<f32>() {
+                    self.studio.scroll = x;
+                    self.studio.follow = false;
+                }
+            }
             "collapse" => {
                 if let Ok(l) = arg.trim().parse::<usize>() {
                     if l < self.studio.lane_collapsed.len() {
@@ -651,6 +699,9 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.handle_events(&ctx);
+        if let Some(c) = self.ui_ctx_cmd.take() {
+            ctx.send_viewport_cmd(c);
+        }
         let menu_cmds = self.menu.as_ref().map(|m| m.poll()).unwrap_or_default();
         for c in menu_cmds {
             self.menu_command(c);
