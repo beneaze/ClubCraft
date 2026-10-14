@@ -187,7 +187,7 @@ fn env_logger_init() {
     struct L;
     impl log::Log for L {
         fn enabled(&self, m: &log::Metadata) -> bool {
-            m.level() <= log::Level::Info
+            m.level() <= if std::env::var("RUST_LOG").is_ok_and(|v| v.contains("debug")) { log::Level::Debug } else { log::Level::Info }
         }
         fn log(&self, r: &log::Record) {
             if self.enabled(r.metadata()) && r.target().starts_with("clubcraft") {
@@ -197,5 +197,6 @@ fn env_logger_init() {
         fn flush(&self) {}
     }
     static LOGGER: L = L;
-    let _ = log::set_logger(&LOGGER).map(|_| log::set_max_level(log::LevelFilter::Info));
+    let debug = std::env::var("RUST_LOG").is_ok_and(|v| v.contains("debug"));
+    let _ = log::set_logger(&LOGGER).map(|_| log::set_max_level(if debug { log::LevelFilter::Debug } else { log::LevelFilter::Info }));
 }

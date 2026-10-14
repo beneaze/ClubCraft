@@ -21,7 +21,8 @@ fn sdr(r: &[f32], e: &[f32]) -> f64 {
 
 fn check(kind: BackendKind, min_db: f64) {
     let Some(dir) = models() else { return };
-    let rf = Roformer::load(&dir, "melroformer", kind).unwrap();
+    // the reference comparison is for the full-precision model
+    let rf = Roformer::load_with(&dir, "melroformer", kind, false).unwrap();
     let mix = read_npy(&dir.join("melroformer_ref_mix.npy")).unwrap();
     let x_ref = read_npy(&dir.join("melroformer_ref_x.npy")).unwrap();
     let mask_ref = read_npy(&dir.join("melroformer_ref_mask.npy")).unwrap();

@@ -24,7 +24,7 @@ The `htdemucs_ref_*.npy` tensors are used by `cargo test -p clubcraft-stems --te
 | `Quality::Fast` | `htdemucs` | 1 shift, overlap 0.25 | ~17 s (18x realtime) |
 | `Quality::High` (default) | `htdemucs_ft` | 1 shift, overlap 0.25 | ~80 s (4x) |
 | `Quality::Ultra` | `htdemucs_ft` | 2 shifts, overlap 0.5 | ~245 s (1.3x) |
-| `Quality::Best` | `melroformer` vocals + `htdemucs_ft` drums/bass on the instrumental, other = remainder | RoFormer overlap 2 | ~205 s (1.6x) |
+| `Quality::Best` | `melroformer` vocals + `htdemucs_ft` drums/bass on the instrumental, other = remainder | RoFormer overlap 2 | ~140 s (2.3x) with the fp16 vocal model, ~205 s in fp32 |
 
 ## Mel-Band RoFormer vocals (`Quality::Best`)
 
@@ -46,9 +46,16 @@ The exported graph is the network between the mel band gather and the mask scatt
 (`x [1, 801, 7916] -> mask [1, 801, 7916]`, fp32, 228 M parameters, ~870 MB). STFT
 (n_fft 2048, hop 441), band gather/scatter-average, masking and iSTFT run in Rust
 (`crates/stems/src/roformer.rs`); chunking follows the checkpoint's reference inference
-(8 s chunks, `num_overlap` 2, linear fades). fp16 CoreML was tried (1.4x faster) but only
-matches PyTorch to 39 dB, so fp32 is used. `melroformer_ref_*.npy` feed
+(8 s chunks, `num_overlap` 2, linear fades). `melroformer_ref_*.npy` feed
 `cargo test -p clubcraft-stems --test roformer`.
+
+**Half precision.** `export_melroformer.py --fp16` also writes `melroformer_fp16.mlmodelc`
+(436 MB). On CoreML the app uses it when present (the bundle ships only this one): about 1.4x
+faster on the GPU. On the synthetic reference signal it matches PyTorch to 39 dB, but on real
+music the stems match the fp32 model to 66 dB (vocals, melody) and 81 dB (drums, bass), far below
+anything audible and below the separation error itself. `CLUBCRAFT_ROFORMER_FP32=1` forces fp32.
+The Neural Engine was tried too (`CLUBCRAFT_ROFORMER_UNITS=ane`): CoreML's ANE compiler did not
+finish this model within 20 minutes, so the GPU is used.
 
 ## Structure model (crates/analysis)
 

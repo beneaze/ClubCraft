@@ -16,9 +16,15 @@ cp crates/app/assets/ClubCraft.icns "$APP/Contents/Resources/ClubCraft.icns"
 for m in htdemucs htdemucs_ft melroformer allin1; do
   [ -f "models/$m.json" ] && cp "models/$m.json" "$APP/Contents/Resources/models/"
 done
-for m in models/htdemucs.mlmodelc models/htdemucs_ft_*.mlmodelc models/melroformer.mlmodelc; do
+for m in models/htdemucs.mlmodelc models/htdemucs_ft_*.mlmodelc; do
   [ -d "$m" ] && cp -R "$m" "$APP/Contents/Resources/models/"
 done
+# the vocal model in half precision (1.4x faster, inaudible difference); full precision if missing
+if [ -d models/melroformer_fp16.mlmodelc ]; then
+  cp -R models/melroformer_fp16.mlmodelc "$APP/Contents/Resources/models/"
+else
+  cp -R models/melroformer.mlmodelc "$APP/Contents/Resources/models/"
+fi
 [ -f models/allin1.onnx ] && cp models/allin1.onnx "$APP/Contents/Resources/models/"
 # COCOLA (mashup finder re-ranking, ONNX, 19 MB)
 [ -f models/cocola.onnx ] && cp models/cocola.onnx models/cocola_w.bin models/cocola.json "$APP/Contents/Resources/models/"

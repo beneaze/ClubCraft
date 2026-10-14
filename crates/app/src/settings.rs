@@ -471,7 +471,7 @@ fn analysis_ui(ui: &mut Ui, p: &mut Prefs, actions: &mut Vec<SettingsAction>) {
     });
     row(ui, "Quality", |ui| {
         for (q, l, h) in [
-            ("best", "Best", "Mel-Band RoFormer vocals + htdemucs_ft: cleanest vocals, ~3.5 min per track"),
+            ("best", "Best", "Mel-Band RoFormer vocals + htdemucs_ft: cleanest vocals, ~2.5 min per track"),
             ("high", "High", "htdemucs_ft, ~80 s per track"),
             ("fast", "Fast", "htdemucs, ~17 s per track"),
         ] {

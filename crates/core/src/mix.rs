@@ -421,6 +421,28 @@ impl MixTrack {
         MixTrack { track_id, mix_in, mix_out, key_shift: 0, gain_db: 0.0, stems: Vec::new() }
     }
 
+    /// Set `stem` to `gain` between track times `t0` and `t1` (s), with 10 ms ramps, keeping the
+    /// lane outside the range. A lane that ends up at full level everywhere is removed.
+    pub fn set_stem_range(&mut self, stem: StemKind, t0: f64, t1: f64, gain: f32) {
+        const FADE: f32 = 0.01;
+        let (t0, t1) = (t0.min(t1) as f32, t0.max(t1) as f32);
+        let idx = match self.stems.iter().position(|l| l.stem == stem) {
+            Some(i) => i,
+            None => {
+                self.stems.push(StemLane { stem, points: Vec::new() });
+                self.stems.len() - 1
+            }
+        };
+        let pts = &mut self.stems[idx].points;
+        let (before, after) = (interpolate(pts, t0 - FADE, 1.0), interpolate(pts, t1 + FADE, 1.0));
+        pts.retain(|p| p.0 < t0 - FADE || p.0 > t1 + FADE);
+        pts.extend([(t0 - FADE, before), (t0, gain), (t1, gain), (t1 + FADE, after)]);
+        pts.sort_by(|a, b| a.0.total_cmp(&b.0));
+        if pts.iter().all(|p| (p.1 - 1.0).abs() < 1e-4) {
+            self.stems.remove(idx);
+        }
+    }
+
     /// Gain of `stem` from the track's own stem lanes at track time `t` (s), if it has one.
     pub fn stem_at(&self, stem: StemKind, t: f64) -> Option<f32> {
         self.stems.iter().find(|l| l.stem == stem).map(|l| interpolate(&l.points, t as f32, 1.0))
@@ -579,6 +601,23 @@ mod tests {
 #[cfg(test)]
 mod stemless_tests {
     use super::*;
+
+    #[test]
+    fn stem_ranges_mute_and_restore_parts_of_a_track() {
+        let mut t = MixTrack::new(1, 0.0, 200.0);
+        t.set_stem_range(StemKind::Vocals, 30.0, 60.0, 0.0);
+        assert_eq!(t.stem_at(StemKind::Vocals, 20.0), Some(1.0));
+        assert_eq!(t.stem_at(StemKind::Vocals, 45.0), Some(0.0));
+        assert_eq!(t.stem_at(StemKind::Vocals, 70.0), Some(1.0));
+        // a second range keeps the first one
+        t.set_stem_range(StemKind::Vocals, 100.0, 110.0, 0.0);
+        assert_eq!(t.stem_at(StemKind::Vocals, 45.0), Some(0.0));
+        assert_eq!(t.stem_at(StemKind::Vocals, 105.0), Some(0.0));
+        // switching both back on removes the lane
+        t.set_stem_range(StemKind::Vocals, 30.0, 60.0, 1.0);
+        t.set_stem_range(StemKind::Vocals, 100.0, 110.0, 1.0);
+        assert!(t.stems.is_empty());
+    }
 
     #[test]
     fn stem_blend_without_stems_follows_the_stems() {

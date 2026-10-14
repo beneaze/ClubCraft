@@ -716,6 +716,17 @@ impl App {
                     self.studio.range = Some(crate::studio_timeline::RangeSel { track: v[0] as usize, b0: v[1], b1: v[2] });
                 }
             }
+            "stem-range" => {
+                // `stem-range <stem 0-3> <gain>`: set a stem in the selected range (tests)
+                let v: Vec<f64> = arg.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+                if let (Some(rs), [st, g]) = (self.studio.range, v.as_slice()) {
+                    let (t0, t1) = (self.studio.timeline.track_pos(rs.track, rs.b0), self.studio.timeline.track_pos(rs.track, rs.b1));
+                    if let Some(t) = self.studio.mix.tracks.get_mut(rs.track) {
+                        t.set_stem_range(crate::studio_timeline::STEM_ROWS[(*st as usize).min(3)], t0, t1, *g as f32);
+                        self.studio.changed();
+                    }
+                }
+            }
             "extract" => {
                 let part = crate::extract::Part::ALL[arg.trim().parse::<usize>().unwrap_or(0).min(6)];
                 self.studio.extract_requests.push((part, false));
@@ -944,7 +955,7 @@ impl App {
         ui.menu_button(label, |ui| {
             ui.set_min_width(300.0);
             ui.label(RichText::new("Stem quality").size(11.5).color(theme::TEXT_DIM));
-            ui.selectable_value(&mut p2.stem_quality, "best".to_string(), "Best: RoFormer vocals + htdemucs_ft (~3.5 min/track)");
+            ui.selectable_value(&mut p2.stem_quality, "best".to_string(), "Best: RoFormer vocals + htdemucs_ft (~2.5 min/track)");
             ui.selectable_value(&mut p2.stem_quality, "high".to_string(), "High: htdemucs_ft (~80 s/track)");
             ui.selectable_value(&mut p2.stem_quality, "fast".to_string(), "Fast: htdemucs (~17 s/track)");
             ui.separator();

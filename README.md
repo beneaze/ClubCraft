@@ -114,7 +114,9 @@ Every screenshot here is the real app at work on a mix imported from DJ.Studio. 
     </td>
     <td width="50%" valign="top">
       <h3>Transitions you can read</h3>
-      Pick a preset (Stem blend, Bass swap, Crossfade, Vocal over, Mashup, Filter out, Echo out, Cut), then adjust it the way DJ.Studio does it: for every stem <b>Off · Swap · Crossfade · Full</b>, the same for each EQ band, plus volume, filter and echo choices. When a transition is selected, the timeline splits both tracks into stem rows with their level lines. <b>Curves</b> lets you draw any parameter by hand. Lock a transition and harmonizing or recomputing mix points leaves it alone.
+      Pick a preset (Stem blend, Bass swap, Crossfade, Vocal over, Mashup, Filter out, Echo out, Cut), then adjust it the way DJ.Studio does it: for every stem <b>Off · Swap · Crossfade · Full</b>, the same for each EQ band, plus volume, filter and echo choices. Or draw it in the timeline, like in DJ.Studio: a selected transition splits both tracks into drums, bass, melody and vocals rows, each with its curve. Press on a line to add a point, drag points (over a neighbour to delete it), and switch a stem off on either side with its D B M V button. The same works for the volume, each EQ band and the filter. Drag a transition's bar to move it and its edges to change its length; the curves keep their shape. Lock a transition and harmonizing or recomputing mix points leaves it alone.
+      <br><br>
+      To switch stems off in any part of a song, drag across the waveform and right-click: mute drums, bass, melody or vocals there, or make that part an acapella or an instrumental.
       <br><br>
       Until a track has stems, its stem curves are imitated with volume and EQ: each transition keeps its own shape, and the timeline shows it marked "no stems". <b>Stems missing</b> in the transport bar separates them for the whole mix in one click, and an export separates the ones it needs first. The editor also warns when the outgoing track fades out before its transition ends, or when the incoming track comes in much quieter.
       <h3>Keyboard first</h3>
@@ -185,7 +187,7 @@ Stem quality is the heart of ClubCraft. The separation runs the original network
   |---|---|---|
   | Fast | htdemucs | ≈ 17 s |
   | High | htdemucs_ft (4 models) | ≈ 80 s |
-  | Best | Mel-Band RoFormer + htdemucs_ft | ≈ 3.5 min |
+  | Best | Mel-Band RoFormer + htdemucs_ft | ≈ 2.3 min |
 
   A track loaded on a deck before it was separated gets usable stems under the playhead in about a second.
 - **Light on memory.** Stems are held as 16-bit samples with one scale per stem, heavy jobs never overlap, and idle models are released. A full Best separation peaks at about 2 GB.

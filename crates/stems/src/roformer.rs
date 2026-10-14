@@ -147,10 +147,24 @@ pub struct Roformer {
 }
 
 impl Roformer {
+    /// Load the vocal model; on CoreML the half-precision export when present (see below).
     pub fn load(dir: &Path, name: &str, kind: BackendKind) -> Result<Self> {
+        Self::load_with(dir, name, kind, std::env::var_os("CLUBCRAFT_ROFORMER_FP32").is_none())
+    }
+
+    /// Load the vocal model; `allow_fp16` lets CoreML use `<name>_fp16.mlmodelc` if present.
+    pub fn load_with(dir: &Path, name: &str, kind: BackendKind, allow_fp16: bool) -> Result<Self> {
         let man = RoformerManifest::load(dir, name)?;
         let shape = [1, man.frames, man.dim()];
-        let model = backend::load_single(kind, &dir.join(name), ("x", &shape), ("mask", &shape))?;
+        // On CoreML the half-precision export runs ~1.4x faster on the GPU and matches fp32 to
+        // ~66 dB on real music (inaudible); `CLUBCRAFT_ROFORMER_FP32` forces full precision.
+        let fp16 = dir.join(format!("{name}_fp16"));
+        let use16 = cfg!(target_os = "macos")
+            && matches!(kind, BackendKind::Auto | BackendKind::CoreMl)
+            && dir.join(format!("{name}_fp16.mlmodelc")).exists()
+            && allow_fp16;
+        let base = if use16 { fp16 } else { dir.join(name) };
+        let model = backend::load_single(kind, &base, ("x", &shape), ("mask", &shape))?;
         let stft = TorchStft::new(man.nfft, man.hop_length);
         let mut rows = vec![Vec::new(); 2 * stft.bins()];
         for (k, &r) in man.freq_indices.iter().enumerate() {

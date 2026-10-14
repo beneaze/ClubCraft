@@ -375,7 +375,7 @@ impl StudioView {
             cr.context_menu(|ui| {
                 ui.set_min_width(260.0);
                 if !has_range {
-                    ui.label(RichText::new("Drag across the waveform to select a range, then right-click to copy it to a sample lane or extract a stem.").size(11.5).color(theme::TEXT_DIM));
+                    ui.label(RichText::new("Drag across the waveform to select a range, then right-click to switch stems off in it, copy it to a sample lane or extract a stem.").size(11.5).color(theme::TEXT_DIM));
                     return;
                 }
                 use crate::extract::Part;
@@ -404,6 +404,45 @@ impl StudioView {
                         }
                     }
                 });
+                // switch stems off (or back on) for this part of the song
+                if let Some(rs) = self.range.filter(|rs| rs.track == i) {
+                    let (t0, t1) = (self.timeline.track_pos(i, rs.b0), self.timeline.track_pos(i, rs.b1));
+                    let mid = (t0 + t1) / 2.0;
+                    ui.menu_button("Stems in selection", |ui| {
+                        ui.set_min_width(200.0);
+                        let mut set: Option<[Option<f32>; 4]> = None;
+                        for (n, stem) in STEM_ROWS.into_iter().enumerate() {
+                            let on = self.mix.tracks[i].stem_at(stem, mid).unwrap_or(1.0) > 0.5;
+                            if ui.button(format!("{} {}", if on { "Mute" } else { "Unmute" }, stem.label().to_lowercase())).clicked() {
+                                let mut v = [None; 4];
+                                v[n] = Some(if on { 0.0 } else { 1.0 });
+                                set = Some(v);
+                            }
+                        }
+                        ui.separator();
+                        if ui.button("Acapella (vocals only)").clicked() {
+                            set = Some([Some(0.0), Some(0.0), Some(0.0), Some(1.0)]);
+                        }
+                        if ui.button("Instrumental (no vocals)").clicked() {
+                            set = Some([Some(1.0), Some(1.0), Some(1.0), Some(0.0)]);
+                        }
+                        if ui.button("All stems on").clicked() {
+                            set = Some([Some(1.0); 4]);
+                        }
+                        if let Some(v) = set {
+                            for (n, g) in v.into_iter().enumerate() {
+                                if let Some(g) = g {
+                                    self.mix.tracks[i].set_stem_range(STEM_ROWS[n], t0, t1, g);
+                                }
+                            }
+                            self.changed();
+                            ui.close();
+                        }
+                        if !has_stems {
+                            ui.label(RichText::new("No stems yet: imitated with volume and EQ until you separate them.").size(11.0).color(theme::TEXT_DIM));
+                        }
+                    });
+                }
                 if ui.add(egui::Button::new("Clear selection").shortcut_text("Esc")).clicked() {
                     self.range = None;
                     ui.close();
@@ -431,7 +470,7 @@ impl StudioView {
             cr.on_hover_text(if in_locked {
                 "Click to edit · drag on the waveform to select a range (right-click to extract) · the transition into this track is locked"
             } else {
-                "Drag the title bar to slide the track · drag on the waveform to select a range, then right-click to extract stems · click to edit"
+                "Drag the title bar to slide the track · drag on the waveform to select a range, then right-click to switch stems off in it or extract them · click to edit"
             });
         }
 
@@ -1067,6 +1106,27 @@ impl StudioView {
                     p.line_segment([pos2(x, body.top()), pos2(x, body.bottom())], Stroke::new(1.0, Color32::from_white_alpha(18)));
                 }
                 b += 1.0;
+            }
+        }
+        // the track's own stem lanes: a thin row per muted stem at the bottom of the clip
+        let own = &self.mix.tracks[i].stems;
+        if !own.is_empty() {
+            let clip = p.clip_rect().intersect(body);
+            let (x0, x1) = (clip.left().floor(), clip.right());
+            let origin = x_of(0.0);
+            let rows: Vec<StemKind> = STEM_ROWS.into_iter().filter(|st| own.iter().any(|l| l.stem == *st)).collect();
+            for (n, st) in rows.iter().enumerate() {
+                let y = body.bottom() - 3.0 - (rows.len() - n) as f32 * 4.0;
+                let col = theme::stem_color(*st);
+                let mut x = x0;
+                while x < x1 {
+                    let b = self.timeline.beat_at_sec(((x + 1.0 - origin) / self.zoom) as f64);
+                    let g = self.mix.tracks[i].stem_at(*st, self.timeline.track_pos(i, b)).unwrap_or(1.0);
+                    if g < 0.99 {
+                        p.rect_filled(Rect::from_min_max(pos2(x, y), pos2(x + 2.0, y + 3.0)), 0.0, col.gamma_multiply(1.0 - g * 0.8));
+                    }
+                    x += 2.0;
+                }
             }
         }
         // section markers from the analysis (drop / break / vocal)
