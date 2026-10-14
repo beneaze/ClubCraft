@@ -136,6 +136,14 @@ impl StudioView {
         self.changed();
     }
 
+    /// Zoom by `f`, keeping the playhead at the same place on screen.
+    pub fn zoom_around_playhead(&mut self, f: f32) {
+        let old = self.zoom;
+        self.zoom = (self.zoom * f).clamp(crate::studio_timeline::MIN_ZOOM, crate::studio_timeline::MAX_ZOOM);
+        let x = self.position as f32 * old - self.scroll; // playhead offset in the view
+        self.scroll = (self.position as f32 * self.zoom - x).max(0.0);
+    }
+
     pub fn harmonize(&mut self, sh: &Shared) {
         let items: Vec<OrderItem> = self.mix.tracks.iter().map(|t| OrderItem::from_analysis(t.track_id, sh.analyses.get(&t.track_id))).collect();
         let order = planner::order_tracks(&items, &self.order_opts);
@@ -208,10 +216,10 @@ impl StudioView {
                 self.follow = !self.follow;
             }
             if i.key_pressed(Key::Plus) || i.key_pressed(Key::Equals) {
-                self.zoom = (self.zoom * 1.25).min(160.0);
+                self.zoom_around_playhead(1.5);
             }
             if i.key_pressed(Key::Minus) {
-                self.zoom = (self.zoom / 1.25).max(0.2);
+                self.zoom_around_playhead(1.0 / 1.5);
             }
             if i.key_pressed(Key::Escape) {
                 self.selection = Selection::None;
@@ -295,14 +303,21 @@ impl StudioView {
                 self.follow = !self.follow;
             }
             ui.separator();
-            if ui.small_button("−").on_hover_text("Zoom out (−)").clicked() {
-                self.zoom = (self.zoom / 1.25).max(0.2);
+            if ui.small_button("−").on_hover_text("Zoom out (−, or ⌘/Ctrl/Alt + scroll, or pinch)").clicked() {
+                self.zoom_around_playhead(1.0 / 1.5);
             }
             if ui.small_button("Fit").on_hover_text("Show the whole mix").clicked() {
                 self.fit_request = true;
             }
-            if ui.small_button("+").on_hover_text("Zoom in (+)").clicked() {
-                self.zoom = (self.zoom * 1.25).min(160.0);
+            if ui.small_button("+").on_hover_text("Zoom in (+, or ⌘/Ctrl/Alt + scroll, or pinch)").clicked() {
+                self.zoom_around_playhead(1.5);
+            }
+            // log-scale zoom slider
+            let mut lz = self.zoom.ln();
+            let zr = crate::studio_timeline::MIN_ZOOM.ln()..=crate::studio_timeline::MAX_ZOOM.ln();
+            if ui.add(egui::Slider::new(&mut lz, zr).show_value(false)).on_hover_text("Zoom").changed() {
+                let f = lz.exp() / self.zoom;
+                self.zoom_around_playhead(f);
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if let Some(p) = self.render_progress {

@@ -29,6 +29,28 @@ fn amp(v: u8) -> f32 {
     v as f32 / 255.0
 }
 
+/// Linear interpolation at a fractional bin position (smooth waveforms when zoomed in far).
+#[inline]
+fn bin_lerp(v: &[u8], pos: f64) -> u8 {
+    if v.is_empty() || pos < 0.0 {
+        return 0;
+    }
+    let i = pos.floor() as usize;
+    let f = (pos - i as f64) as f32;
+    let a = *v.get(i).unwrap_or(&0) as f32;
+    let b = *v.get(i + 1).unwrap_or(&(a as u8)) as f32;
+    (a + (b - a) * f).round() as u8
+}
+
+#[inline]
+fn pick(v: &[u8], a: usize, b: usize, fine: bool, mid: f64) -> u8 {
+    if fine {
+        bin_lerp(v, mid - 0.5)
+    } else {
+        bin_max(v, a, b)
+    }
+}
+
 /// Aggregate (max) of bins [a, b).
 #[inline]
 fn bin_max(v: &[u8], a: usize, b: usize) -> u8 {
@@ -68,17 +90,19 @@ pub fn paint_wave(p: &Painter, rect: Rect, w: &WaveParams, t0: f64, t1: f64, mir
         }
         let a = (ta.max(0.0) * wf.rate) as usize;
         let b = ((tb.max(0.0) * wf.rate).ceil() as usize).max(a + 1);
+        let fine = spp * wf.rate < 1.0;
+        let mid_bin = (ta + tb) * 0.5 * wf.rate;
         let x0 = rect.left() + c as f32 * col_w;
         let x1 = x0 + col_w + 0.35;
         if let Some(st) = stems {
             // Stacked: the column height is the mix peak, split between the stems in proportion
             // to their energy. Inner → outer: bass, drums, melody, vocals. Muted stems shrink.
-            let total = amp(bin_max(&wf.peak, a, b));
+            let total = amp(pick(&wf.peak, a, b, fine, mid_bin));
             let order = [StemKind::Bass, StemKind::Drums, StemKind::Other, StemKind::Vocals];
             let mut w = [0f32; 4];
             let mut sum = 0.0;
             for (j, k) in order.iter().enumerate() {
-                let v = amp(bin_max(&st[k.index()], a, b));
+                let v = amp(pick(&st[k.index()], a, b, fine, mid_bin));
                 w[j] = v * v;
                 sum += w[j];
             }
@@ -108,10 +132,10 @@ pub fn paint_wave(p: &Painter, rect: Rect, w: &WaveParams, t0: f64, t1: f64, mir
                 }
             }
         } else {
-            let low = amp(bin_max(&wf.low, a, b));
-            let mid = amp(bin_max(&wf.mid, a, b));
-            let high = amp(bin_max(&wf.high, a, b));
-            let peak = amp(bin_max(&wf.peak, a, b));
+            let low = amp(pick(&wf.low, a, b, fine, mid_bin));
+            let mid = amp(pick(&wf.mid, a, b, fine, mid_bin));
+            let high = amp(pick(&wf.high, a, b, fine, mid_bin));
+            let peak = amp(pick(&wf.peak, a, b, fine, mid_bin));
             add_bar(&mut mesh, x0, x1, cy, peak * hmax, Color32::from_rgb(40, 60, 110));
             add_bar(&mut mesh, x0, x1, cy, low * hmax, Color32::from_rgb(40, 110, 255));
             add_bar(&mut mesh, x0, x1, cy, mid * hmax * 0.85, Color32::from_rgb(255, 170, 40));

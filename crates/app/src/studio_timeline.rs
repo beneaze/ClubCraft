@@ -41,6 +41,9 @@ pub enum Drag {
 }
 
 pub const HEADER_W: f32 = 214.0;
+/// Zoom range of the studio timeline in pixels per second (3000 px/s ≈ one beat over 1500 px).
+pub const MIN_ZOOM: f32 = 0.2;
+pub const MAX_ZOOM: f32 = 3000.0;
 pub const EQ_COLORS: [Color32; 3] = [Color32::from_rgb(255, 90, 90), Color32::from_rgb(120, 230, 120), Color32::from_rgb(110, 200, 255)];
 pub const FILTER_COLOR: Color32 = Color32::from_rgb(200, 140, 255);
 pub const VOLUME_COLOR: Color32 = Color32::from_rgb(255, 214, 60);
@@ -127,17 +130,17 @@ impl StudioView {
         }
         let total = self.timeline.total_secs.max(1.0) as f32;
         if self.fit_request && self.timeline.total_secs > 0.0 {
-            self.zoom = (canvas.width() / total).clamp(0.2, 160.0);
+            self.zoom = (canvas.width() / total).clamp(MIN_ZOOM, MAX_ZOOM);
             self.scroll = 0.0;
             self.fit_request = false;
         }
         if ui.rect_contains_pointer(canvas) {
-            let (scroll, zoom_d, cmd) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta(), i.modifiers.command));
-            if (cmd && scroll.y != 0.0) || zoom_d != 1.0 {
-                let f = if zoom_d != 1.0 { zoom_d } else { 1.0 + scroll.y / 300.0 };
+            let (scroll, zoom_d, zmod) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta(), i.modifiers.command || i.modifiers.ctrl || i.modifiers.alt));
+            if (zmod && scroll.y != 0.0) || zoom_d != 1.0 {
+                let f = if zoom_d != 1.0 { zoom_d } else { (1.0 + scroll.y / 200.0).clamp(0.5, 2.0) };
                 let mouse_x = ui.input(|i| i.pointer.hover_pos()).map(|p| p.x - canvas.left()).unwrap_or(canvas.width() / 2.0);
                 let t_at = (self.scroll + mouse_x) / self.zoom;
-                self.zoom = (self.zoom * f).clamp(0.2, 160.0);
+                self.zoom = (self.zoom * f).clamp(MIN_ZOOM, MAX_ZOOM);
                 self.scroll = t_at * self.zoom - mouse_x;
             } else if scroll != egui::Vec2::ZERO {
                 // Manual scrolling takes over from "follow playhead" (press F or Follow to resume).
@@ -160,29 +163,37 @@ impl StudioView {
         let p = ui.painter_at(canvas.expand(1.0));
         p.rect_filled(canvas, 4.0, theme::BG);
 
-        // ----- ruler: mix bars + time
+        // ----- ruler: mix bars + time (beats when zoomed in)
         p.rect_filled(ruler, 0.0, theme::PANEL);
         let tl = &self.timeline;
         if tl.total_beats > 0.0 {
-            let px_per_bar = 4.0 * 60.0 / tl.bpm_at_beat(0.0) as f32 * zoom;
+            let px_per_beat = 60.0 / tl.bpm_at_beat(tl.beat_at_sec(((canvas.width() * 0.5 + scroll) / zoom) as f64)) as f32 * zoom;
+            let px_per_bar = 4.0 * px_per_beat;
             let every = [1.0f32, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0].into_iter().find(|n| n * px_per_bar >= 46.0).unwrap_or(128.0) as f64;
-            let mut bar = 0.0;
-            while bar * 4.0 <= tl.total_beats {
+            // only visit the visible range
+            let b_lo = (tl.beat_at_sec((scroll / zoom) as f64) / 4.0).floor().max(0.0);
+            let b_hi = (tl.beat_at_sec(((canvas.width() + scroll) / zoom) as f64) / 4.0).ceil() + 1.0;
+            let mut bar = (b_lo / every).floor() * every;
+            while bar <= b_hi && bar * 4.0 <= tl.total_beats {
                 let x = x_of(tl.sec_at_beat(bar * 4.0));
-                if x > canvas.right() {
-                    break;
-                }
-                if x >= canvas.left() - 40.0 {
-                    let major = (bar / every).round() * every == bar;
-                    if major {
-                        p.line_segment([pos2(x, ruler.top() + 12.0), pos2(x, ruler.bottom())], Stroke::new(1.0, Color32::from_rgb(200, 190, 90)));
-                        p.text(pos2(x + 3.0, ruler.top() + 1.0), egui::Align2::LEFT_TOP, format!("{}", bar as i64 + 1), egui::FontId::proportional(10.0), Color32::from_rgb(220, 210, 120));
-                        p.text(pos2(x + 3.0, ruler.top() + 12.0), egui::Align2::LEFT_TOP, theme::fmt_time_short(tl.sec_at_beat(bar * 4.0)), egui::FontId::proportional(9.0), theme::TEXT_DIM);
-                    } else if px_per_bar * 1.0 >= 5.0 {
-                        p.line_segment([pos2(x, ruler.bottom() - 4.0), pos2(x, ruler.bottom())], Stroke::new(1.0, theme::LINE));
+                p.line_segment([pos2(x, ruler.top() + 12.0), pos2(x, ruler.bottom())], Stroke::new(1.0, Color32::from_rgb(200, 190, 90)));
+                p.text(pos2(x + 3.0, ruler.top() + 1.0), egui::Align2::LEFT_TOP, format!("{}", bar as i64 + 1), egui::FontId::proportional(10.0), Color32::from_rgb(220, 210, 120));
+                p.text(pos2(x + 3.0, ruler.top() + 12.0), egui::Align2::LEFT_TOP, theme::fmt_time_short(tl.sec_at_beat(bar * 4.0)), egui::FontId::proportional(9.0), theme::TEXT_DIM);
+                bar += every;
+            }
+            // minor ticks: bars, and beats (with bar.beat labels) when there is room
+            let step_beats = if px_per_beat >= 10.0 { 1.0 } else if px_per_bar >= 5.0 { 4.0 } else { 0.0 };
+            if step_beats > 0.0 {
+                let mut bt = (b_lo * 4.0 / step_beats).floor() * step_beats;
+                while bt <= b_hi * 4.0 && bt <= tl.total_beats {
+                    let x = x_of(tl.sec_at_beat(bt));
+                    let in_bar = (bt as i64).rem_euclid(4);
+                    p.line_segment([pos2(x, ruler.bottom() - if in_bar == 0 { 6.0 } else { 3.0 }), pos2(x, ruler.bottom())], Stroke::new(1.0, theme::LINE));
+                    if in_bar != 0 && px_per_beat >= 70.0 {
+                        p.text(pos2(x + 2.0, ruler.top() + 12.0), egui::Align2::LEFT_TOP, format!("{}.{}", (bt / 4.0).floor() as i64 + 1, in_bar + 1), egui::FontId::proportional(9.0), theme::TEXT_DIM);
                     }
+                    bt += step_beats;
                 }
-                bar += if every >= 8.0 { every / 4.0 } else { 1.0 };
             }
         }
         p.rect_filled(tstrip, 0.0, Color32::from_rgb(20, 22, 27));
@@ -488,6 +499,17 @@ impl StudioView {
         }
         // bar ticks under the header
         let bar_px = (tt.grid.bar_len() as f32 * self.zoom).max(0.1);
+        if bar_px >= 60.0 {
+            // beat lines when zoomed in
+            let mut b = tt.start_beat.ceil();
+            while b < tt.end_beat {
+                let x = x_of(self.timeline.sec_at_beat(b));
+                if x >= p.clip_rect().left() && x <= p.clip_rect().right() {
+                    p.line_segment([pos2(x, body.top()), pos2(x, body.bottom())], Stroke::new(1.0, Color32::from_white_alpha(18)));
+                }
+                b += 1.0;
+            }
+        }
         if bar_px >= 7.0 {
             let mut b = (tt.start_beat / 4.0).ceil() * 4.0;
             while b < tt.end_beat {
