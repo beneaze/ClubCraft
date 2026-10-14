@@ -23,12 +23,12 @@ pub const STUDIO_DECKS: [usize; 2] = [2, 3];
 pub const LIVE_DECKS: [usize; 2] = [0, 1];
 
 /// Memory budget for decoded tracks that are not in use (bytes).
-const CACHE_BUDGET: usize = 2_500 * 1024 * 1024;
+const CACHE_BUDGET: usize = 1024 * 1024 * 1024;
 
 /// Approximate memory held by a loaded track (audio + stems).
 pub fn track_bytes(t: &LoadedTrack) -> usize {
     let frames = t.audio.frames();
-    frames * 8 + t.stems.as_ref().map(|s| s.frames * clubcraft_core::STEM_CHANNELS * 4).unwrap_or(0)
+    frames * 8 + t.stems.as_ref().map(|s| s.frames * clubcraft_core::STEM_CHANNELS * 2).unwrap_or(0)
 }
 
 /// Decoded tracks shared by decks, previews and renders.
