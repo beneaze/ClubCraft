@@ -189,6 +189,32 @@ impl ChunkedStems {
     }
 }
 
+/// Provides the (normalised) Demucs input. Called from the prep thread in window order, so an
+/// implementation may compute its data lazily (Best: run the vocal model on demand).
+pub(crate) trait WindowSource: Sync {
+    /// Write samples `[start, start + l)` of both channels into `dst` (`[2][l]`, already zeroed;
+    /// positions outside the track stay zero).
+    fn fill(&self, start: isize, l: usize, dst: &mut [f32]) -> Result<()>;
+}
+
+/// Plain planar slices.
+pub(crate) struct SliceSource<'a>(pub [&'a [f32]; 2]);
+
+impl WindowSource for SliceSource<'_> {
+    fn fill(&self, start: isize, l: usize, dst: &mut [f32]) -> Result<()> {
+        for c in 0..2 {
+            let src = self.0[c];
+            let a = start.max(0) as usize;
+            let b = ((start + l as isize).max(0) as usize).min(src.len());
+            if a < b {
+                let off = (a as isize - start) as usize;
+                dst[c * l + off..c * l + off + (b - a)].copy_from_slice(&src[a..b]);
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Completes a finished planar chunk (`[4 stems][2 ch][n]`, starting at track frame `start`)
 /// after un-normalisation, e.g. to fill stems computed outside the Demucs pass.
 pub(crate) type Finalize<'f> = dyn Fn(usize, usize, &mut [f32]) + Sync + 'f;
@@ -197,8 +223,8 @@ pub(crate) struct Job<'a> {
     pub man: &'a Manifest,
     pub backend: &'a dyn Backend,
     pub spectro: &'a Spectro,
-    /// Normalised track, planar.
-    pub x: [&'a [f32]; 2],
+    /// Normalised Demucs input.
+    pub source: &'a dyn WindowSource,
     pub plan: &'a Plan,
     pub order: Vec<usize>,
     /// Un-normalisation applied to finished samples: `y * scale + offset`.
@@ -256,29 +282,20 @@ impl Job<'_> {
             let (prep_tx, prep_rx) = sync_channel::<Prepared>(1);
             let (recycle_tx, recycle_rx) = channel::<(Vec<f32>, Vec<f32>)>();
             let order = &self.order;
-            let prep = scope.spawn(move || {
+            let prep = scope.spawn(move || -> Result<()> {
                 for &wi in order {
                     let w = plan.windows[wi];
                     let (mut mix, mut spec) = recycle_rx.try_recv().unwrap_or_default();
                     mix.clear();
                     mix.resize(2 * l, 0.0);
-                    let start = plan.input_start(w);
-                    for c in 0..2 {
-                        let dst = &mut mix[c * l..(c + 1) * l];
-                        let src = self.x[c];
-                        let a = start.max(0) as usize;
-                        let b = ((start + l as isize).max(0) as usize).min(src.len());
-                        if a < b {
-                            let off = (a as isize - start) as usize;
-                            dst[off..off + (b - a)].copy_from_slice(&src[a..b]);
-                        }
-                    }
+                    self.source.fill(plan.input_start(w), l, &mut mix)?;
                     spec.resize(man.spec_len(), 0.0);
                     self.spectro.spec(&[&mix[..l], &mix[l..]], &mut spec);
                     if prep_tx.send(Prepared { win: wi, mix, spec }).is_err() {
                         break;
                     }
                 }
+                Ok(())
             });
 
             // Stage 3: iSTFT, overlap-add, chunk publishing.
@@ -317,10 +334,13 @@ impl Job<'_> {
             }
             drop(prep_rx);
             drop(inf_tx);
-            prep.join().map_err(|_| anyhow!("prep thread panicked"))?;
+            let prep_res = prep.join().map_err(|_| anyhow!("prep thread panicked"))?;
             let res = post.join().map_err(|_| anyhow!("post thread panicked"))?;
             if let Some(e) = failure {
                 return Err(e);
+            }
+            if !cancelled {
+                prep_res?;
             }
             if cancelled {
                 return Ok(None);

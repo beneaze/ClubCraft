@@ -5,14 +5,24 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["allinone"]
+# All-In-One structure model via ONNX Runtime (models/allin1.onnx); without it (or without the
+# model file) structure falls back to the rule-based segmentation.
+allinone = ["dep:ort", "dep:ort-sys"]
+
 [dependencies]
 clubcraft-core.workspace = true
 clubcraft-audio.workspace = true
+anyhow.workspace = true
 log.workspace = true
 realfft = "3.5"
 rayon = "1.12"
+# Same pins / features as clubcraft-stems so the workspace builds a single ORT (1.20).
+ort = { version = "=2.0.0-rc.9", default-features = false, features = ["download-binaries", "copy-dylibs"], optional = true }
+ort-sys = { version = "=2.0.0-rc.9", default-features = false, optional = true }
 
 [dev-dependencies]
-anyhow.workspace = true
 serde_json.workspace = true
 env_logger.workspace = true
+clubcraft-stems.workspace = true

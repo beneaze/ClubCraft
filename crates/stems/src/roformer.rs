@@ -237,11 +237,7 @@ impl Roformer {
 
     /// Number of model chunks for a track of `len` frames.
     pub fn chunks_for(&self, len: usize) -> usize {
-        let c = self.man.chunk_samples;
-        let step = c / self.man.num_overlap;
-        let border = c - step;
-        let total = if len > 2 * border { len + 2 * border } else { len };
-        total.div_ceil(step)
+        VocalPlan::new(&self.man, len).starts.len()
     }
 
     /// Separate the vocals of a whole track (`demix_track` semantics). `progress(done, total)`
@@ -252,18 +248,42 @@ impl Roformer {
         right: &[f32],
         progress: &mut dyn FnMut(usize, usize) -> bool,
     ) -> Result<Option<[Vec<f32>; 2]>> {
-        let c = self.man.chunk_samples;
-        let step = c / self.man.num_overlap;
+        let pass = VocalPass::new(self, [left, right]);
+        let n = pass.plan.starts.len();
+        for j in 0..n {
+            pass.ensure_chunks(j..j + 1)?;
+            if !progress(j + 1, n) {
+                return Ok(None);
+            }
+        }
+        Ok(Some(pass.into_vocals()))
+    }
+}
+
+/// Chunk geometry of `demix_track` for one track.
+pub struct VocalPlan {
+    pub len: usize,
+    pub chunk: usize,
+    pub step: usize,
+    pub fade: usize,
+    /// Reflect padding added on both sides (0 for short tracks).
+    pub border: usize,
+    /// Padded length.
+    pub total: usize,
+    /// Chunk starts in padded coordinates.
+    pub starts: Vec<usize>,
+    window: Vec<f32>,
+}
+
+impl VocalPlan {
+    pub fn new(man: &RoformerManifest, len: usize) -> Self {
+        let c = man.chunk_samples;
+        let step = c / man.num_overlap.max(1);
         let fade = c / 10;
         let border = c - step;
-        let len = left.len();
-        let padded_input = len > 2 * border && border > 0;
-        let mix: [Vec<f32>; 2] = if padded_input {
-            [pad1d_reflect(left, border, border), pad1d_reflect(right, border, border)]
-        } else {
-            [left.to_vec(), right.to_vec()]
-        };
-        let total = mix[0].len();
+        let border = if len > 2 * border && border > 0 { border } else { 0 };
+        let total = len + 2 * border;
+        let starts = (0..).map(|i| i * step).take_while(|&i| i < total).collect();
         // torch.linspace(0, 1, fade) / linspace(1, 0, fade)
         let mut window = vec![1f32; c];
         for k in 0..fade {
@@ -271,78 +291,119 @@ impl Roformer {
             window[k] *= v;
             window[c - fade + k] *= 1.0 - v;
         }
-        let mut result: [Vec<f32>; 2] = [vec![0f32; total], vec![0f32; total]];
-        let mut counter = vec![0f32; total];
-        let starts: Vec<usize> = (0..).map(|i| i * step).take_while(|&i| i < total).collect();
-        let n = starts.len();
+        VocalPlan { len, chunk: c, step, fade, border, total, starts, window }
+    }
 
-        // Two-stage pipeline: STFT + gather of the next chunk overlaps inference of the current.
-        let res = std::thread::scope(|s| -> Result<bool> {
-            let (tx, rx) = std::sync::mpsc::sync_channel::<(usize, [Vec<f32>; 4], Vec<f32>)>(1);
-            let mix = &mix;
-            let starts = &starts;
-            s.spawn(move || {
-                for &i in starts {
-                    let part: [Vec<f32>; 2] = std::array::from_fn(|ch| {
-                        let p = &mix[ch][i..(i + c).min(total)];
-                        let l = p.len();
-                        if l == c {
-                            p.to_vec()
-                        } else if l > c / 2 + 1 {
-                            pad1d_reflect(p, 0, c - l)
-                        } else {
-                            let mut v = p.to_vec();
-                            v.resize(c, 0.0);
-                            v
-                        }
-                    });
-                    let (planes, x) = self.prepare([&part[0], &part[1]]);
-                    if tx.send((i, planes, x)).is_err() {
-                        break;
-                    }
+    /// Chunks whose span intersects track frames `[a, b)`.
+    pub fn chunks_covering(&self, a: usize, b: usize) -> std::ops::Range<usize> {
+        if a >= b {
+            return 0..0;
+        }
+        let (pa, pb) = (a + self.border, b + self.border);
+        let first = if pa >= self.chunk { (pa - self.chunk) / self.step + 1 } else { 0 };
+        let last = ((pb - 1) / self.step).min(self.starts.len() - 1);
+        first..last + 1
+    }
+
+    /// Track sample of padded position `p` (reflect padding).
+    fn source_index(&self, p: usize) -> usize {
+        let i = p as isize - self.border as isize;
+        let n = self.len as isize;
+        let j = if i < 0 { -i } else if i >= n { 2 * (n - 1) - i } else { i };
+        j as usize
+    }
+}
+
+struct PassState {
+    result: [Vec<f32>; 2],
+    counter: Vec<f32>,
+    done: Vec<bool>,
+}
+
+/// An in-progress vocal separation whose chunks can be computed on demand and in any order;
+/// accumulation is per sample with at most `num_overlap` terms, so the result does not depend on
+/// the order (bit-exact for the default overlap of 2).
+pub struct VocalPass<'a> {
+    rf: &'a Roformer,
+    mix: [&'a [f32]; 2],
+    pub plan: VocalPlan,
+    state: std::sync::Mutex<PassState>,
+    pub chunks_done: std::sync::atomic::AtomicUsize,
+}
+
+impl<'a> VocalPass<'a> {
+    pub fn new(rf: &'a Roformer, mix: [&'a [f32]; 2]) -> Self {
+        let plan = VocalPlan::new(&rf.man, mix[0].len());
+        let state = PassState {
+            result: [vec![0f32; plan.total], vec![0f32; plan.total]],
+            counter: vec![0f32; plan.total],
+            done: vec![false; plan.starts.len()],
+        };
+        VocalPass { rf, mix, plan, state: std::sync::Mutex::new(state), chunks_done: Default::default() }
+    }
+
+    /// Compute (if not done yet) the chunks in `range`. Only one thread should call this.
+    pub fn ensure_chunks(&self, range: std::ops::Range<usize>) -> Result<()> {
+        let c = self.plan.chunk;
+        let total = self.plan.total;
+        for j in range {
+            if self.state.lock().unwrap().done[j] {
+                continue;
+            }
+            let i = self.plan.starts[j];
+            let length = (total - i).min(c);
+            let part: [Vec<f32>; 2] = std::array::from_fn(|ch| {
+                let src = self.mix[ch];
+                let mut p: Vec<f32> = (i..i + length).map(|q| src[self.plan.source_index(q)]).collect();
+                if length < c {
+                    p = if length > c / 2 + 1 { pad1d_reflect(&p, 0, c - length) } else { p.into_iter().chain(std::iter::repeat_n(0.0, c - length)).collect() };
                 }
+                p
             });
-            let mut mask = Vec::new();
-            for (done, (i, planes, x)) in rx.iter().enumerate() {
-                self.model.run(&x, &mut mask)?;
-                let y = self.finish(&planes, &mask);
-                let length = (total - i).min(c);
-                let mut w = window.clone();
-                if i == 0 {
-                    w[..fade].iter_mut().for_each(|v| *v = 1.0);
-                } else if i + c >= total {
-                    w[c - fade..].iter_mut().for_each(|v| *v = 1.0);
-                }
-                for ch in 0..2 {
-                    for j in 0..length {
-                        result[ch][i + j] += y[ch][j] * w[j];
-                    }
-                }
-                for j in 0..length {
-                    counter[i + j] += w[j];
-                }
-                if !progress(done + 1, n) {
-                    return Ok(false);
+            let y = self.rf.run_chunk([&part[0], &part[1]])?;
+            let mut w = self.plan.window.clone();
+            if i == 0 {
+                w[..self.plan.fade].iter_mut().for_each(|v| *v = 1.0);
+            } else if i + c >= total {
+                w[c - self.plan.fade..].iter_mut().for_each(|v| *v = 1.0);
+            }
+            let mut st = self.state.lock().unwrap();
+            for ch in 0..2 {
+                for k in 0..length {
+                    st.result[ch][i + k] += y[ch][k] * w[k];
                 }
             }
-            Ok(true)
-        })?;
-        if !res {
-            return Ok(None);
+            for k in 0..length {
+                st.counter[i + k] += w[k];
+            }
+            st.done[j] = true;
+            self.chunks_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        let (a, b) = if padded_input { (border, total - border) } else { (0, total) };
-        let out: [Vec<f32>; 2] = std::array::from_fn(|ch| {
-            (a..b)
-                .map(|j| {
-                    let v = result[ch][j] / counter[j];
-                    if v.is_finite() {
-                        v
-                    } else {
-                        0.0
-                    }
-                })
-                .collect()
-        });
-        Ok(Some(out))
+        Ok(())
+    }
+
+    /// Make the vocals of track frames `[a, b)` final.
+    pub fn ensure_range(&self, a: usize, b: usize) -> Result<()> {
+        self.ensure_chunks(self.plan.chunks_covering(a, b))
+    }
+
+    /// Final vocals of track frames `[a, a + out[ch].len())` (must have been ensured).
+    pub fn read(&self, a: usize, out: [&mut [f32]; 2]) {
+        let st = self.state.lock().unwrap();
+        for (ch, o) in out.into_iter().enumerate() {
+            for (k, v) in o.iter_mut().enumerate() {
+                let p = a + k + self.plan.border;
+                let x = st.result[ch][p] / st.counter[p];
+                *v = if x.is_finite() { x } else { 0.0 };
+            }
+        }
+    }
+
+    pub fn into_vocals(self) -> [Vec<f32>; 2] {
+        let len = self.plan.len;
+        let mut out = [vec![0f32; len], vec![0f32; len]];
+        let [l, r] = &mut out;
+        self.read(0, [l, r]);
+        out
     }
 }

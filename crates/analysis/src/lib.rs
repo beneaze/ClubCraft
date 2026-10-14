@@ -53,6 +53,7 @@
 
 #![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
 
+pub mod allinone;
 pub mod beatgrid;
 pub mod cues;
 mod dsp;

@@ -43,6 +43,7 @@ mod pipeline;
 pub mod stft;
 
 pub use backend::BackendKind;
+pub use roformer::Roformer;
 pub use cache::{load_stem_track, load_stems, save_stem_track, read_model_name, save_stems, save_stems_with_model};
 pub use model::Manifest;
 
@@ -348,55 +349,60 @@ impl Separator {
         }
         let plan = Plan::new(len, self.man.segment_samples, self.opts.overlap, &self.opts.shift_list(self.man.samplerate));
 
-        // Best: vocals from the dedicated model first, Demucs then only does drums and bass.
-        let mut demucs_frac = 1.0f32;
-        let mut extra: Option<([Vec<f32>; 2], [Vec<f32>; 2])> = None; // (vocals, instrumental)
-        let mut wanted: Option<Vec<usize>> = None;
-        if let Some(rf) = &self.roformer {
-            let n_rf = rf.chunks_for(len) as f32;
-            let n_dm = (plan.windows.len() * 2) as f32;
-            // Relative cost of a RoFormer chunk vs a Demucs segment (measured on CoreML, M1 Pro).
-            let rf_frac = 5.0 * n_rf / (5.0 * n_rf + n_dm);
-            demucs_frac = 1.0 - rf_frac;
-            let vocals = match rf.separate(&audio.left, &audio.right, &mut |d, n| progress(rf_frac * d as f32 / n as f32))? {
-                Some(v) => v,
-                None => return Err(Cancelled.into()),
-            };
-            let instr: [Vec<f32>; 2] = [
-                audio.left.iter().zip(&vocals[0]).map(|(m, v)| m - v).collect(),
-                audio.right.iter().zip(&vocals[1]).map(|(m, v)| m - v).collect(),
-            ];
-            let w: Vec<usize> = (0..self.man.sources.len())
-                .filter(|&s| matches!(self.man.sources[s].as_str(), "drums" | "bass"))
-                .collect();
-            wanted = Some(w);
-            extra = Some((vocals, instr));
-        }
-        let (src_l, src_r): (&[f32], &[f32]) = match (&extra, self.opts.demucs_input) {
-            (Some((_, instr)), DemucsInput::Instrumental) => (&instr[0], &instr[1]),
-            _ => (&audio.left, &audio.right),
+        // Best: the vocal model runs lazily, chunk by chunk, as the Demucs windows (processed in
+        // `plan.order`) need the instrumental; Demucs only does drums and bass.
+        let pass = self.roformer.as_ref().map(|rf| roformer::VocalPass::new(rf, [&audio.left, &audio.right]));
+        let wanted: Option<Vec<usize>> = pass.as_ref().map(|_| {
+            (0..self.man.sources.len()).filter(|&s| matches!(self.man.sources[s].as_str(), "drums" | "bass")).collect()
+        });
+        // Demucs `separate.py` normalisation by the mix statistics. (For Best the instrumental is
+        // normalised by the mix statistics too, so that it can be streamed; HTDemucs re-normalises
+        // every segment internally, so this has no practical effect.)
+        let (mean, std) = norm_stats(&audio.left, &audio.right);
+        let cancel = AtomicBool::new(false);
+        let x: [Vec<f32>; 2];
+        let slice_src;
+        let best_src;
+        let source: &dyn pipeline::WindowSource = match &pass {
+            None => {
+                x = [&audio.left, &audio.right].map(|c| c.iter().map(|v| (v - mean) / std).collect::<Vec<f32>>());
+                slice_src = pipeline::SliceSource([&x[0], &x[1]]);
+                &slice_src
+            }
+            Some(p) => {
+                best_src = BestSource {
+                    pass: p,
+                    mix: [&audio.left, &audio.right],
+                    mean,
+                    std,
+                    instrumental: self.opts.demucs_input == DemucsInput::Instrumental,
+                    cancel: &cancel,
+                };
+                &best_src
+            }
         };
-        let (mean, std) = norm_stats(src_l, src_r);
-        let x: [Vec<f32>; 2] = [src_l, src_r].map(|c| c.iter().map(|v| (v - mean) / std).collect::<Vec<f32>>());
         let fin_fn = |start: usize, n: usize, planar: &mut [f32]| {
-            if let Some((vocals, instr)) = &extra {
+            if let Some(p) = &pass {
+                let mut v = [vec![0f32; n], vec![0f32; n]];
+                let [vl, vr] = &mut v;
+                p.read(start, [vl, vr]);
+                let mix = [&audio.left, &audio.right];
                 for ch in 0..2 {
                     for i in 0..n {
-                        let t = start + i;
                         let d = planar[ch * n + i];
                         let b = planar[(2 + ch) * n + i];
-                        planar[(4 + ch) * n + i] = instr[ch][t] - d - b;
-                        planar[(6 + ch) * n + i] = vocals[ch][t];
+                        planar[(4 + ch) * n + i] = mix[ch][start + i] - v[ch][i] - d - b;
+                        planar[(6 + ch) * n + i] = v[ch][i];
                     }
                 }
             }
         };
-        let finalize: Option<&pipeline::Finalize<'_>> = if extra.is_some() { Some(&fin_fn) } else { None };
+        let finalize: Option<&pipeline::Finalize<'_>> = if pass.is_some() { Some(&fin_fn) } else { None };
         let job = Job {
             man: &self.man,
             backend: &*self.backend,
             spectro: &self.spectro,
-            x: [&x[0], &x[1]],
+            source,
             order: plan.order(start_frame),
             plan: &plan,
             scale: std,
@@ -405,15 +411,69 @@ impl Separator {
             wanted: wanted.as_deref(),
             finalize,
         };
-        let base = 1.0 - demucs_frac;
-        let acc = match job.run(&mut |p| progress(base + demucs_frac * p))? {
+        // Progress in cost units: a RoFormer chunk costs ~5 Demucs segments (CoreML, M1 Pro).
+        let n_rf = pass.as_ref().map_or(0, |p| p.plan.starts.len()) as f32;
+        let n_dm = (plan.windows.len() * if pass.is_some() { 2 } else { self.man.models.len() }) as f32;
+        let mut cb = |p: f32| {
+            let rf_done = pass.as_ref().map_or(0, |p| p.chunks_done.load(Ordering::Relaxed)) as f32;
+            let ok = progress((5.0 * rf_done + p * n_dm) / (5.0 * n_rf + n_dm).max(1.0));
+            if !ok {
+                cancel.store(true, Ordering::Relaxed);
+            }
+            ok
+        };
+        let acc = match job.run(&mut cb)? {
             Some(acc) => acc,
             None => return Err(Cancelled.into()),
         };
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Cancelled.into());
+        }
         if target.is_some() {
             return Ok(None);
         }
         Ok(Some(acc.into_planar_with(std, mean, finalize)))
+    }
+}
+
+/// Demucs input for [`Quality::Best`]: runs the vocal model on demand and serves the normalised
+/// instrumental (or mix).
+struct BestSource<'a> {
+    pass: &'a roformer::VocalPass<'a>,
+    mix: [&'a [f32]; 2],
+    mean: f32,
+    std: f32,
+    instrumental: bool,
+    cancel: &'a AtomicBool,
+}
+
+impl pipeline::WindowSource for BestSource<'_> {
+    fn fill(&self, start: isize, l: usize, dst: &mut [f32]) -> Result<()> {
+        let len = self.mix[0].len();
+        let a = start.max(0) as usize;
+        let b = ((start + l as isize).max(0) as usize).min(len);
+        if a >= b {
+            return Ok(());
+        }
+        for j in self.pass.plan.chunks_covering(a, b) {
+            if self.cancel.load(Ordering::Relaxed) {
+                return Err(Cancelled.into());
+            }
+            self.pass.ensure_chunks(j..j + 1)?;
+        }
+        let mut v = [vec![0f32; b - a], vec![0f32; b - a]];
+        {
+            let [vl, vr] = &mut v;
+            self.pass.read(a, [vl, vr]);
+        }
+        for ch in 0..2 {
+            let off = ch * l + (a as isize - start) as usize;
+            for (k, t) in (a..b).enumerate() {
+                let m = self.mix[ch][t] - if self.instrumental { v[ch][k] } else { 0.0 };
+                dst[off + k] = (m - self.mean) / self.std;
+            }
+        }
+        Ok(())
     }
 }
 

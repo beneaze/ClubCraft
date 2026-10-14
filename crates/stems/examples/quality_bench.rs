@@ -5,13 +5,14 @@
 //!
 //! ```text
 //! cargo run --release -p clubcraft-stems --example quality_bench -- DIR_A DIR_B DIR_C DIR_D [--backend coreml|ort]
+//!     [--presets fast,high,ultra,best,best-mix,best-ov4]
 //! ```
 //! Caveat: the reference stems are themselves model outputs, so absolute numbers are optimistic;
 //! the comparison between presets is what matters.
 
 use anyhow::{bail, Context, Result};
 use clubcraft_audio::AudioBuffer;
-use clubcraft_stems::{BackendKind, Quality, Separator};
+use clubcraft_stems::{BackendKind, DemucsInput, Options, Quality, Separator};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -30,9 +31,12 @@ fn sdr(r: &[f32], e: &[f32]) -> f64 {
 fn main() -> Result<()> {
     let mut dirs = Vec::new();
     let mut backend = BackendKind::Auto;
+    let mut presets = "fast,high,ultra,best".to_string();
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
-        if a == "--backend" {
+        if a == "--presets" {
+            presets = args.next().unwrap_or_default();
+        } else if a == "--backend" {
             backend = match args.next().as_deref() {
                 Some("coreml") => BackendKind::CoreMl,
                 Some("ort") => BackendKind::Ort,
@@ -61,9 +65,20 @@ fn main() -> Result<()> {
     }
     let mix = AudioBuffer::new(44100, l, r);
     println!("mixture: {:.1} s", mix.duration());
-    println!("{:8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>9}", "preset", "drums", "bass", "other", "vocals", "mean", "time");
-    for q in [Quality::Fast, Quality::High, Quality::Ultra] {
-        let mut o = q.options();
+    let instr_ref: Vec<(Vec<f32>, Vec<f32>)> = vec![(
+        (0..len).map(|i| refs[0].0[i] + refs[1].0[i] + refs[2].0[i]).collect(),
+        (0..len).map(|i| refs[0].1[i] + refs[1].1[i] + refs[2].1[i]).collect(),
+    )];
+    println!(
+        "{:9} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>9}",
+        "preset", "drums", "bass", "other", "vocals", "instr", "mean4", "time"
+    );
+    for p in presets.split(',') {
+        let mut o = match p {
+            "best-mix" => Options { demucs_input: DemucsInput::Mix, ..Quality::Best.options() },
+            "best-ov4" => Options { vocals_overlap: Some(4), ..Quality::Best.options() },
+            q => Quality::parse(q).context("preset")?.options(),
+        };
         o.backend = backend;
         let sep = Separator::with_options(&clubcraft_core::paths::models_dir(), o)?;
         let t = Instant::now();
@@ -75,15 +90,12 @@ fn main() -> Result<()> {
             row.push(0.5 * (sdr(&rl[..len], el) + sdr(&rr[..len], er)));
         }
         let mean = row.iter().sum::<f64>() / 4.0;
+        let il: Vec<f32> = (0..len).map(|i| st.stems[0].0[i] + st.stems[1].0[i] + st.stems[2].0[i]).collect();
+        let ir: Vec<f32> = (0..len).map(|i| st.stems[0].1[i] + st.stems[1].1[i] + st.stems[2].1[i]).collect();
+        let instr = 0.5 * (sdr(&instr_ref[0].0, &il) + sdr(&instr_ref[0].1, &ir));
         println!(
-            "{:8} {:8.2} {:8.2} {:8.2} {:8.2} {:8.2} {:8.1}s",
-            format!("{q:?}"),
-            row[0],
-            row[1],
-            row[2],
-            row[3],
-            mean,
-            dt
+            "{:9} {:8.2} {:8.2} {:8.2} {:8.2} {:8.2} {:8.2} {:8.1}s",
+            p, row[0], row[1], row[2], row[3], instr, mean, dt
         );
     }
     Ok(())

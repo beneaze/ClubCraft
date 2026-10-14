@@ -50,16 +50,23 @@ fn check(opts: Options, frames: usize, start: usize, tol: f32) {
     .unwrap();
     assert!(target.is_complete());
     let mut max_diff = 0f32;
+    let mut per = [0f32; 4];
+    let mut worst_frame = [0usize; 4];
     for c in 0..target.num_chunks() {
         let data = &target.chunk(c).unwrap().data;
         for (k, f) in data.chunks_exact(STEM_CHANNELS).enumerate() {
             let i = c * STEM_CHUNK_FRAMES + k;
             for s in 0..4 {
-                max_diff = max_diff.max((f[2 * s] - full.stems[s].0[i]).abs());
-                max_diff = max_diff.max((f[2 * s + 1] - full.stems[s].1[i]).abs());
+                let d = (f[2 * s] - full.stems[s].0[i]).abs().max((f[2 * s + 1] - full.stems[s].1[i]).abs());
+                if d > per[s] {
+                    per[s] = d;
+                    worst_frame[s] = i;
+                }
+                max_diff = max_diff.max(d);
             }
         }
     }
+    println!("per stem max diff {per:?} at frames {worst_frame:?}");
     println!(
         "{} on {}: max |progressive - full| = {max_diff:e}; start chunk ready after {first_ready:?} of {calls} model runs",
         sep.model_name(),
@@ -82,6 +89,16 @@ fn progressive_equals_full_high() {
 }
 
 #[test]
+fn progressive_equals_full_best() {
+    // RoFormer vocals (computed lazily in window order) + htdemucs_ft drums/bass + residual other.
+    let Some(dir) = models() else { return };
+    if !dir.join("melroformer.json").exists() {
+        return;
+    }
+    check(Quality::Best.options(), 26 * 44100 + 11, 14 * 44100, 0.0);
+}
+
+#[test]
 fn progressive_equals_full_shifts_overlap() {
     let mut o = Quality::Fast.options();
     o.shifts = 2;
@@ -101,4 +118,18 @@ fn cancel_stops() {
         .unwrap_err();
     assert!(err.is::<clubcraft_stems::Cancelled>());
     assert!(!target.is_complete());
+}
+
+#[test]
+#[ignore]
+fn zz_best_determinism() {
+    let Some(dir) = models() else { return };
+    let sep = Separator::with_options(&dir, Quality::Best.options()).unwrap();
+    let audio = test_audio(26 * 44100 + 11);
+    let a = sep.separate(&audio, &mut |_| true).unwrap();
+    let b = sep.separate(&audio, &mut |_| true).unwrap();
+    for s in 0..4 {
+        let d = a.stems[s].0.iter().zip(&b.stems[s].0).map(|(x, y)| (x - y).abs()).fold(0f32, f32::max);
+        println!("stem {s}: run-to-run max diff {d:e}");
+    }
 }
