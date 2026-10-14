@@ -97,6 +97,11 @@ pub struct StudioView {
     /// Set when the mix changed; the app pushes edits into a running preview.
     pub edited: bool,
     pub lane_show: [crate::studio_timeline::ShowMode; clubcraft_core::MIX_LANES],
+    /// What the timeline draws and edits inside the selected transition.
+    pub curve_target: crate::studio_timeline::CurveTarget,
+    /// Curves of stem rows switched off in the timeline, to bring back when switched on again:
+    /// (transition, incoming side, stem index).
+    pub stem_stash: std::collections::HashMap<(usize, bool, usize), Vec<(f32, f32)>>,
     pub tempo_open: bool,
     pub drag: Option<crate::studio_timeline::Drag>,
     pub drag_acc: f32,
@@ -155,6 +160,8 @@ impl Default for StudioView {
             timeline_dirty: true,
             edited: false,
             lane_show: Default::default(),
+            curve_target: Default::default(),
+            stem_stash: Default::default(),
             tempo_open: true,
             drag: None,
             drag_acc: 0.0,
@@ -363,10 +370,10 @@ impl StudioView {
                 Tab::Playlist => (100.0, 90.0),
                 Tab::Master => (90.0, 80.0),
                 Tab::Track => (330.0, 220.0),
-                Tab::Transition => (310.0, 250.0),
+                Tab::Transition => (215.0, 130.0),
                 Tab::Mashups => (430.0, 240.0),
             };
-            egui::Panel::bottom(format!("studio-tab-{tab:?}"))
+            egui::Panel::bottom(format!("studio-tab2-{tab:?}"))
                 .default_size(default)
                 .min_size(min)
                 .max_size((ui.available_height() * 0.7).max(min + 20.0))
@@ -1031,7 +1038,9 @@ impl StudioView {
             }
             Tab::Playlist => self.playlist_panel(ui, sh),
             Tab::Transition => match self.selection {
-                Selection::Transition(k) if k < self.mix.transitions.len() && k + 1 < self.mix.tracks.len() => self.transition_editor(ui, sh, k),
+                Selection::Transition(k) if k < self.mix.transitions.len() && k + 1 < self.mix.tracks.len() => {
+                    egui::ScrollArea::vertical().id_salt("tr-editor").auto_shrink([false, false]).show(ui, |ui| self.transition_editor(ui, sh, k));
+                }
                 _ => hint(ui, "Click a transition (the coloured chip above the lanes) to edit it. A mix needs at least two tracks."),
             },
             Tab::Track => match self.selection {

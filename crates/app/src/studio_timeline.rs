@@ -33,6 +33,62 @@ impl ShowMode {
     }
 }
 
+/// What the timeline draws and edits inside the selected transition (like DJ.Studio's
+/// automation choice): one row per stem, or one curve for the volume, an EQ band or the filter.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum CurveTarget {
+    #[default]
+    Stems,
+    Volume,
+    EqLow,
+    EqMid,
+    EqHigh,
+    Filter,
+}
+
+impl CurveTarget {
+    pub const ALL: [CurveTarget; 6] = [CurveTarget::Stems, CurveTarget::Volume, CurveTarget::EqLow, CurveTarget::EqMid, CurveTarget::EqHigh, CurveTarget::Filter];
+    pub fn label(self) -> &'static str {
+        match self {
+            CurveTarget::Stems => "Stems",
+            CurveTarget::Volume => "Volume",
+            CurveTarget::EqLow => "Low",
+            CurveTarget::EqMid => "Mid",
+            CurveTarget::EqHigh => "High",
+            CurveTarget::Filter => "Filter",
+        }
+    }
+    fn param(self) -> Option<Param> {
+        match self {
+            CurveTarget::Stems => None,
+            CurveTarget::Volume => Some(Param::Volume),
+            CurveTarget::EqLow => Some(Param::EqLow),
+            CurveTarget::EqMid => Some(Param::EqMid),
+            CurveTarget::EqHigh => Some(Param::EqHigh),
+            CurveTarget::Filter => Some(Param::Filter),
+        }
+    }
+    fn color(self) -> Color32 {
+        match self {
+            CurveTarget::Stems | CurveTarget::Volume => VOLUME_COLOR,
+            CurveTarget::EqLow => EQ_COLORS[0],
+            CurveTarget::EqMid => EQ_COLORS[1],
+            CurveTarget::EqHigh => EQ_COLORS[2],
+            CurveTarget::Filter => FILTER_COLOR,
+        }
+    }
+}
+
+/// Stem rows from top to bottom (as in DJ.Studio).
+pub const STEM_ROWS: [StemKind; 4] = [StemKind::Drums, StemKind::Bass, StemKind::Other, StemKind::Vocals];
+
+/// The waveform area of a clip drawn in `r` (below its title bar and beat ruler).
+pub fn clip_wave_rect(r: Rect) -> Rect {
+    let body = Rect::from_min_max(pos2(r.left(), r.top() + 20.0f32.min(r.height())), r.max);
+    let ruler_h = RULER_H.min(body.height() * 0.3);
+    Rect::from_min_max(pos2(body.left(), body.top() + ruler_h), body.max).shrink2(vec2(0.0, 3.0))
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Drag {
     /// Moving transition `k` by its bar.
@@ -91,15 +147,28 @@ impl StudioView {
         let full = Rect::from_min_size(avail.min, vec2(avail.width(), avail.height().max(220.0)));
         ui.allocate_rect(full, Sense::hover());
         let ruler_h = 24.0;
-        let tempo_h = if self.tempo_open { 58.0 } else { 24.0 };
         // Collapsed lanes are a slim row (clip titles only); expanded lanes share the rest.
         const COLLAPSED_H: f32 = 30.0;
         const SAMPLE_H: f32 = 58.0;
-        let sample_hs: [f32; SAMPLE_LANES] = std::array::from_fn(|l| if self.sample_open[l] { SAMPLE_H } else { COLLAPSED_H });
-        let samples_h: f32 = sample_hs.iter().map(|h| h + 2.0).sum();
         let n_open = (0..MIX_LANES).filter(|l| !self.lane_collapsed[*l]).count().max(1) as f32;
         let n_closed = MIX_LANES as f32 - (0..MIX_LANES).filter(|l| !self.lane_collapsed[*l]).count() as f32;
-        let open_h = ((full.height() - ruler_h - 21.0 - tempo_h - 8.0 - samples_h - n_closed * (COLLAPSED_H + 2.0)) / n_open).clamp(70.0, 300.0);
+        // editing a transition's stems needs room for four rows per track: the tempo and sample
+        // lanes give way first
+        let stem_edit = matches!(self.selection, Selection::Transition(_)) && self.curve_target == CurveTarget::Stems;
+        let want = if stem_edit { 150.0 } else { 70.0 };
+        let layout = |squeeze: bool| {
+            let tempo_h = if self.tempo_open && !squeeze { 58.0 } else { 24.0 };
+            // empty sample lanes stay slim (they still take dropped files)
+            let sample_hs: [f32; SAMPLE_LANES] = std::array::from_fn(|l| if self.sample_open[l] && !squeeze && self.mix.samples.iter().any(|c| c.lane as usize == l) { SAMPLE_H } else { COLLAPSED_H });
+            let samples_h: f32 = sample_hs.iter().map(|h| h + 2.0).sum();
+            let open = (full.height() - ruler_h - 21.0 - tempo_h - 8.0 - samples_h - n_closed * (COLLAPSED_H + 2.0)) / n_open;
+            (tempo_h, sample_hs, open)
+        };
+        let (mut tempo_h, mut sample_hs, mut open) = layout(false);
+        if open < want {
+            (tempo_h, sample_hs, open) = layout(true);
+        }
+        let open_h = open.clamp(70.0, if stem_edit { 420.0 } else { 300.0 });
         let lane_hs: Vec<f32> = (0..MIX_LANES).map(|l| if self.lane_collapsed[l] { COLLAPSED_H } else { open_h }).collect();
         let canvas = Rect::from_min_max(pos2(full.left() + HEADER_W + 4.0, full.top()), full.max);
         let ruler = Rect::from_min_size(canvas.min, vec2(canvas.width(), ruler_h));
@@ -476,6 +545,10 @@ impl StudioView {
             }
         }
 
+        if let Selection::Transition(k) = self.selection {
+            self.edit_transition_curves(ui, sh, k, &lanes, canvas, &x_of);
+        }
+
         // ----- tempo lane
         p.rect_filled(tempo, 3.0, theme::PANEL);
         if self.timeline.total_beats > 0.0 {
@@ -529,6 +602,201 @@ impl StudioView {
                 let t = ((pp.x - canvas.left() + scroll) / zoom) as f64;
                 out.push(StudioAction::Seek(t.clamp(0.0, self.timeline.total_secs)));
             }
+        }
+    }
+
+    /// The selected transition's curves, drawn and edited over both clips (like DJ.Studio): one
+    /// row per stem, or one curve for the volume / an EQ band / the filter, chosen with the small
+    /// selector over the frame.
+    fn edit_transition_curves(&mut self, ui: &mut Ui, sh: &Shared, k: usize, lanes: &[Rect], canvas: Rect, x_of: &dyn Fn(f64) -> f32) {
+        let Some(x) = self.timeline.transitions.get(k).cloned() else { return };
+        if k + 1 >= self.timeline.tracks.len() {
+            return;
+        }
+        let (xs, xe) = (x_of(x.start_sec), x_of(x.end_sec));
+        if xe < canvas.left() || xs > canvas.right() || xe - xs < 8.0 {
+            return;
+        }
+        let beats = self.mix.transitions[k].beats as f32;
+        let editable = !self.mix.transitions[k].locked;
+        let (zoom, origin) = (self.zoom, x_of(0.0));
+        let tl = self.timeline.clone();
+        let to_x = |b: f32| x_of(tl.sec_at_beat(x.start_beat + b as f64));
+        let from_x = |px: f32| (tl.beat_at_sec((((px - origin) / zoom) as f64).max(0.0)) - x.start_beat) as f32;
+        let beat_px = (tl.tracks[k].grid.beat_len() as f32 * zoom).max(0.1);
+        let snap = move |b: f32, free: bool| {
+            if free {
+                return b;
+            }
+            let q = if beat_px > 48.0 { 0.25 } else if beat_px > 12.0 { 1.0 } else { 4.0 };
+            (b / q).round() * q
+        };
+        let fmt_x = |b: f32| {
+            let bar = (b / 4.0).floor() as i32 + 1;
+            let beat = b.rem_euclid(4.0);
+            if (beat - beat.round()).abs() < 1e-3 {
+                format!("bar {bar}.{}", beat.round() as i32 + 1)
+            } else {
+                format!("bar {bar}.{:.2}", beat + 1.0)
+            }
+        };
+        let pct = |v: f32| format!("{:.0} %", v * 100.0);
+        let eq_fmt = |v: f32| {
+            if v < 0.02 {
+                "kill".to_string()
+            } else {
+                let g = if v <= 0.5 { (2.0 * v).powi(2) } else { 10f32.powf(12.0 * (v - 0.5) / 20.0) };
+                format!("{:+.1} dB", 20.0 * g.log10())
+            }
+        };
+        let filter_fmt = |v: f32| {
+            if (v - 0.5).abs() < 0.01 {
+                "off".to_string()
+            } else if v < 0.5 {
+                format!("low-pass {:.0} %", (0.5 - v) * 200.0)
+            } else {
+                format!("high-pass {:.0} %", (v - 0.5) * 200.0)
+            }
+        };
+        let target = self.curve_target;
+        let mut changed = false;
+        for (side, ti) in [(Side::Out, k), (Side::In, k + 1)] {
+            let l = ti % MIX_LANES;
+            if self.lane_collapsed[l] {
+                continue;
+            }
+            let (t_start, t_end, tid) = {
+                let tt = &self.timeline.tracks[ti];
+                (tt.start_sec, tt.end_sec, tt.track_id)
+            };
+            let r = Rect::from_min_max(pos2(x_of(t_start), lanes[l].top() + 2.0), pos2(x_of(t_end), lanes[l].bottom() - 2.0));
+            let wave = clip_wave_rect(r);
+            let area = Rect::from_x_y_ranges(xs.max(r.left())..=xe.min(r.right()), wave.y_range());
+            if area.width() < 4.0 || area.height() < 16.0 {
+                continue;
+            }
+            let painter = ui.painter_at(canvas);
+            match target.param() {
+                None => {
+                    let has_stems = sh.waveforms.get(&tid).is_some_and(|w| w.stems.is_some());
+                    let rh = area.height() / STEM_ROWS.len() as f32;
+                    for (row, stem) in STEM_ROWS.into_iter().enumerate() {
+                        let rr = Rect::from_min_size(pos2(area.left(), area.top() + row as f32 * rh), vec2(area.width(), rh - 1.0));
+                        let col = theme::stem_color(stem);
+                        if !has_stems {
+                            painter.rect_filled(rr, 0.0, theme::blend(theme::PANEL, col, 0.14));
+                        }
+                        let plot = rr.shrink2(vec2(0.0, 3.0));
+                        let mut pts = self.mix.transitions[k].lanes.iter().find(|ln| ln.side == side && ln.param == Param::Stem(stem)).map(|ln| ln.points.clone()).unwrap_or_default();
+                        let off = !pts.is_empty() && pts.iter().all(|p| p.1 < 1e-3);
+                        let c = crate::curve_edit::Curve {
+                            rect: plot,
+                            x0: 0.0,
+                            x1: beats,
+                            to_x: &to_x,
+                            from_x: &from_x,
+                            snap: &snap,
+                            neutral: 1.0,
+                            centered: false,
+                            color: if off { col.gamma_multiply(0.4) } else { Color32::WHITE },
+                            editable: editable && !off,
+                            fmt: &pct,
+                            fmt_x: &fmt_x,
+                        };
+                        if crate::curve_edit::curve_ui(ui, Id::new(("tcurve", k, side == Side::In, row)), &c, &mut pts) {
+                            set_lane(&mut self.mix.transitions[k], side, Param::Stem(stem), pts);
+                            changed = true;
+                        }
+                        // on / off per stem and side (DJ.Studio's stem toggles)
+                        let b = Rect::from_min_size(pos2(area.left() + 4.0, rr.center().y - 7.0), vec2(16.0, 14.0));
+                        if b.right() < area.right() && rr.height() >= 12.0 {
+                            let br = ui.interact(b, Id::new(("ttoggle", k, side == Side::In, row)), Sense::click());
+                            painter.rect_filled(b, 4.0, if off { theme::PANEL } else { col });
+                            painter.rect_stroke(b, 4.0, Stroke::new(1.0, col), StrokeKind::Inside);
+                            painter.text(b.center(), egui::Align2::CENTER_CENTER, &stem.label()[..1], egui::FontId::proportional(10.0), if off { col } else { Color32::BLACK });
+                            if br.hovered() {
+                                ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                            }
+                            let tip = format!(
+                                "{} of the {} track: {} in this transition (click to switch it {})",
+                                stem.label(),
+                                if side == Side::Out { "outgoing" } else { "incoming" },
+                                if off { "off" } else { "on" },
+                                if off { "on" } else { "off" }
+                            );
+                            if br.on_hover_text(tip).clicked() && editable {
+                                let key = (k, side == Side::In, row);
+                                let cur = self.mix.transitions[k].lanes.iter().find(|ln| ln.side == side && ln.param == Param::Stem(stem)).map(|ln| ln.points.clone()).unwrap_or_default();
+                                let next = if off {
+                                    self.stem_stash.remove(&key).unwrap_or_else(|| vec![(0.0, 1.0), (beats, 1.0)])
+                                } else {
+                                    self.stem_stash.insert(key, cur);
+                                    vec![(0.0, 0.0), (beats, 0.0)]
+                                };
+                                set_lane(&mut self.mix.transitions[k], side, Param::Stem(stem), next);
+                                changed = true;
+                            }
+                        }
+                    }
+                    if !has_stems && area.width() > 200.0 {
+                        painter.text(pos2(area.right() - 6.0, area.top() + 3.0), egui::Align2::RIGHT_TOP, "no stems yet: imitated with volume and EQ", egui::FontId::proportional(10.0), theme::TEXT_DIM);
+                    }
+                }
+                Some(param) => {
+                    let centered = matches!(param, Param::EqLow | Param::EqMid | Param::EqHigh | Param::Filter);
+                    let mut pts = self.mix.transitions[k].lanes.iter().find(|ln| ln.side == side && ln.param == param).map(|ln| ln.points.clone()).unwrap_or_default();
+                    let fmt: &dyn Fn(f32) -> String = match param {
+                        Param::Filter => &filter_fmt,
+                        Param::EqLow | Param::EqMid | Param::EqHigh => &eq_fmt,
+                        _ => &pct,
+                    };
+                    let c = crate::curve_edit::Curve {
+                        rect: area.shrink2(vec2(0.0, 4.0)),
+                        x0: 0.0,
+                        x1: beats,
+                        to_x: &to_x,
+                        from_x: &from_x,
+                        snap: &snap,
+                        neutral: param.neutral(),
+                        centered,
+                        color: target.color(),
+                        editable,
+                        fmt,
+                        fmt_x: &fmt_x,
+                    };
+                    if crate::curve_edit::curve_ui(ui, Id::new(("tcurve", k, side == Side::In, 9)), &c, &mut pts) {
+                        set_lane(&mut self.mix.transitions[k], side, param, pts);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        // the selector, centred over the frame just below the transition bar
+        let seg = 50.0;
+        let w = seg * CurveTarget::ALL.len() as f32;
+        if canvas.width() > w + 16.0 {
+            let top = lanes[0].top() + 1.0;
+            let bar = Rect::from_center_size(pos2(((xs + xe) / 2.0).clamp(canvas.left() + w / 2.0, canvas.right() - w / 2.0), top + 10.0), vec2(w, 19.0));
+            let painter = ui.painter_at(canvas);
+            painter.rect_filled(bar, 6.0, Color32::from_black_alpha(215));
+            for (j, t) in CurveTarget::ALL.into_iter().enumerate() {
+                let sr = Rect::from_min_size(pos2(bar.left() + j as f32 * seg, bar.top()), vec2(seg, bar.height())).shrink(1.5);
+                let resp = ui.interact(sr, Id::new(("ctarget", j)), Sense::click());
+                let on = self.curve_target == t;
+                if on {
+                    painter.rect_filled(sr, 5.0, theme::SEG_ON);
+                } else if resp.hovered() {
+                    painter.rect_filled(sr, 5.0, theme::SEG_HOVER);
+                }
+                painter.text(sr.center(), egui::Align2::CENTER_CENTER, t.label(), egui::FontId::proportional(11.0), if on { t.color() } else { theme::TEXT_DIM });
+                if resp.on_hover_text(format!("Draw the {} curves in the timeline", t.label().to_lowercase())).clicked() {
+                    self.curve_target = t;
+                }
+            }
+        }
+        if changed {
+            self.mix.transitions[k].style = clubcraft_core::TransitionStyle::Custom;
+            self.changed();
         }
     }
 
@@ -759,7 +1027,7 @@ impl StudioView {
                     paint_own(b, r0);
                 }
                 // the selected transition shows one row per stem (like DJ.Studio)
-                if self.selection == Selection::Transition(*k) && wf.stems.is_some() && audible {
+                if self.selection == Selection::Transition(*k) && self.curve_target == CurveTarget::Stems && wf.stems.is_some() && audible {
                     let (x0, x1) = (x_of(self.timeline.sec_at_beat(r0)), x_of(self.timeline.sec_at_beat(r1)));
                     self.paint_stem_rows(p, Rect::from_x_y_ranges(x0..=x1, wrect.y_range()), wf, i, tr, *side, start, x_of);
                     b = b.max(r1);
@@ -815,15 +1083,8 @@ impl StudioView {
         }
         // inline transition automation
         let show = self.lane_show[l];
-        // the selected transition draws stem rows with their own level lines instead
-        let stem_rows = audible && sh.waveforms.get(&tt.track_id).is_some_and(|w| w.stems.is_some());
-        let show_for = |k: usize| -> Option<ShowMode> {
-            if stem_rows && self.selection == Selection::Transition(k) {
-                (show == ShowMode::Eq).then_some(ShowMode::Eq)
-            } else {
-                Some(show)
-            }
-        };
+        // the selected transition's curves are drawn (and edited) by `edit_transition_curves`
+        let show_for = |k: usize| -> Option<ShowMode> { (self.selection != Selection::Transition(k)).then_some(show) };
         if show != ShowMode::None {
             if i > 0 {
                 if let (Some(x), Some(tr), Some(sm)) = (self.timeline.transitions.get(i - 1), self.effective_transition(sh, i - 1), show_for(i - 1)) {
@@ -841,7 +1102,7 @@ impl StudioView {
     }
 
     /// Stem rows (drums, bass, melody, vocals) of track `i` inside transition `tr`: each row shows
-    /// that stem's waveform at the level it plays, and its level as a white line.
+    /// that stem's waveform at the level it plays.
     #[allow(clippy::too_many_arguments)]
     fn paint_stem_rows(&self, p: &egui::Painter, rect: Rect, wf: &clubcraft_core::Waveform, i: usize, tr: &Transition, side: Side, start: f64, x_of: &dyn Fn(f64) -> f32) {
         let Some(stems) = &wf.stems else { return };
@@ -854,13 +1115,11 @@ impl StudioView {
         let order = [StemKind::Drums, StemKind::Bass, StemKind::Other, StemKind::Vocals];
         let rh = rect.height() / 4.0;
         let mut mesh = egui::Mesh::default();
-        let mut lines: Vec<egui::Shape> = Vec::new();
         for (row, k) in order.into_iter().enumerate() {
             let r = Rect::from_min_size(pos2(rect.left(), rect.top() + row as f32 * rh), vec2(rect.width(), rh - 1.0));
             let col = theme::stem_color(k);
             p.rect_filled(r.intersect(clip), 0.0, theme::blend(theme::PANEL, col, 0.2));
             let data = &stems[k.index()];
-            let mut line: Vec<egui::Pos2> = Vec::new();
             let mut x = clip.left().floor();
             while x < clip.right() {
                 let b = beat_at_x(x + 0.5);
@@ -870,15 +1129,11 @@ impl StudioView {
                 let v = data.get(bin).map(|&v| v as f32 / 255.0).unwrap_or(0.0) * g;
                 let hh = v * (rh * 0.5 - 2.0);
                 mesh.add_colored_rect(Rect::from_min_max(pos2(x, r.center().y - hh), pos2(x + 1.0, r.center().y + hh)), col);
-                if (x as i32) % 3 == 0 {
-                    line.push(pos2(x, r.bottom() - 2.0 - g * (rh - 5.0)));
-                }
                 x += 1.0;
             }
-            lines.push(egui::Shape::line(line, Stroke::new(1.5, Color32::from_white_alpha(230))));
         }
+        // (each row's level line is drawn, and edited, by `edit_transition_curves`)
         p.add(egui::Shape::mesh(mesh));
-        p.extend(lines);
     }
 
     /// Header of sample lane `l`: name, fader, solo / mute, add a file.
@@ -1175,5 +1430,13 @@ impl StudioView {
                 }
             }
         }
+    }
+}
+
+/// Replace (or add) the lane of `param` on `side`.
+fn set_lane(t: &mut Transition, side: Side, param: Param, points: Vec<(f32, f32)>) {
+    match t.lanes.iter_mut().find(|l| l.side == side && l.param == param) {
+        Some(l) => l.points = points,
+        None => t.lanes.push(clubcraft_core::Lane { side, param, points }),
     }
 }

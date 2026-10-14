@@ -190,6 +190,20 @@ fn f16_to_f32(h: u16) -> f32 {
     f32::from_bits(bits)
 }
 
+/// CoreML compute units: CPU + GPU, or for experiments `CLUBCRAFT_COREML_UNITS` (all models) /
+/// `CLUBCRAFT_ROFORMER_UNITS` (the vocal model) = `all` | `ane` (CPU + Neural Engine) | `gpu` |
+/// `cpu`.
+fn compute_units(path: &std::path::Path) -> MLComputeUnits {
+    let rf = path.file_name().is_some_and(|n| n.to_string_lossy().starts_with("melroformer"));
+    let var = if rf { std::env::var("CLUBCRAFT_ROFORMER_UNITS").or_else(|_| std::env::var("CLUBCRAFT_COREML_UNITS")) } else { std::env::var("CLUBCRAFT_COREML_UNITS") };
+    match var.as_deref() {
+        Ok("all") => MLComputeUnits::All,
+        Ok("ane") => MLComputeUnits::CPUAndNeuralEngine,
+        Ok("cpu") => MLComputeUnits::CPUOnly,
+        _ => MLComputeUnits::CPUAndGPU,
+    }
+}
+
 fn load_mlmodel(path: &std::path::Path) -> Result<Retained<MLModel>> {
     if !path.exists() {
         bail!("missing {}", path.display());
@@ -197,7 +211,7 @@ fn load_mlmodel(path: &std::path::Path) -> Result<Retained<MLModel>> {
     autoreleasepool(|_| unsafe {
         let url = NSURL::fileURLWithPath_isDirectory(&NSString::from_str(&path.to_string_lossy()), true);
         let cfg = MLModelConfiguration::new();
-        cfg.setComputeUnits(MLComputeUnits::CPUAndGPU);
+        cfg.setComputeUnits(compute_units(path));
         MLModel::modelWithContentsOfURL_configuration_error(&url, &cfg).map_err(ns_err)
     })
 }
