@@ -680,7 +680,13 @@ impl App {
             for (v, name) in [(View::Home, "Home"), (View::Library, "Library"), (View::Studio, "Studio"), (View::Live, "Live")] {
                 let sel = self.view == v;
                 let b = egui::Button::new(RichText::new(name).size(14.0).strong()).selected(sel).min_size(egui::vec2(86.0, 24.0));
-                if ui.add(b).clicked() {
+                let r = ui.add(b);
+                if sel {
+                    // accent underline marks the current view
+                    let rr = r.rect.shrink2(egui::vec2(10.0, 0.0));
+                    ui.painter().line_segment([rr.left_bottom() + egui::vec2(0.0, 2.0), rr.right_bottom() + egui::vec2(0.0, 2.0)], egui::Stroke::new(2.0, theme::ACCENT));
+                }
+                if r.clicked() {
                     self.view = v;
                 }
             }

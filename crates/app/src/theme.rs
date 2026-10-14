@@ -7,6 +7,9 @@ pub const LINE: Color32 = Color32::from_rgb(48, 52, 60);
 pub const TEXT: Color32 = Color32::from_rgb(220, 224, 232);
 pub const TEXT_DIM: Color32 = Color32::from_rgb(130, 136, 148);
 pub const ACCENT: Color32 = Color32::from_rgb(255, 92, 140);
+/// Fill of selected tabs, toggles and list entries: solid graphite, so the pink accent is kept
+/// for primary actions and indicators (a translucent accent fill read as a muddy plum).
+pub const SELECT: Color32 = Color32::from_rgb(66, 71, 83);
 pub const OK: Color32 = Color32::from_rgb(90, 220, 130);
 pub const WARN: Color32 = Color32::from_rgb(255, 190, 60);
 
@@ -33,8 +36,8 @@ pub fn apply(ctx: &egui::Context) {
     v.extreme_bg_color = BG;
     v.faint_bg_color = PANEL_HI;
     v.override_text_color = Some(TEXT);
-    v.selection.bg_fill = ACCENT.linear_multiply(0.45);
-    v.selection.stroke = Stroke::new(1.0, ACCENT);
+    v.selection.bg_fill = SELECT;
+    v.selection.stroke = Stroke::new(1.0, Color32::WHITE);
     v.hyperlink_color = ACCENT;
     let r = CornerRadius::same(4);
     for w in [&mut v.widgets.noninteractive, &mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
