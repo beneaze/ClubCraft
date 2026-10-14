@@ -226,7 +226,7 @@ impl App {
             }
         }
         // Redraw only while something moves, at most 60 fps (ProMotion displays would do 120).
-        let anything_playing = st.decks.iter().any(|d| d.playing) || st.mix.playing || self.eng.export.is_some() || self.eng.loading_mix.is_some() || self.pending_export.is_some();
+        let anything_playing = st.decks.iter().any(|d| d.playing) || st.mix.playing || self.eng.export.is_some() || self.eng.loading_mix.is_some() || self.pending_export.is_some() || self.studio.extracting > 0;
         if anything_playing {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
         } else if self.view == View::Live {
@@ -718,6 +718,17 @@ impl App {
                 self.studio.mix.samples.push(clubcraft_core::SampleClip { lane: l, path: path.into(), start_beat: b, gain_db: 0.0 });
                 self.studio.changed();
                 self.save_mix();
+            }
+            "range" => {
+                // `range <track> <beat0> <beat1>` (mix beats, tests)
+                let v: Vec<f64> = arg.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+                if v.len() == 3 {
+                    self.studio.range = Some(crate::studio_timeline::RangeSel { track: v[0] as usize, b0: v[1], b1: v[2] });
+                }
+            }
+            "extract" => {
+                let part = crate::extract::Part::ALL[arg.trim().parse::<usize>().unwrap_or(0).min(6)];
+                self.studio.extract_requests.push((part, false));
             }
             "lock" => {
                 if let Some(t) = self.studio.mix.transitions.get_mut(arg.trim().parse().unwrap_or(0)) {

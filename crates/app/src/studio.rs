@@ -114,10 +114,19 @@ pub struct StudioView {
     pub sample_cache: std::collections::HashMap<std::path::PathBuf, Option<(f64, std::sync::Arc<Vec<f32>>)>>,
     /// Files dropped this frame went onto a sample lane (the app must not import them).
     pub consumed_drop: bool,
+    /// Selected time range on a track and the drag anchor.
+    pub range: Option<crate::studio_timeline::RangeSel>,
+    pub range_anchor: f64,
+    /// Extractions asked for this frame: (part, save to a file instead of a sample lane).
+    pub extract_requests: Vec<(crate::extract::Part, bool)>,
+    extract_tx: crossbeam_channel::Sender<ExtractDone>,
+    extract_rx: crossbeam_channel::Receiver<ExtractDone>,
+    pub extracting: usize,
 }
 
 impl Default for StudioView {
     fn default() -> Self {
+        let (extract_tx, extract_rx) = crossbeam_channel::unbounded();
         StudioView {
             mix: Mix::default(),
             timeline: MixTimeline::default(),
@@ -157,8 +166,22 @@ impl Default for StudioView {
             sample_open: [true, false],
             sample_cache: Default::default(),
             consumed_drop: false,
+            range: None,
+            range_anchor: 0.0,
+            extract_requests: Vec::new(),
+            extract_tx,
+            extract_rx,
+            extracting: 0,
         }
     }
+}
+
+/// A finished extraction: the WAV and its length, and where to put it (a sample lane at a mix
+/// beat) unless it was saved as a file.
+struct ExtractDone {
+    result: Result<(std::path::PathBuf, f64), String>,
+    place_at: Option<f64>,
+    label: String,
 }
 
 /// A drop indicator line along the top of a hovered playlist row.
@@ -321,6 +344,7 @@ impl StudioView {
             self.refresh_timeline(sh);
         }
         self.keyboard(ui.ctx(), sh, out);
+        self.run_extractions(sh);
         // the finder was opened from elsewhere (library, menu, inspector button)
         if self.mashup.take_opened() {
             self.tab = Some(Tab::Mashups);
@@ -405,7 +429,24 @@ impl StudioView {
                 self.zoom_around_playhead(1.0 / 1.5);
             }
             if i.key_pressed(Key::Escape) {
-                self.selection = Selection::None;
+                if self.range.is_some() {
+                    self.range = None;
+                } else {
+                    self.selection = Selection::None;
+                }
+            }
+            if self.range.is_some() && cmd {
+                use crate::extract::Part;
+                if i.key_pressed(Key::L) {
+                    self.extract_requests.push((Part::Full, false));
+                }
+                if shift {
+                    for (key, part) in [(Key::Num1, Part::Drums), (Key::Num2, Part::Bass), (Key::Num3, Part::Melody), (Key::Num4, Part::Vocals), (Key::Num5, Part::Instrumental), (Key::Num6, Part::DrumsBass)] {
+                        if i.key_pressed(key) {
+                            self.extract_requests.push((part, false));
+                        }
+                    }
+                }
             }
             if cmd && i.key_pressed(Key::S) {
                 out.push(StudioAction::SaveMix);
@@ -681,6 +722,66 @@ impl StudioView {
             order.remove(i);
             self.selection = Selection::None;
             self.replan_keep(sh, &order, true);
+        }
+    }
+
+    /// Start the extractions asked for (menu / shortcuts) and place finished ones on a sample lane.
+    fn run_extractions(&mut self, sh: &Shared) {
+        for (part, save) in std::mem::take(&mut self.extract_requests) {
+            let Some(rs) = self.range.filter(|r| r.b1 > r.b0 && r.track < self.mix.tracks.len()) else { continue };
+            let i = rs.track;
+            let mt = self.mix.tracks[i].clone();
+            let Some(t) = sh.track(mt.track_id) else { continue };
+            let tt = &self.timeline.tracks[i];
+            let (t0, t1) = (self.timeline.track_pos(i, rs.b0), self.timeline.track_pos(i, rs.b1));
+            let rate = self.timeline.bpm_at_beat((rs.b0 + rs.b1) * 0.5) / tt.grid.bpm.max(1.0);
+            let semis = mt.key_shift as f32 + if self.mix.keylock { 0.0 } else { 12.0 * (rate as f32).log2() };
+            let bar = |b: f64| ((b - tt.start_beat + tt.track_beat0) / tt.grid.beats_per_bar as f64).floor() as i64 + 1;
+            let title = if t.title.is_empty() { t.display_name() } else { t.title.clone() };
+            let name: String = format!("{} – bars {}-{} – {}", title, bar(rs.b0), bar(rs.b1) - 1, part.label()).chars().map(|c| if "/:\\".contains(c) { '-' } else { c }).collect();
+            let out = if save {
+                let dir = clubcraft_core::paths::data_dir().join("Samples");
+                let _ = std::fs::create_dir_all(&dir);
+                match rfd::FileDialog::new().set_directory(&dir).set_file_name(format!("{name}.wav")).add_filter("WAV", &["wav"]).save_file() {
+                    Some(p) => p,
+                    None => continue,
+                }
+            } else {
+                clubcraft_core::paths::data_dir().join("Samples").join(format!("{name}.wav"))
+            };
+            let req = crate::extract::Request { audio_path: t.path.clone(), hash: t.hash.clone(), t0, t1, rate, semis, part, out };
+            let tx = self.extract_tx.clone();
+            let place_at = (!save).then_some(rs.b0);
+            let label = format!("{} of {}", part.label(), title);
+            self.extracting += 1;
+            self.message = format!("Extracting {label}…");
+            std::thread::spawn(move || {
+                let result = crate::extract::run(&req).map(|d| (req.out.clone(), d)).map_err(|e| format!("{e:#}"));
+                let _ = tx.send(ExtractDone { result, place_at, label });
+            });
+        }
+        while let Ok(d) = self.extract_rx.try_recv() {
+            self.extracting = self.extracting.saturating_sub(1);
+            match (d.result, d.place_at) {
+                (Ok((path, secs)), Some(beat)) => {
+                    // first sample lane that is free over the clip's span
+                    let end = self.timeline.beat_at_sec(self.timeline.sec_at_beat(beat) + secs);
+                    let busy = |l: u8, s: &StudioView| {
+                        s.mix.samples.iter().any(|c| {
+                            let len = s.sample_cache.get(&c.path).and_then(|x| x.as_ref().map(|x| x.0)).unwrap_or(4.0);
+                            let ce = s.timeline.beat_at_sec(s.timeline.sec_at_beat(c.start_beat) + len);
+                            c.lane == l && c.start_beat < end && ce > beat
+                        })
+                    };
+                    let lane = (0..clubcraft_core::SAMPLE_LANES as u8).find(|&l| !busy(l, self)).unwrap_or(0);
+                    self.mix.samples.push(clubcraft_core::SampleClip { lane, path, start_beat: beat, gain_db: 0.0 });
+                    self.sample_open[lane as usize] = true;
+                    self.message = format!("{} copied to Sample {}", d.label, lane + 1);
+                    self.changed();
+                }
+                (Ok((path, _)), None) => self.message = format!("Saved {}", path.display()),
+                (Err(e), _) => self.message = format!("Extract failed: {e}"),
+            }
         }
     }
 

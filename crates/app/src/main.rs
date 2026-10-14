@@ -5,6 +5,7 @@
 
 mod app;
 mod devctl;
+mod extract;
 mod home;
 mod importer;
 mod interop;

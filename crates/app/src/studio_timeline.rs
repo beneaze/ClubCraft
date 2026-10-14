@@ -38,6 +38,16 @@ pub enum Drag {
     TransitionStart(usize),
     TransitionEnd(usize),
     Clip(usize),
+    /// Selecting a time range on track `i`'s waveform.
+    Range(usize),
+}
+
+/// A selected time range of one track (mix beats), for extracting stems / samples.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct RangeSel {
+    pub track: usize,
+    pub b0: f64,
+    pub b1: f64,
 }
 
 pub const HEADER_W: f32 = 214.0;
@@ -242,17 +252,93 @@ impl StudioView {
                 continue;
             }
             self.draw_clip(&p, r, i, sh, &x_of);
+            // selected range (yellow, like DJ.Studio)
+            if let Some(rs) = self.range.filter(|rs| rs.track == i) {
+                let (x0, x1) = (x_of(self.timeline.sec_at_beat(rs.b0)), x_of(self.timeline.sec_at_beat(rs.b1)));
+                let rr = Rect::from_x_y_ranges(x0..=x1.max(x0 + 1.0), (r.top() + 20.0)..=r.bottom());
+                p.rect_filled(rr, 0.0, Color32::from_rgba_unmultiplied(210, 200, 60, 70));
+                p.rect_stroke(rr, 0.0, Stroke::new(1.0, Color32::from_rgb(220, 210, 80)), StrokeKind::Inside);
+            }
             let cid = Id::new(("clip", i));
             let cr = ui.interact(r.intersect(canvas), cid, Sense::click_and_drag());
+            // the title bar moves the track, the waveform selects a range
+            let press_y = ui.input(|inp| inp.pointer.press_origin()).map(|q| q.y);
+            let on_header = press_y.is_some_and(|y| y < r.top() + 20.0);
             if cr.hovered() {
-                ui.ctx().set_cursor_icon(if cr.dragged() { CursorIcon::Grabbing } else { CursorIcon::Grab });
+                let over_header = ui.input(|inp| inp.pointer.hover_pos()).is_some_and(|q| q.y < r.top() + 20.0);
+                ui.ctx().set_cursor_icon(if self.drag == Some(Drag::Clip(i)) { CursorIcon::Grabbing } else if over_header { CursorIcon::Grab } else { CursorIcon::Text });
             }
             if cr.clicked() {
                 clicked_track = Some(i);
+                self.range = None;
             }
             // sliding a track moves its incoming transition: not while that one is locked
             let in_locked = i > 0 && self.mix.transitions.get(i - 1).is_some_and(|t| t.locked);
-            if cr.drag_started() && !in_locked {
+            let zoom = self.zoom;
+            let origin = x_of(0.0);
+            let snap_beat = |tl: &clubcraft_core::MixTimeline, x: f32, free: bool| {
+                let b = tl.beat_at_sec((((x - origin) / zoom) as f64).max(0.0));
+                if free { b } else { b.round() }
+            };
+            if cr.drag_started() && !on_header {
+                let free = ui.input(|inp| inp.modifiers.alt);
+                let x = ui.input(|inp| inp.pointer.press_origin()).map(|q| q.x).unwrap_or(r.left());
+                let (lo, hi) = (self.timeline.tracks[i].start_beat, self.timeline.tracks[i].end_beat);
+                let a = snap_beat(&self.timeline, x, free).clamp(lo, hi);
+                self.range_anchor = a;
+                self.range = Some(RangeSel { track: i, b0: a, b1: a });
+                self.drag = Some(Drag::Range(i));
+            }
+            if cr.dragged() && self.drag == Some(Drag::Range(i)) {
+                if let Some(q) = ui.input(|inp| inp.pointer.latest_pos()) {
+                    let free = ui.input(|inp| inp.modifiers.alt);
+                    let (lo, hi) = (self.timeline.tracks[i].start_beat, self.timeline.tracks[i].end_beat);
+                    let b = snap_beat(&self.timeline, q.x, free).clamp(lo, hi);
+                    let a = self.range_anchor;
+                    self.range = Some(RangeSel { track: i, b0: a.min(b), b1: a.max(b) });
+                }
+            }
+            // right-click: extract the selection
+            let has_range = self.range.is_some_and(|rs| rs.track == i && rs.b1 > rs.b0);
+            let has_stems = sh.analyses.get(&self.mix.tracks[i].track_id).is_some_and(|a| a.stems_model.is_some());
+            cr.context_menu(|ui| {
+                ui.set_min_width(260.0);
+                if !has_range {
+                    ui.label(RichText::new("Drag across the waveform to select a range, then right-click to copy it to a sample lane or extract a stem.").size(11.5).color(theme::TEXT_DIM));
+                    return;
+                }
+                use crate::extract::Part;
+                if ui.add(egui::Button::new("Copy to sample lane").shortcut_text("⌘L")).clicked() {
+                    self.extract_requests.push((Part::Full, false));
+                    ui.close();
+                }
+                ui.separator();
+                for (n, part) in [Part::Drums, Part::Bass, Part::Melody, Part::Vocals, Part::Instrumental, Part::DrumsBass].into_iter().enumerate() {
+                    let b = egui::Button::new(format!("Copy {}", part.label().to_lowercase())).shortcut_text(format!("⇧⌘{}", n + 1));
+                    if ui.add_enabled(has_stems, b).on_disabled_hover_text("Needs stems: separate them first").clicked() {
+                        self.extract_requests.push((part, false));
+                        ui.close();
+                    }
+                }
+                if !has_stems && ui.button("Separate stems for this track").clicked() {
+                    self.pending.push(StudioAction::SeparateStems(vec![self.mix.tracks[i].track_id]));
+                    ui.close();
+                }
+                ui.separator();
+                ui.menu_button("Save sample…", |ui| {
+                    for part in Part::ALL {
+                        if ui.add_enabled(part == Part::Full || has_stems, egui::Button::new(part.label())).clicked() {
+                            self.extract_requests.push((part, true));
+                            ui.close();
+                        }
+                    }
+                });
+                if ui.add(egui::Button::new("Clear selection").shortcut_text("Esc")).clicked() {
+                    self.range = None;
+                    ui.close();
+                }
+            });
+            if cr.drag_started() && on_header && !in_locked {
                 self.drag = Some(Drag::Clip(i));
                 self.drag_acc = 0.0;
                 self.selection = Selection::Track(i);
@@ -271,7 +357,11 @@ impl StudioView {
             if cr.drag_stopped() {
                 self.drag = None;
             }
-            cr.on_hover_text(if in_locked { "Click to edit · the transition into this track is locked" } else { "Drag to slide the track by bars · click to edit" });
+            cr.on_hover_text(if in_locked {
+                "Click to edit · drag on the waveform to select a range (right-click to extract) · the transition into this track is locked"
+            } else {
+                "Drag the title bar to slide the track · drag on the waveform to select a range, then right-click to extract stems · click to edit"
+            });
         }
 
         // ----- transitions: shaded overlap, markers and handles
