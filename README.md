@@ -58,6 +58,24 @@ cargo run --release -p clubcraft
 tools/bundle-macos.sh
 ```
 
+### Windows
+
+ClubCraft builds and runs on Windows 10/11 (x64). Stem separation uses ONNX Runtime with
+**DirectML**, so it runs on any DirectX 12 GPU (NVIDIA, AMD or Intel). On first use ClubCraft
+checks DirectML's output against the CPU once and remembers the result. Without a working GPU it
+falls back to the Fast model on the CPU.
+
+```powershell
+# Rust (rustup, MSVC toolchain) + Visual Studio Build Tools (C++)
+.\tools\package-windows.ps1        # → dist\ClubCraft\ClubCraft.exe (+ DLLs, models if present)
+```
+
+The models are the ONNX exports. Create them with the same Python script, skipping CoreML:
+`python export_htdemucs.py --model htdemucs_ft --out ..\..\models --no-coreml` (see
+`models/README.md`). Audio goes through WASAPI; headphone cue needs a 4-output audio interface or
+the split-cable mode. Every push builds the macOS and Windows versions in CI; the Windows build
+is attached to the workflow run as an artifact (without models).
+
 Data lives in `~/Music/ClubCraft` (library database, stem and waveform caches, exports,
 recordings). Set `CLUBCRAFT_HOME` to use a different folder.
 

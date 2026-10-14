@@ -1693,6 +1693,7 @@ impl Deck {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clubcraft_core::STEM_CHANNELS;
     use crate::track::buffer_from_mono;
     use clubcraft_core::StemTrack;
 
