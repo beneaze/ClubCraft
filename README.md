@@ -214,6 +214,7 @@ The cue generator places Mix In at least 32 beats before the first drop or vocal
 - **One conductor:** the studio preview, live automix and offline render all run the same code path, so what you hear in the preview is exactly what you export.
 - **Exact timing:** tempo is piecewise linear in mix beats and integrated analytically, which keeps overlapping tracks beat-locked to within a millisecond.
 - **Clean-room:** ClubCraft is independent. Other DJ software is only studied through its files, its output and public documentation, never through its program code, and none of its code, models or assets are used. The DJ.Studio importer was rebuilt under that rule; see [docs/clean-room.md](docs/clean-room.md).
+- **Never crash:** no `unwrap`, `expect` or `panic` outside tests, and unsafe code only in five FFI modules, each block with a `SAFETY` note. Clippy enforces both. The contributor rules are in [AGENTS.md](AGENTS.md).
 - **Tested:** 84 unit and integration tests, plus evaluations against Python Demucs and a 137-track analysis corpus.
 
 ## Talk to it: built-in MCP server
@@ -271,4 +272,4 @@ Development builds: `tools/bundle-macos.sh` (macOS), and the `ClubCraft-windows-
 
 ## License
 
-ClubCraft is dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE). The Demucs weights are MIT (Meta Platforms). The Mel-Band RoFormer checkpoint (Kimberley Jensen) and ZFTurbo's implementation are MIT, and so is Signalsmith Stretch. COCOLA (Ciranni et al.) is MIT; its checkpoint was trained on datasets that include MoisesDB, which is licensed for non-commercial research. DJ.Studio and VirtualDJ are trademarks of their respective owners, and ClubCraft is not affiliated with either.
+ClubCraft is dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE). Third-party code, models and fonts are listed in [ATTRIBUTION.md](ATTRIBUTION.md). The Demucs weights are MIT (Meta Platforms). The Mel-Band RoFormer checkpoint (Kimberley Jensen) and ZFTurbo's implementation are MIT, and so is Signalsmith Stretch. COCOLA (Ciranni et al.) is MIT; its checkpoint was trained on datasets that include MoisesDB, which is licensed for non-commercial research. DJ.Studio and VirtualDJ are trademarks of their respective owners, and ClubCraft is not affiliated with either.

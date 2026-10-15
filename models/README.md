@@ -59,7 +59,7 @@ finish this model within 20 minutes, so the GPU is used.
 
 ## Structure model (crates/analysis)
 
-`allin1.onnx` + `allin1.json`: the All-In-One music structure model (Kim & Choi 2023,
+`allin1.onnx` + `allin1.json`: the All-In-One music structure model (Taejun Kim & Juhan Nam, 2023,
 github.com/mir-aidj/all-in-one, MIT), 8-fold Harmonix ensemble, exported without NATTEN by
 `tools/model-export/export_allin1.py` (≈21 MB, not checked in). Input `spec [1,4,T,81]`
 (per-stem log-filtered spectrograms, computed in Rust), output `act [1,T,13]`; `T` must be

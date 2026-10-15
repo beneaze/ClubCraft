@@ -34,11 +34,15 @@ the commit that introduced this document:
 - **The benchmark's key lookup table** (`crates/analysis/examples/eval.rs`), which reads
   DJ.Studio's key numbers.
 
-They were re-implemented under the rules above, by an implementer who had not seen
-DJ.Studio's program code, the removed code, or notes derived from it. The implementer worked
-only from DJ.Studio's data files and exports, its public help pages, and its own measurements.
-It also wrote the specification [`interop/djstudio.md`](interop/djstudio.md), in which every
-fact names its observational or public source. The removed code remains in this repository's git history.
+The defaults were replaced by ClubCraft's own rules: transitions default to 8 bars, the fallback
+mix points sit on 32-beat lines, and a dragged curve point stops at its neighbours.
+
+The importer, the tempo model and the key table were rebuilt under the rules above, by an
+implementer who had not seen DJ.Studio's program code, the removed code, or notes derived from
+it. The implementer worked only from DJ.Studio's data files and exports, its public help pages,
+and its own measurements. It also wrote the specification
+[`interop/djstudio.md`](interop/djstudio.md), in which every fact names its observational or
+public source. The removed code remains in this repository's git history.
 
 The VirtualDJ export was built from VirtualDJ's resource and database files, read as data,
 and from the public VirtualDJ wiki.

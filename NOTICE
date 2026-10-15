@@ -1,0 +1,22 @@
+ClubCraft
+Copyright 2026 The ClubCraft contributors
+
+Licensed under the MIT License or the Apache License, Version 2.0, at your option
+(see LICENSE-MIT and LICENSE-APACHE).
+
+This product includes third-party software and models:
+
+- Signalsmith Stretch, Copyright (c) 2022 Geraint Luff / Signalsmith Audio Ltd. (MIT)
+- Signalsmith Linear, Copyright (c) 2025 Signalsmith Audio (MIT)
+- Demucs v4 model weights, Copyright (c) Meta Platforms, Inc. and affiliates (MIT)
+- Mel-Band RoFormer vocal model by Kimberley Jensen (MIT)
+- Mel-Band RoFormer implementation, Copyright (c) 2024 Roman Solovyev (ZFTurbo) (MIT)
+- All-In-One music structure model by Taejun Kim and Juhan Nam (MIT)
+- COCOLA model by Ciranni et al. (MIT); its training data includes MoisesDB, which is
+  licensed for non-commercial research only
+- ONNX Runtime, Copyright (c) Microsoft Corporation (MIT)
+
+See ATTRIBUTION.md for the full list, including fonts and runtime libraries.
+
+DJ.Studio, VirtualDJ and Mixed In Key are trademarks of their respective owners. ClubCraft is
+not affiliated with or endorsed by them.
