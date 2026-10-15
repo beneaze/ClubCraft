@@ -308,7 +308,9 @@ impl StudioView {
             let mut groups: Vec<Vec<usize>> = vec![vec![0]];
             for i in 1..self.mix.tracks.len() {
                 if self.mix.transitions.get(i - 1).is_some_and(|t| t.locked) {
-                    groups.last_mut().unwrap().push(i);
+                    if let Some(g) = groups.last_mut() {
+                        g.push(i);
+                    }
                 } else {
                     groups.push(vec![i]);
                 }
@@ -985,7 +987,7 @@ impl StudioView {
         if c.add(round("⏮")).on_hover_text("To start (Home)").clicked() {
             out.push(StudioAction::Seek(0.0));
         }
-        if c.add_enabled(self.timeline.transitions.len() > 0, round("⏪")).on_hover_text("Previous transition ([)").clicked() {
+        if c.add_enabled(!self.timeline.transitions.is_empty(), round("⏪")).on_hover_text("Previous transition ([)").clicked() {
             let k = self.timeline.transitions.iter().rposition(|t| t.start_sec < self.position - 0.5);
             if let Some(k) = k {
                 self.selection = Selection::Transition(k);
@@ -995,7 +997,7 @@ impl StudioView {
         if crate::widgets::play_button(&mut c, self.playing, has, 40.0).on_hover_text("Play / pause (Space)").clicked() {
             out.push(StudioAction::PlayPause);
         }
-        if c.add_enabled(self.timeline.transitions.len() > 0, round("⏩")).on_hover_text("Next transition (])").clicked() {
+        if c.add_enabled(!self.timeline.transitions.is_empty(), round("⏩")).on_hover_text("Next transition (])").clicked() {
             if let Some(k) = self.timeline.transitions.iter().position(|t| t.start_sec > self.position + 0.5) {
                 self.selection = Selection::Transition(k);
                 out.push(StudioAction::Seek(self.timeline.transitions[k].start_sec));
@@ -1210,38 +1212,14 @@ fn card(ui: &mut Ui, w: f32, add: impl FnOnce(&mut Ui)) {
     });
 }
 
-#[derive(Clone, Copy)]
-struct OrderDrag(usize);
-
 pub(crate) fn set_point(tr: &mut Transition, side: Side, param: Param, x: f32, v: f32) {
-    let lane = match tr.lanes.iter_mut().find(|l| l.side == side && l.param == param) {
-        Some(l) => l,
-        None => {
-            tr.lanes.push(clubcraft_core::Lane::new(side, param, &[(0.0, param.neutral()), (tr.beats as f32, param.neutral())]));
-            tr.lanes.last_mut().unwrap()
-        }
-    };
+    if !tr.lanes.iter().any(|l| l.side == side && l.param == param) {
+        tr.lanes.push(clubcraft_core::Lane::new(side, param, &[(0.0, param.neutral()), (tr.beats as f32, param.neutral())]));
+    }
+    let Some(lane) = tr.lanes.iter_mut().find(|l| l.side == side && l.param == param) else { return };
     lane.points.retain(|p| (p.0 - x).abs() > 0.25);
     lane.points.push((x, v));
     lane.points.sort_by(|a, b| a.0.total_cmp(&b.0));
-}
-
-pub(crate) fn scale_lanes(l: &[clubcraft_core::Lane], from: f32, to: f32) -> Vec<clubcraft_core::Lane> {
-    l.iter().map(|lane| clubcraft_core::Lane { side: lane.side, param: lane.param, points: lane.points.iter().map(|(x, y)| (x / from * to, *y)).collect() }).collect()
-}
-
-fn short_style(s: TransitionStyle) -> &'static str {
-    match s {
-        TransitionStyle::StemBlend => "Stems",
-        TransitionStyle::BassSwap => "Bass swap",
-        TransitionStyle::Crossfade => "Fade",
-        TransitionStyle::VocalOver => "Vocal over",
-        TransitionStyle::FilterOut => "Filter",
-        TransitionStyle::EchoOut => "Echo",
-        TransitionStyle::Cut => "Cut",
-        TransitionStyle::Mashup => "Mashup",
-        TransitionStyle::Custom => "Custom",
-    }
 }
 
 pub fn truncate(s: &str, n: usize) -> String {

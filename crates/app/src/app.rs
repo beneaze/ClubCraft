@@ -114,9 +114,9 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> App {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> anyhow::Result<App> {
         theme::apply(&cc.egui_ctx);
-        let lib = Library::open_default().expect("open library");
+        let lib = Library::open_default()?;
         let mut sh = Shared { deck_count: 2, ..Default::default() };
         sh.reload(&lib);
         let prefs = crate::prefs::Prefs::load();
@@ -152,7 +152,7 @@ impl App {
         if let Some(m) = last_mix.and_then(|id| app.lib.mix(id).ok().flatten()) {
             app.studio.set_mix(m);
         }
-        app
+        Ok(app)
     }
 
     fn handle_events(&mut self, ctx: &egui::Context) {
@@ -435,7 +435,7 @@ impl App {
         self.studio.render_progress = Some((pe.total - missing) as f32 / pe.total.max(1) as f32);
         self.studio.render_label = format!("Stems {}/{}", pe.total - missing, pe.total);
         if missing == 0 || self.jobs.pending() == 0 {
-            let pe = self.pending_export.take().unwrap();
+            let Some(pe) = self.pending_export.take() else { return };
             self.studio.render_label.clear();
             self.eng.export_mix(&self.studio.mix, pe.out, &self.sh);
             self.status = if missing == 0 { "Stems ready, rendering mix…".into() } else { format!("Rendering mix ({missing} track(s) without stems imitate them with volume and EQ)…") };
@@ -939,7 +939,7 @@ impl App {
             } else if resp.hovered() {
                 p.rect_filled(r, 7.0, theme::SEG_HOVER);
             }
-            let col = if sel { theme::TEXT } else if resp.hovered() { theme::TEXT } else { theme::TEXT_DIM };
+            let col = if sel || resp.hovered() { theme::TEXT } else { theme::TEXT_DIM };
             p.text(r.center(), Align2::CENTER_CENTER, name, FontId::proportional(13.5), col);
             if resp.clicked() {
                 self.view = v;

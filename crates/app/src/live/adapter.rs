@@ -191,7 +191,7 @@ impl LiveSeparator {
                             }
                         }
                     }
-                    let s = &sep.as_ref().unwrap().1;
+                    let Some((_, s)) = sep.as_ref() else { continue };
                     // stop early when the deck unloads the track (only our Arc is left)
                     let target = job.target.clone();
                     let cancel = job.cancel.clone();
@@ -212,7 +212,8 @@ impl LiveSeparator {
                     }
                 }
             })
-            .expect("spawn live separator");
+            .map_err(|e| log::error!("live stems: cannot start the separator thread: {e}"))
+            .ok();
         LiveSeparator { tx, done: drx, quality }
     }
 
@@ -638,7 +639,6 @@ impl LiveEngine {
                     self.stop_mix(LIVE_DECKS);
                 }
             }
-            A::AutomixQueue(ids) => self.automix_queue = ids,
         }
     }
 }
@@ -765,7 +765,6 @@ pub fn mixer_ui(st: &EngineState, eng: &LiveEngine) -> MixerUi {
             let i = h.stream_info();
             format!("{} · {} Hz", i.device, i.sample_rate)
         }).or_else(|| eng.error.clone()).unwrap_or_default(),
-        cpu: st.cpu_load,
     }
 }
 

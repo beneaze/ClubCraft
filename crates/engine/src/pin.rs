@@ -7,6 +7,7 @@
 //! track in use, and unlocks them once nothing plays the track any more. It runs on an
 //! ordinary thread: locking faults the pages in there, never on the audio thread.
 
+use crate::sys::{lock, unlock};
 use crate::track::LoadedTrack;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -66,7 +67,7 @@ impl MemoryPinner {
                 self.pinned.insert(k, Pinned { track: t.clone(), chunks: vec![false; n], bytes: audio });
                 self.bytes += audio;
             }
-            let p = self.pinned.get_mut(&k).unwrap();
+            let Some(p) = self.pinned.get_mut(&k) else { continue };
             let Some(st) = t.stems.as_ref() else { continue };
             for (i, done) in p.chunks.iter_mut().enumerate() {
                 if *done {
@@ -119,30 +120,3 @@ fn unlock_track(t: &LoadedTrack, chunks: &[bool]) {
     }
 }
 
-fn lock<T>(v: &[T]) -> bool {
-    if v.is_empty() {
-        return true;
-    }
-    #[cfg(unix)]
-    {
-        // SAFETY: the range is a live allocation; mlock only changes its residency.
-        unsafe { libc::mlock(v.as_ptr().cast(), std::mem::size_of_val(v)) == 0 }
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
-}
-
-fn unlock<T>(v: &[T]) {
-    if v.is_empty() {
-        return;
-    }
-    #[cfg(unix)]
-    {
-        // SAFETY: as in `lock`.
-        unsafe {
-            libc::munlock(v.as_ptr().cast(), std::mem::size_of_val(v));
-        }
-    }
-}

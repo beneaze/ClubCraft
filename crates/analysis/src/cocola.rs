@@ -202,7 +202,7 @@ impl Cocola {
         let d = clubcraft_core::paths::models_dir();
         let wb = std::fs::read(d.join("cocola_w.bin")).context("read cocola_w.bin")?;
         anyhow::ensure!(wb.len() == DIM * DIM * 4, "cocola_w.bin has the wrong size");
-        let w = wb.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
+        let w = wb.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect();
         let session = ort::session::Session::builder()?
             .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)?
             .with_intra_threads(4)?
@@ -229,7 +229,7 @@ impl Cocola {
             let t = ort::value::Tensor::from_array((vec![chunk.len(), 2, N_MELS, FRAMES], data))?;
             let outputs = self.session.run(ort::inputs!["features" => t]?)?;
             let (_, e) = outputs["embedding"].try_extract_raw_tensor::<f32>()?;
-            out.extend(e.chunks_exact(DIM).map(|c| c.to_vec()));
+            out.extend(e.as_chunks::<DIM>().0.iter().map(|c| c.to_vec()));
         }
         Ok(out)
     }

@@ -117,7 +117,6 @@ pub struct MixerUi {
     pub master_bpm: Option<f64>,
     pub automix: bool,
     pub output_name: String,
-    pub cpu: f32,
 }
 
 /// Stem helpers that map onto stem gains.
@@ -127,7 +126,6 @@ pub enum StemPreset {
     Acapella,
     Instrumental,
     DrumsOnly,
-    NoDrums,
 }
 
 impl StemPreset {
@@ -137,7 +135,6 @@ impl StemPreset {
             StemPreset::Acapella => [0.0, 0.0, 0.0, 1.0],
             StemPreset::Instrumental => [1.0, 1.0, 1.0, 0.0],
             StemPreset::DrumsOnly => [1.0, 0.0, 0.0, 0.0],
-            StemPreset::NoDrums => [0.0, 1.0, 1.0, 1.0],
         }
     }
 }
@@ -190,11 +187,10 @@ pub enum LiveAction {
     HeadphoneVol(f32),
     Record(bool),
     Automix(bool),
-    AutomixQueue(Vec<TrackId>),
 }
 
 impl Default for MixerUi {
     fn default() -> Self {
-        MixerUi { crossfader: 0.0, master: 0.8, headphone_mix: 0.0, headphone_vol: 0.7, master_vu: [0.0; 2], recording: false, record_secs: 0.0, master_bpm: None, automix: false, output_name: String::new(), cpu: 0.0 }
+        MixerUi { crossfader: 0.0, master: 0.8, headphone_mix: 0.0, headphone_vol: 0.7, master_vu: [0.0; 2], recording: false, record_secs: 0.0, master_bpm: None, automix: false, output_name: String::new() }
     }
 }

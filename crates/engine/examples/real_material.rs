@@ -3,6 +3,7 @@
 //! long-term spectrum (semitones). Optionally writes the keylocked result for listening.
 //!
 //! `cargo run --release -p clubcraft-engine --example real_material -- <file.mp3> [out_dir]`
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // developer tool: failing loudly is fine
 use clubcraft_engine::*;
 use rustfft::{num_complex::Complex, FftPlanner};
 use std::sync::Arc;

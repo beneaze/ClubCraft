@@ -1,5 +1,6 @@
 //! Checks the Rust STFT and the backends against reference tensors exported from PyTorch
 //! (`models/htdemucs_ref_*.npy`). Skipped when the models are not present.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // tests fail by panicking
 
 use clubcraft_stems::backend::{self, BackendKind, SourceOut};
 use clubcraft_stems::npy::read_npy;

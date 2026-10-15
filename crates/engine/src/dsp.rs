@@ -259,7 +259,7 @@ impl Eq3 {
     }
 
     pub fn process(&mut self, buf: &mut [f32]) {
-        for f in buf.chunks_exact_mut(2) {
+        for f in buf.as_chunks_mut::<2>().0 {
             let gl = self.gains[0].next();
             let gm = self.gains[1].next();
             let gh = self.gains[2].next();
@@ -375,7 +375,7 @@ impl DjFilter {
             }
             return;
         }
-        for f in buf.chunks_exact_mut(2) {
+        for f in buf.as_chunks_mut::<2>().0 {
             if self.counter == 0 {
                 let k = self.knob.value;
                 self.update(k);
@@ -416,7 +416,7 @@ impl Meter {
     }
 
     pub fn process(&mut self, buf: &[f32]) {
-        for f in buf.chunks_exact(2) {
+        for f in buf.as_chunks::<2>().0 {
             for c in 0..2 {
                 let a = f[c].abs();
                 self.peak[c] = if a > self.peak[c] { a } else { self.peak[c] * self.peak_fall };
@@ -499,7 +499,7 @@ impl Limiter {
         // Detection margin for inter-sample peaks the 4x estimate misses and for gain changes
         // between neighbouring samples.
         let det_ceil = ceil * 0.985;
-        for f in buf.chunks_exact_mut(2) {
+        for f in buf.as_chunks_mut::<2>().0 {
             let x = [f[0], f[1]];
             // Sample s = hist[1]; its right-hand interval (hist[1], hist[2]) needs x as well.
             let mut ip_right = [0f32; 2];

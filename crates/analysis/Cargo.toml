@@ -26,3 +26,6 @@ ort-sys = { version = "=2.0.0-rc.9", default-features = false, optional = true }
 serde_json.workspace = true
 env_logger.workspace = true
 clubcraft-stems.workspace = true
+
+[lints]
+workspace = true

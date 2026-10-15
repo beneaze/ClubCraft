@@ -1305,7 +1305,7 @@ impl Deck {
         if !self.xf_active {
             return;
         }
-        for f in out.chunks_exact_mut(2) {
+        for f in out.as_chunks_mut::<2>().0 {
             if self.xf_idx >= XF_LEN {
                 self.xf_active = false;
                 break;
@@ -1480,7 +1480,7 @@ impl Deck {
         }
         let nominal = rate * n as f64;
         let mut d = self.feed_distance(self.feed_map(p_end + la));
-        if !(d >= 0.0) || (d - nominal).abs() > (nominal * 0.1).max(24.0) {
+        if d.is_nan() || d < 0.0 || (d - nominal).abs() > (nominal * 0.1).max(24.0) {
             // unpredictable discontinuity: crossfade out and re-prime
             self.capture_tail();
             self.stretch_restart(rate);
@@ -1649,7 +1649,7 @@ impl Deck {
                 Path::Vari => {
                     self.render_vari(o, seg, rate, true);
                     if !self.vari_gain.settled() || self.vari_gain.value != 1.0 {
-                        for f in o.chunks_exact_mut(2) {
+                        for f in o.as_chunks_mut::<2>().0 {
                             let g = self.vari_gain.next();
                             f[0] *= g;
                             f[1] *= g;
@@ -1855,7 +1855,7 @@ mod tests {
         }
         // and the loop body equals the source (outside the declick region)
         let pos = deck.position();
-        assert!(pos >= 2.0 && pos < 2.5);
+        assert!((2.0..2.5).contains(&pos));
         // fractional loop length (128 BPM, 20671.875 frames per beat): 8 loops = 165375 frames
         let audio = Arc::new(buffer_from_mono(44100, &l));
         let mut deck = Deck::new(44100);

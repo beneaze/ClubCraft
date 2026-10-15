@@ -23,6 +23,7 @@
 //!   structure is evaluated with rules and with the model
 //! * `--jobs <n>`          tracks analysed in parallel (default 4; use 1-2 with stems / model)
 //! * `-v`                  per-track detail (cues; `*` = slot-less marker)
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // developer tool: failing loudly is fine
 
 #[path = "common/mod.rs"]
 mod common;

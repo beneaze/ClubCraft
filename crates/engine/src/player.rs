@@ -138,7 +138,7 @@ impl MixPlayer {
     /// Eager player: loads every track now (they stay resident while the player lives).
     pub fn new(mix: &Mix, tracks: &dyn Fn(TrackId) -> Option<Arc<LoadedTrack>>, decks: [DeckId; 2]) -> Result<Self> {
         let s = MixSchedule::new(mix, tracks, decks)?;
-        let eager: Vec<Arc<LoadedTrack>> = s.slots.iter().map(|t| t.clone().expect("eager slot")).collect();
+        let eager: Vec<Arc<LoadedTrack>> = s.slots.iter().cloned().collect::<Option<_>>().ok_or_else(|| anyhow::anyhow!("a track of the mix is not loaded"))?;
         let analyses = s.track_ids.iter().zip(eager.iter()).map(|(id, t)| (*id, t.analysis())).collect();
         Ok(Self::with(mix, decks, s, analyses, Some(eager)))
     }
@@ -321,12 +321,13 @@ impl MixPlayer {
         };
         let w = window_at(&self.timeline, t);
         status.wanted = w.clone();
-        if self.prefetch.is_none() {
-            self.prefetch = Some(Prefetcher::new()?);
-        }
+        let pf = match self.prefetch.take() {
+            Some(pf) => pf,
+            None => Prefetcher::new()?,
+        };
+        let pf = &*self.prefetch.insert(pf);
         let resident = |i: usize| ours && state.mix.is_resident(i);
         let wanted_ids: Vec<TrackId> = w.clone().map(|i| self.track_ids[i]).collect();
-        let pf = self.prefetch.as_ref().expect("prefetcher");
         *pf.want.lock() = wanted_ids.clone();
         self.sent.retain(|(i, at)| at.elapsed() < Duration::from_secs(1) && !resident(*i));
         // finished loads → audio thread
@@ -352,11 +353,10 @@ impl MixPlayer {
         if ours {
             for i in w.clone() {
                 let id = self.track_ids[i];
-                if !resident(i) && !self.sent.iter().any(|(j, _)| *j == i) && !self.in_flight.contains(&id) && !self.failed.contains(&id) {
-                    if pf.jobs.send(Job { id, loader: loader.clone() }).is_ok() {
+                if !resident(i) && !self.sent.iter().any(|(j, _)| *j == i) && !self.in_flight.contains(&id) && !self.failed.contains(&id)
+                    && pf.jobs.send(Job { id, loader: loader.clone() }).is_ok() {
                         self.in_flight.push(id);
                     }
-                }
             }
         }
         status.loading = w.filter(|i| self.in_flight.contains(&self.track_ids[*i])).collect();

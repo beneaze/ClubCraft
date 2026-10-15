@@ -57,7 +57,7 @@ impl WorkerContext {
             log::info!("stem separator: {} on {}", s.model_name(), s.backend_name());
             self.separator = Some((q, s));
         }
-        Ok(&self.separator.as_ref().unwrap().1)
+        self.separator.as_ref().map(|(_, s)| s).ok_or_else(|| anyhow::anyhow!("no stem separator"))
     }
 }
 
@@ -193,7 +193,9 @@ fn mashup_features_from(stems: &clubcraft_analysis::StemsRef, grid: clubcraft_co
 
 fn save_mashup_features(hash: &str, f: &clubcraft_analysis::mashup::MashupFeatures) -> Result<()> {
     let p = mashup_features_path(hash);
-    std::fs::create_dir_all(p.parent().unwrap())?;
+    if let Some(d) = p.parent() {
+        std::fs::create_dir_all(d)?;
+    }
     std::fs::write(&p, f.to_bytes())?;
     Ok(())
 }

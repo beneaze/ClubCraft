@@ -11,21 +11,14 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Stage {
-    Import,
-    Separate,
-    Analyze,
-}
-
 #[derive(Debug, Clone)]
 pub enum Event {
     /// Library contents changed (new tracks).
     LibraryChanged,
     /// A track's analysis / stems were (re)written.
     TrackUpdated(TrackId),
-    Progress { track: Option<TrackId>, stage: Stage, frac: f32, label: String },
-    Finished { track: Option<TrackId>, stage: Stage },
+    Progress { track: Option<TrackId>, frac: f32, label: String },
+    Finished { track: Option<TrackId> },
     Error { track: Option<TrackId>, message: String },
 }
 
@@ -71,7 +64,6 @@ impl Queue {
 
 #[derive(Default, Clone, Debug)]
 pub struct JobStatus {
-    pub stage: Option<Stage>,
     pub frac: f32,
     pub label: String,
 }
@@ -102,12 +94,13 @@ impl Jobs {
             std::thread::Builder::new()
                 .name(format!("cc-analysis-{i}"))
                 .spawn(move || worker(q, g, tx, st, cn, false))
-                .expect("spawn worker");
+                .map_err(|e| log::error!("cannot start the analysis worker: {e}"))
+                .ok();
         }
         // One separation worker: the GPU is the bottleneck, and models are large.
         {
             let (q, c, tx, st, cn) = (gpu.clone(), cpu.clone(), tx.clone(), settings.clone(), cancel.clone());
-            std::thread::Builder::new().name("cc-stems".into()).spawn(move || worker(q, c, tx, st, cn, true)).expect("spawn stems worker");
+            std::thread::Builder::new().name("cc-stems".into()).spawn(move || worker(q, c, tx, st, cn, true)).map_err(|e| log::error!("cannot start the stems worker: {e}")).ok();
         }
         Jobs { tx, rx, cpu, gpu, settings, active: HashMap::new(), log: VecDeque::new(), cancel }
     }
@@ -160,8 +153,8 @@ impl Jobs {
         let mut out = Vec::new();
         while let Ok(e) = self.rx.try_recv() {
             match &e {
-                Event::Progress { track, stage, frac, label } => {
-                    self.active.insert(*track, JobStatus { stage: Some(*stage), frac: *frac, label: label.clone() });
+                Event::Progress { track, frac, label } => {
+                    self.active.insert(*track, JobStatus { frac: *frac, label: label.clone() });
                 }
                 Event::Finished { track, .. } => {
                     self.active.remove(track);
@@ -229,7 +222,6 @@ fn worker(q: Arc<Queue>, other: Arc<Queue>, tx: Sender<Event>, settings: Arc<Mut
                 for (i, f) in files.iter().enumerate() {
                     let _ = tx.send(Event::Progress {
                         track: None,
-                        stage: Stage::Import,
                         frac: i as f32 / n.max(1) as f32,
                         label: format!("Importing {}/{}", i + 1, n),
                     });
@@ -256,7 +248,7 @@ fn worker(q: Arc<Queue>, other: Arc<Queue>, tx: Sender<Event>, settings: Arc<Mut
                     }
                 }
                 let _ = tx.send(Event::LibraryChanged);
-                let _ = tx.send(Event::Finished { track: None, stage: Stage::Import });
+                let _ = tx.send(Event::Finished { track: None });
             }
             Job::Separate(id, quality) => {
                 let _heavy = heavy();
@@ -265,11 +257,11 @@ fn worker(q: Arc<Queue>, other: Arc<Queue>, tx: Sender<Event>, settings: Arc<Mut
                     None => s.clone(),
                 };
                 let r = pipeline::separate(&lib, &mut ctx, id, &s, &cancel, &mut |frac, label| {
-                    let _ = tx.send(Event::Progress { track: Some(id), stage: Stage::Separate, frac, label: label.to_string() });
+                    let _ = tx.send(Event::Progress { track: Some(id), frac, label: label.to_string() });
                 });
                 match r {
                     Ok(()) => {
-                        let _ = tx.send(Event::Finished { track: Some(id), stage: Stage::Separate });
+                        let _ = tx.send(Event::Finished { track: Some(id) });
                         let _ = tx.send(Event::TrackUpdated(id));
                     }
                     Err(e) => {
@@ -285,11 +277,11 @@ fn worker(q: Arc<Queue>, other: Arc<Queue>, tx: Sender<Event>, settings: Arc<Mut
                 let has_stems = lib.track(id).ok().flatten().is_some_and(|t| clubcraft_core::library::stems_path(&t.hash).exists());
                 let _heavy = if has_stems { Some(heavy()) } else { None };
                 let r = pipeline::analyze(&lib, id, &s, &mut |frac, label| {
-                    let _ = tx.send(Event::Progress { track: Some(id), stage: Stage::Analyze, frac, label: label.to_string() });
+                    let _ = tx.send(Event::Progress { track: Some(id), frac, label: label.to_string() });
                 });
                 match r {
                     Ok(()) => {
-                        let _ = tx.send(Event::Finished { track: Some(id), stage: Stage::Analyze });
+                        let _ = tx.send(Event::Finished { track: Some(id) });
                         let _ = tx.send(Event::TrackUpdated(id));
                     }
                     Err(e) => {

@@ -117,11 +117,10 @@ pub fn curve_ui(ui: &mut Ui, id: Id, c: &Curve, points: &mut Vec<(f32, f32)>) ->
         if r.drag_stopped() {
             ui.data_mut(|d| d.remove::<Active>(id));
         }
-        if (r.double_clicked() || r.secondary_clicked()) && near_point.is_some() {
+        if let Some(k) = near_point.filter(|_| r.double_clicked() || r.secondary_clicked()) {
             if points.is_empty() {
                 *points = shown.clone();
             }
-            let k = near_point.unwrap();
             if k < points.len() && points.len() > 1 {
                 points.remove(k);
                 changed = true;
@@ -228,7 +227,7 @@ fn move_step(points: &mut [(f32, f32)], i: usize, px: f32, c: &Curve, fine: bool
 
 /// Move point `k` to the pointer, between its neighbours. A point of a hard switch takes its twin
 /// along sideways. Returns the point's index.
-fn move_point(points: &mut Vec<(f32, f32)>, k: usize, q: Pos2, c: &Curve, fine: bool, from_y: &dyn Fn(f32) -> f32) -> Option<usize> {
+fn move_point(points: &mut [(f32, f32)], k: usize, q: Pos2, c: &Curve, fine: bool, from_y: &dyn Fn(f32) -> f32) -> Option<usize> {
     let mut v = from_y(q.y);
     let snaps: &[f32] = if c.centered { &[0.0, 0.5, 1.0] } else { &[0.0, 1.0] };
     if let Some(s) = snaps.iter().find(|s| (v - **s).abs() < 0.03) {

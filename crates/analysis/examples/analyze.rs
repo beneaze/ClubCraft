@@ -3,6 +3,7 @@
 //! `cargo run --release -p clubcraft-analysis --example analyze -- <file> [--stems <dir>]`
 //!
 //! `--stems <dir>`: directory with drums/bass/other/vocals.{wav,mp3,flac} (e.g. Demucs output).
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // developer tool: failing loudly is fine
 
 #[path = "common/mod.rs"]
 mod common;

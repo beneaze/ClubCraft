@@ -266,11 +266,8 @@ fn open_stream(
     };
     let stream_config = cpal::StreamConfig { channels, sample_rate: sr, buffer_size };
     let ch = channels as usize;
-    let cell = std::cell::UnsafeCell::new(Some(side));
-    struct SendCell(std::cell::UnsafeCell<Option<Box<AudioSide>>>);
-    // SAFETY: only the audio callback touches the cell after construction.
-    unsafe impl Send for SendCell {}
-    let cell = SendCell(cell);
+    // owned by the audio callback from here on
+    let mut slot = Some(side);
     let mut ret = Some(ret);
     let mut load = 0f32;
     let mut health = crate::state::AudioHealth::default();
@@ -282,8 +279,6 @@ fn open_stream(
     let data_cb = move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
         let t0 = Instant::now();
         let faults0 = major_faults();
-        // SAFETY: exclusive access from the callback.
-        let slot = unsafe { &mut *cell.0.get() };
         if eject.load(Ordering::Acquire) {
             if let (Some(s), Some(r)) = (slot.take(), ret.as_mut()) {
                 let _ = r.push(s);
@@ -491,14 +486,5 @@ impl Drop for EngineHandle {
 
 /// Page faults of the process so far (memory read back from swap, disk or the compressor).
 fn major_faults() -> i64 {
-    #[cfg(unix)]
-    {
-        // SAFETY: getrusage only writes the struct.
-        let mut u: libc::rusage = unsafe { std::mem::zeroed() };
-        if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut u) } == 0 {
-            // minor faults include pages macOS decompresses from its memory compressor
-            return u.ru_majflt as i64 + u.ru_minflt as i64;
-        }
-    }
-    0
+    crate::sys::page_faults()
 }

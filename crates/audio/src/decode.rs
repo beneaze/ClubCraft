@@ -48,7 +48,7 @@ impl AudioBuffer {
         let n = data.len() / 2;
         let mut left = Vec::with_capacity(n);
         let mut right = Vec::with_capacity(n);
-        for f in data.chunks_exact(2) {
+        for f in data.as_chunks::<2>().0 {
             left.push(f[0]);
             right.push(f[1]);
         }

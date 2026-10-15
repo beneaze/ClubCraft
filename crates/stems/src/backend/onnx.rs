@@ -55,6 +55,7 @@ fn shared_arena() -> bool {
             // SAFETY: valid env / memory-info pointers; a null arena config selects the defaults.
             let status = unsafe { f(env.ptr().cast_mut(), mi.ptr(), std::ptr::null()) };
             if !status.is_null() {
+                // SAFETY: `status` is a non-null error from the call above; its message is read before it is released.
                 let msg = unsafe {
                     let m = api.GetErrorMessage.map(|g| g(status)).unwrap_or(std::ptr::null());
                     let s = if m.is_null() { "unknown".to_string() } else { std::ffi::CStr::from_ptr(m).to_string_lossy().into_owned() };

@@ -192,7 +192,7 @@ impl Echo {
         let hpc = 0.02f32;
         let inv = if n > 1 { 1.0 / (n - 1) as f32 } else { 0.0 };
         let mut e = 0f32;
-        for (i, f) in buf.chunks_exact_mut(2).enumerate() {
+        for (i, f) in buf.as_chunks_mut::<2>().0.iter_mut().enumerate() {
             let g = input.0 + (input.1 - input.0) * i as f32 * inv;
             let d = self.time.next();
             let y = self.line.read(d);
@@ -288,7 +288,7 @@ impl Reverb {
         let n = buf.len() / 2;
         let inv = if n > 1 { 1.0 / (n - 1) as f32 } else { 0.0 };
         let mut e = 0f32;
-        for (i, f) in buf.chunks_exact_mut(2).enumerate() {
+        for (i, f) in buf.as_chunks_mut::<2>().0.iter_mut().enumerate() {
             let g = input.0 + (input.1 - input.0) * i as f32 * inv;
             let x = (f[0] + f[1]) * 0.015 * g;
             let mut y = [0f32; 2];
@@ -443,7 +443,7 @@ impl FxSlot {
         let sr = ctx.sr;
         let period = self.beats as f64;
         let mut fp = self.flanger_phase;
-        for (i, f) in buf.chunks_exact_mut(2).enumerate() {
+        for (i, f) in buf.as_chunks_mut::<2>().0.iter_mut().enumerate() {
             let ph = self.lfo_phase(ctx, i, period, &mut fp);
             let lfo = 0.5 - 0.5 * (std::f64::consts::TAU * ph).cos();
             let d = (0.0007 + 0.004 * depth as f64 * lfo) as f32 * sr;
@@ -460,7 +460,7 @@ impl FxSlot {
         let depth = self.params[1].clamp(0.0, 1.0) as f64;
         let period = self.beats as f64;
         let mut fp = self.lfo_phase;
-        for (i, f) in buf.chunks_exact_mut(2).enumerate() {
+        for (i, f) in buf.as_chunks_mut::<2>().0.iter_mut().enumerate() {
             let ph = self.lfo_phase(ctx, i, period, &mut fp);
             if self.counter == 0 {
                 let lfo = 0.5 - 0.5 * (std::f64::consts::TAU * ph).cos();
@@ -482,7 +482,7 @@ impl FxSlot {
         let period = self.beats as f64;
         let coef = 1.0 - (-1.0 / (0.0015 * ctx.sr)).exp();
         let mut fp = self.lfo_phase;
-        for (i, f) in buf.chunks_exact_mut(2).enumerate() {
+        for (i, f) in buf.as_chunks_mut::<2>().0.iter_mut().enumerate() {
             let ph = self.lfo_phase(ctx, i, period, &mut fp);
             let target = if ph < duty { 1.0 } else { floor };
             self.gate_env += (target - self.gate_env) * coef;
@@ -495,7 +495,7 @@ impl FxSlot {
     fn roll(&mut self, buf: &mut [f32], ctx: &FxCtx) {
         let r = &mut self.roll;
         let len = (ctx.beat_frames(self.beats as f64) as usize).clamp(16, r.buf.len());
-        for (i, f) in buf.chunks_exact_mut(2).enumerate() {
+        for (i, f) in buf.as_chunks_mut::<2>().0.iter_mut().enumerate() {
             if r.state == 1 {
                 // wait for the grid boundary of the roll length
                 let start = match ctx.beat {
@@ -539,7 +539,7 @@ impl FxSlot {
         let bits = 2.0 + (1.0 - self.params[0].clamp(0.0, 1.0)) * 14.0;
         let steps = 2f32.powf(bits - 1.0);
         let ds = 1.0 + self.params[1].clamp(0.0, 1.0) * 39.0;
-        for f in buf.chunks_exact_mut(2) {
+        for f in buf.as_chunks_mut::<2>().0 {
             self.crush_cnt += 1.0;
             if self.crush_cnt >= ds {
                 self.crush_cnt -= ds;

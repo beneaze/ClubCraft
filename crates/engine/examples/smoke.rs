@@ -1,5 +1,6 @@
 //! Real-device smoke test: plays a quiet (−32 dBFS) 440 Hz tone for ~1.2 s through deck A,
 //! prints the opened stream and engine state. `cargo run --release -p clubcraft-engine --example smoke`
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // developer tool: failing loudly is fine
 use clubcraft_engine::*;
 use std::sync::Arc;
 use std::time::Duration;

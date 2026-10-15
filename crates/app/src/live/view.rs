@@ -39,7 +39,6 @@ pub struct LiveView {
     held: Option<(usize, u8, PadMode)>,
     cue_held: Option<usize>,
     scrubbing: Option<usize>,
-    pub browser_height: f32,
 }
 
 impl Default for LiveView {
@@ -51,7 +50,6 @@ impl Default for LiveView {
             held: None,
             cue_held: None,
             scrubbing: None,
-            browser_height: 260.0,
         }
     }
 }
@@ -235,7 +233,7 @@ impl LiveView {
         ui.add_space(2.0);
         // ---- body: [pitch] transport | pads | (pitch for deck B on the right)
         ui.horizontal_top(|ui| {
-            if i % 2 == 0 {
+            if i.is_multiple_of(2) {
                 self.pitch_col(ui, i, d, out);
             }
             self.transport(ui, i, d, out);

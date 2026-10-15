@@ -95,12 +95,7 @@ pub fn waveform(audio: &AudioBuffer, stems: Option<StemsRef>) -> Waveform {
             .map(|(l, r)| stereo_peaks(l, r, bins))
             .collect();
         let mut it = v.into_iter();
-        [
-            it.next().unwrap(),
-            it.next().unwrap(),
-            it.next().unwrap(),
-            it.next().unwrap(),
-        ]
+        std::array::from_fn(|_| it.next().unwrap_or_default())
     });
     Waveform {
         rate: sr / BIN as f64,

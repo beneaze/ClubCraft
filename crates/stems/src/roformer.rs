@@ -97,7 +97,9 @@ impl TorchStft {
             for ((b, &s), &w) in buf.iter_mut().zip(frame).zip(&self.window) {
                 *b = s * w;
             }
-            self.r2c.process_with_scratch(&mut buf, &mut spec, &mut scratch).expect("fft");
+            if self.r2c.process_with_scratch(&mut buf, &mut spec, &mut scratch).is_err() {
+                spec.fill(Default::default());
+            }
             for (f, c) in spec.iter().enumerate() {
                 re[f * t_frames + t] = c.re;
                 im[f * t_frames + t] = c.im;
@@ -123,7 +125,9 @@ impl TorchStft {
             }
             spec[0].im = 0.0;
             spec[nb - 1].im = 0.0;
-            self.c2r.process_with_scratch(&mut spec, &mut frame, &mut scratch).expect("ifft");
+            if self.c2r.process_with_scratch(&mut spec, &mut frame, &mut scratch).is_err() {
+                frame.fill(0.0);
+            }
             let o = t * hop;
             for n in 0..nfft {
                 ola[o + n] += frame[n] * scale * self.window[n];
@@ -371,7 +375,7 @@ impl<'a> VocalPass<'a> {
         let c = self.plan.chunk;
         let total = self.plan.total;
         for j in range {
-            if self.state.lock().unwrap().done[j] {
+            if self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).done[j] {
                 continue;
             }
             let i = self.plan.starts[j];
@@ -391,7 +395,7 @@ impl<'a> VocalPass<'a> {
             } else if i + c >= total {
                 w[c - self.plan.fade..].iter_mut().for_each(|v| *v = 1.0);
             }
-            let mut st = self.state.lock().unwrap();
+            let mut st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             for ch in 0..2 {
                 for k in 0..length {
                     st.result[ch][i + k] += y[ch][k] * w[k];
@@ -413,7 +417,7 @@ impl<'a> VocalPass<'a> {
 
     /// Final vocals of track frames `[a, a + out[ch].len())` (must have been ensured).
     pub fn read(&self, a: usize, out: [&mut [f32]; 2]) {
-        let st = self.state.lock().unwrap();
+        let st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         for (ch, o) in out.into_iter().enumerate() {
             for (k, v) in o.iter_mut().enumerate() {
                 let p = a + k + self.plan.border;

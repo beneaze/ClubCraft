@@ -13,3 +13,6 @@ log.workspace = true
 rusqlite = { version = "0.40", features = ["bundled"] }
 dirs = "6"
 blake3 = "1"
+
+[lints]
+workspace = true

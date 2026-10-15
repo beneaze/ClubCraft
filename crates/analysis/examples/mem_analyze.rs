@@ -1,4 +1,5 @@
 //! Peak-memory probe: `cargo run --release -p clubcraft-analysis --example mem_analyze -- <audio> <stems.flac> [rules]`
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // developer tool: failing loudly is fine
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let audio = clubcraft_audio::decode_file(a[1].as_ref(), 44100).unwrap();

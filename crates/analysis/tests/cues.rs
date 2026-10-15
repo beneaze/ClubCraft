@@ -1,4 +1,5 @@
 //! Cue rules on a hand-built extended-mix structure.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // tests fail by panicking
 
 use clubcraft_analysis::cues;
 use clubcraft_analysis::structure::BarFeatures;

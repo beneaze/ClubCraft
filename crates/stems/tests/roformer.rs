@@ -1,5 +1,6 @@
 //! Mel-Band RoFormer: Rust STFT/gather/scatter/iSTFT and the backends against PyTorch references
 //! (`models/melroformer_ref_*.npy`, written by `export_melroformer.py --reference`).
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // tests fail by panicking
 
 use clubcraft_stems::npy::read_npy;
 use clubcraft_stems::roformer::Roformer;

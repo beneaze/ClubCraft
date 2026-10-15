@@ -148,7 +148,7 @@ impl Channel {
             self.gain.reset(self.gain.target);
         }
         if !(self.gain.settled() && self.gain.value == 1.0) {
-            for f in buf.chunks_exact_mut(2) {
+            for f in buf.as_chunks_mut::<2>().0 {
                 let g = self.gain.next();
                 f[0] *= g;
                 f[1] *= g;
@@ -173,7 +173,7 @@ impl Channel {
             self.fader_gain.reset(self.fader_gain.target);
             self.snap_next = false;
         }
-        for (i, f) in buf.chunks_exact(2).enumerate() {
+        for (i, f) in buf.as_chunks::<2>().0.iter().enumerate() {
             let g = self.fader_gain.next();
             post[i * 2] = f[0] * g;
             post[i * 2 + 1] = f[1] * g;
@@ -290,7 +290,7 @@ impl Mixer {
             }
         }
         self.master_gain.set(db_to_gain(self.master_gain_db));
-        for f in master.chunks_exact_mut(2) {
+        for f in master.as_chunks_mut::<2>().0 {
             let g = self.master_gain.next();
             f[0] *= g;
             f[1] *= g;

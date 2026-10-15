@@ -5,6 +5,7 @@
 
 mod app;
 mod curve_edit;
+#[allow(unsafe_code)] // AppKit view hierarchy (objc2)
 mod window_chrome;
 mod devctl;
 mod extract;
@@ -54,5 +55,5 @@ fn main() -> eframe::Result<()> {
             .with_icon(std::sync::Arc::new(eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon-256.png")).unwrap_or_default())),
         ..Default::default()
     };
-    eframe::run_native("ClubCraft", opts, Box::new(|cc| Ok(Box::new(app::App::new(cc)))))
+    eframe::run_native("ClubCraft", opts, Box::new(|cc| Ok(Box::new(app::App::new(cc)?))))
 }

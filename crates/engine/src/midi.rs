@@ -362,6 +362,11 @@ impl MidiMapper {
         Ok(MidiMapper { mapping, parsed, learn: None, learned: None, state: EngineState::default() })
     }
 
+    /// A mapper with no bindings.
+    pub fn unmapped(name: &str) -> Self {
+        MidiMapper { mapping: MidiMapping { name: name.into(), device: None, bindings: vec![] }, parsed: vec![], learn: None, learned: None, state: EngineState::default() }
+    }
+
     /// Give the mapper the latest engine state (used for toggles like keylock / pfl).
     pub fn update_state(&mut self, s: &EngineState) {
         self.state = *s;

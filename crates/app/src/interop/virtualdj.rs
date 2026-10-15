@@ -3,12 +3,12 @@
 //! are preserved) and backed up first. VirtualDJ must be closed while its database is written.
 
 use anyhow::{Context, Result};
-use clubcraft_core::{Analysis, BeatGrid, Cue, CueKind, CueSource, Key, Track};
+use clubcraft_core::{Analysis, Cue, CueKind, Key, Track};
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, Event};
 use quick_xml::{Reader, Writer};
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub struct VdjSong<'a> {
     pub track: &'a Track,
@@ -165,63 +165,68 @@ fn append_new(w: &mut Writer<Cursor<Vec<u8>>>, songs: &[VdjSong], done: &HashSet
     Ok(())
 }
 
-/// Read hot cues and beat grids from a VirtualDJ database: file path → (cues, grid).
-pub fn import(path: &Path) -> Result<HashMap<PathBuf, (Vec<Cue>, Option<BeatGrid>)>> {
-    let bytes = std::fs::read(path)?;
-    let mut r = Reader::from_reader(bytes.as_slice());
-    let mut out = HashMap::new();
-    let mut buf = Vec::new();
-    let mut cur: Option<(PathBuf, Vec<Cue>, Option<f64>, Option<f64>)> = None;
-    loop {
-        let ev = r.read_event_into(&mut buf)?;
-        match &ev {
-            Event::Eof => break,
-            Event::Start(e) if e.name().as_ref() == b"Song" => {
-                cur = attr(e, "FilePath").map(|p| (PathBuf::from(p), vec![], None, None));
-            }
-            Event::End(e) if e.name().as_ref() == b"Song" => {
-                if let Some((p, cues, spb, anchor)) = cur.take() {
-                    let grid = spb.filter(|s| *s > 0.0).map(|s| BeatGrid::new(60.0 / s, anchor.unwrap_or(0.0)));
-                    out.insert(p, (cues, grid));
-                }
-            }
-            Event::Empty(e) | Event::Start(e) if cur.is_some() => {
-                let c = cur.as_mut().unwrap();
-                match e.name().as_ref() {
-                    b"Scan" => c.2 = attr(e, "Bpm").and_then(|b| b.parse().ok()),
-                    b"Poi" => {
-                        let pos: Option<f64> = attr(e, "Pos").and_then(|p| p.parse().ok());
-                        match (attr(e, "Type").as_deref(), pos) {
-                            (Some("beatgrid"), Some(p)) => c.3 = c.3.or(Some(p)),
-                            (None | Some("cue"), Some(p)) => {
-                                let num: i32 = attr(e, "Num").and_then(|n| n.parse().ok()).unwrap_or(-1);
-                                c.1.push(Cue {
-                                    slot: if (1..=8).contains(&num) { Some(num as u8 - 1) } else { None },
-                                    kind: CueKind::Hot,
-                                    pos: p,
-                                    name: attr(e, "Name").unwrap_or_else(|| format!("Cue {num}")),
-                                    color: [230, 230, 230],
-                                    loop_beats: None,
-                                    source: CueSource::Imported,
-                                });
-                            }
-                            _ => {}
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            _ => {}
-        }
-        buf.clear();
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clubcraft_core::*;
+    use clubcraft_core::{BeatGrid, CueSource};
+    use std::path::PathBuf;
+
+    /// Hot cues and beat grids per file path, as read back from a VirtualDJ database.
+    type VdjEntries = HashMap<PathBuf, (Vec<Cue>, Option<BeatGrid>)>;
+
+    /// Read hot cues and beat grids from a VirtualDJ database: file path → (cues, grid). The tests
+    /// use it to check the export.
+    pub fn import(path: &Path) -> Result<VdjEntries> {
+        let bytes = std::fs::read(path)?;
+        let mut r = Reader::from_reader(bytes.as_slice());
+        let mut out = HashMap::new();
+        let mut buf = Vec::new();
+        let mut cur: Option<(PathBuf, Vec<Cue>, Option<f64>, Option<f64>)> = None;
+        loop {
+            let ev = r.read_event_into(&mut buf)?;
+            match &ev {
+                Event::Eof => break,
+                Event::Start(e) if e.name().as_ref() == b"Song" => {
+                    cur = attr(e, "FilePath").map(|p| (PathBuf::from(p), vec![], None, None));
+                }
+                Event::End(e) if e.name().as_ref() == b"Song" => {
+                    if let Some((p, cues, spb, anchor)) = cur.take() {
+                        let grid = spb.filter(|s| *s > 0.0).map(|s| BeatGrid::new(60.0 / s, anchor.unwrap_or(0.0)));
+                        out.insert(p, (cues, grid));
+                    }
+                }
+                Event::Empty(e) | Event::Start(e) if cur.is_some() => {
+                    let Some(c) = cur.as_mut() else { continue };
+                    match e.name().as_ref() {
+                        b"Scan" => c.2 = attr(e, "Bpm").and_then(|b| b.parse().ok()),
+                        b"Poi" => {
+                            let pos: Option<f64> = attr(e, "Pos").and_then(|p| p.parse().ok());
+                            match (attr(e, "Type").as_deref(), pos) {
+                                (Some("beatgrid"), Some(p)) => c.3 = c.3.or(Some(p)),
+                                (None | Some("cue"), Some(p)) => {
+                                    let num: i32 = attr(e, "Num").and_then(|n| n.parse().ok()).unwrap_or(-1);
+                                    c.1.push(Cue {
+                                        slot: if (1..=8).contains(&num) { Some(num as u8 - 1) } else { None },
+                                        kind: CueKind::Hot,
+                                        pos: p,
+                                        name: attr(e, "Name").unwrap_or_else(|| format!("Cue {num}")),
+                                        color: [230, 230, 230],
+                                        loop_beats: None,
+                                        source: CueSource::Imported,
+                                    });
+                                }
+                                _ => {}
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+            buf.clear();
+        }
+        Ok(out)
+    }
 
     #[test]
     fn export_merge_import() {

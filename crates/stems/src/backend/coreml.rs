@@ -27,12 +27,14 @@ fn predict(
     input: &ProtocolObject<dyn MLFeatureProvider>,
 ) -> Result<Retained<ProtocolObject<dyn MLFeatureProvider>>> {
     let _g = PREDICT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // SAFETY: `input` is a live feature provider; predictions are serialised by PREDICT_LOCK.
     unsafe { model.predictionFromFeatures_error(input).map_err(ns_err) }
 }
 
 struct Model(Retained<MLModel>);
 // SAFETY: MLModel prediction is documented thread-safe; we never mutate the model after loading.
 unsafe impl Send for Model {}
+// SAFETY: as for Send.
 unsafe impl Sync for Model {}
 
 pub struct CoreMlBackend {
@@ -112,6 +114,7 @@ unsafe fn read_sources(arr: &MLMultiArray, inner: &[usize], sources: &[usize], d
         let max_off: usize =
             sources.iter().map(|&s| s * s_stride).max().unwrap_or(0) + inner.iter().zip(&inner_strides).map(|(d, s)| (d - 1) * s).sum::<usize>();
         if (max_off + 1) * elem > size {
+            // SAFETY: `err` outlives the block: CoreML calls it synchronously, before the read returns.
             unsafe { *err_ptr = Some(format!("CoreML buffer too small ({size} bytes)")) };
             return;
         }
@@ -119,8 +122,11 @@ unsafe fn read_sources(arr: &MLMultiArray, inner: &[usize], sources: &[usize], d
             let out = dst_ptrs[k];
             let src0 = s * s_stride;
             // Iterate over all but the last dimension; the last is usually contiguous.
-            let last = *inner.last().unwrap();
-            let last_stride = *inner_strides.last().unwrap();
+            let (Some(&last), Some(&last_stride)) = (inner.last(), inner_strides.last()) else {
+                // SAFETY: as above.
+                unsafe { *err_ptr = Some("CoreML output has no dimensions".into()) };
+                return;
+            };
             let outer: usize = inner[..inner.len() - 1].iter().product();
             let mut idx = vec![0usize; inner.len() - 1];
             for o in 0..outer {
@@ -128,6 +134,7 @@ unsafe fn read_sources(arr: &MLMultiArray, inner: &[usize], sources: &[usize], d
                 for (i, &v) in idx.iter().enumerate() {
                     off += v * inner_strides[i];
                 }
+                // SAFETY: `off` + the row stay below `max_off`, checked against `size` above; `dstrow` is inside `out`, sized to the full shape.
                 unsafe {
                     let dstrow = out.add(o * last);
                     if elem == 4 {
@@ -208,6 +215,7 @@ fn load_mlmodel(path: &std::path::Path) -> Result<Retained<MLModel>> {
     if !path.exists() {
         bail!("missing {}", path.display());
     }
+    // SAFETY: plain CoreML calls on objects created here; nothing outlives the pool.
     autoreleasepool(|_| unsafe {
         let url = NSURL::fileURLWithPath_isDirectory(&NSString::from_str(&path.to_string_lossy()), true);
         let cfg = MLModelConfiguration::new();
@@ -243,6 +251,7 @@ impl super::SingleBackend for CoreMlSingle {
         if input.len() != n {
             bail!("bad input size {} (want {n})", input.len());
         }
+        // SAFETY: `wrap` borrows `input` only for this call; the prediction runs inside it.
         autoreleasepool(|_| unsafe {
             let arr = wrap(input, &self.input.1)?;
             let val: Retained<AnyObject> =
@@ -291,15 +300,20 @@ unsafe fn read_sources_shaped(arr: &MLMultiArray, shape: &[usize], dst: &mut [&m
         let base = bytes.as_ptr() as *const u8;
         let max_off: usize = shape.iter().zip(&strides).map(|(d, s)| (d - 1) * s).sum();
         if (max_off + 1) * elem > size as usize {
+            // SAFETY: `err` outlives the block: CoreML calls it synchronously, before the read returns.
             unsafe { *err_ptr = Some(format!("CoreML buffer too small ({size} bytes)")) };
             return;
         }
-        let last = *shape.last().unwrap();
-        let last_stride = *strides.last().unwrap();
+        let (Some(&last), Some(&last_stride)) = (shape.last(), strides.last()) else {
+            // SAFETY: as above.
+            unsafe { *err_ptr = Some("CoreML output has no dimensions".into()) };
+            return;
+        };
         let outer: usize = shape[..shape.len() - 1].iter().product();
         let mut idx = vec![0usize; shape.len() - 1];
         for o in 0..outer {
             let off: usize = idx.iter().zip(&strides).map(|(v, s)| v * s).sum();
+            // SAFETY: every offset is at most `max_off`, checked against `size` above; `row` is inside `out`, sized to the full shape.
             unsafe {
                 let row = ptr.add(o * last);
                 for j in 0..last {
@@ -353,6 +367,7 @@ impl Backend for CoreMlBackend {
         if mix.len() != 2 * l || spec.len() != 4 * f * t || sources.iter().any(|&s| s >= self.s) {
             bail!("bad input sizes");
         }
+        // SAFETY: the inputs are checked above and only borrowed for this call; the prediction runs inside it.
         autoreleasepool(|_| unsafe {
             let mix_a = wrap(mix, &[1, 2, l])?;
             let spec_a = wrap(spec, &[1, 4, f, t])?;

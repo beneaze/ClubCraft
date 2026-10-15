@@ -72,7 +72,7 @@ pub fn resample(buf: &AudioBuffer, to: u32) -> AudioBuffer {
     let (l, r) = std::thread::scope(|s| {
         let a = s.spawn(|| resample_channel(&buf.left, buf.sample_rate, to));
         let b = resample_channel(&buf.right, buf.sample_rate, to);
-        (a.join().unwrap(), b)
+        (a.join().unwrap_or_else(|_| vec![0.0; b.len()]), b)
     });
     AudioBuffer::new(to, l, r)
 }

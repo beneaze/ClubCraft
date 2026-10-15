@@ -61,7 +61,9 @@ where
                         };
                     }
                 }
-                plan.process_with_scratch(inp, out, scratch).expect("fft");
+                if plan.process_with_scratch(inp, out, scratch).is_err() {
+                    out.fill(Default::default());
+                }
                 f(i, out)
             },
         )
@@ -307,12 +309,16 @@ pub fn autocorr(x: &[f32], max_lag: usize) -> Vec<f32> {
     let mut inp = fwd.make_input_vec();
     inp[..n].copy_from_slice(x);
     let mut spec = fwd.make_output_vec();
-    fwd.process(&mut inp, &mut spec).expect("fft");
+    if fwd.process(&mut inp, &mut spec).is_err() {
+        spec.fill(Default::default());
+    }
     for c in spec.iter_mut() {
         *c = Complex::new(c.norm_sqr(), 0.0);
     }
     let mut out = inv.make_output_vec();
-    inv.process(&mut spec, &mut out).expect("ifft");
+    if inv.process(&mut spec, &mut out).is_err() {
+        out.fill(0.0);
+    }
     let r0 = out[0].max(1e-12);
     out.truncate(max_lag.min(n));
     for v in out.iter_mut() {

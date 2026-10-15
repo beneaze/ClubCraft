@@ -24,7 +24,7 @@ pub struct StemChunk {
 impl StemChunk {
     pub fn from_f32(data: &[f32]) -> StemChunk {
         let mut peak = [0f32; 4];
-        for f in data.chunks_exact(STEM_CHANNELS) {
+        for f in data.as_chunks::<STEM_CHANNELS>().0 {
             for (c, v) in f.iter().enumerate() {
                 peak[c / 2] = peak[c / 2].max(v.abs());
             }

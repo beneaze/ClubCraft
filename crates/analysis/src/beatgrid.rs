@@ -330,7 +330,7 @@ fn profile_peak(p: &[f64; FOLD_BINS]) -> (f64, f32) {
         .iter()
         .enumerate()
         .max_by(|a, b| a.1.total_cmp(b.1))
-        .unwrap();
+        .unwrap_or((0, &0.0));
     let mean = s.iter().sum::<f64>() / FOLD_BINS as f64;
     if mean <= 1e-9 {
         return (0.0, 0.0);
@@ -707,7 +707,7 @@ fn bar_phase(
     }
     let best = (0..4)
         .max_by(|a, b| scores[*a].total_cmp(&scores[*b]))
-        .unwrap();
+        .unwrap_or(0);
     (best, scores)
 }
 

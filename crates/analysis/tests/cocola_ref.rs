@@ -1,5 +1,6 @@
 //! COCOLA front end and embeddings against the PyTorch / librosa reference written by
 //! `tools/model-export/export_cocola.py` (skipped when the models are not exported).
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // tests fail by panicking
 
 use clubcraft_analysis::cocola;
 

@@ -1,7 +1,8 @@
 //! Progressive separation (`separate_into`) must publish exactly what `separate` computes.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // tests fail by panicking
 
 use clubcraft_audio::AudioBuffer;
-use clubcraft_core::{StemTrack, STEM_CHANNELS, STEM_CHUNK_FRAMES};
+use clubcraft_core::{StemTrack, STEM_CHUNK_FRAMES};
 use clubcraft_stems::{Options, Quality, Separator};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;

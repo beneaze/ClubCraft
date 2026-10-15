@@ -192,7 +192,7 @@ impl Stems {
             match t.chunk(c) {
                 Some(ch) => {
                     let data = ch.to_f32();
-                    for f in data.chunks_exact(clubcraft_core::STEM_CHANNELS) {
+                    for f in data.as_chunks::<{ clubcraft_core::STEM_CHANNELS }>().0 {
                         for (s, (l, r)) in stems.iter_mut().enumerate() {
                             l.push(f[2 * s]);
                             r.push(f[2 * s + 1]);

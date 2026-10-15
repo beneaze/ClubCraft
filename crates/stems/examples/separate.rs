@@ -8,6 +8,7 @@
 //! `--dump-input` also writes the decoded (and cropped) input as `input.npy` ([2, N] f32) so the
 //! result can be compared with Python Demucs on the identical signal; `--cache` additionally writes
 //! and re-reads the FLAC stem cache and reports its size, load time and SNR.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // developer tool: failing loudly is fine
 
 use anyhow::{bail, Context, Result};
 use clubcraft_stems::{BackendKind, Quality, Separator};

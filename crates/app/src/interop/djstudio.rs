@@ -499,7 +499,7 @@ pub(crate) fn convert_project(root: &Path, version: &str, tracks: &LibTracks, ow
     let starts: Vec<f64> = {
         let mut v = vec![0.0];
         for pl in &placed {
-            let s = *v.last().unwrap();
+            let s = v.last().copied().unwrap_or(0.0);
             v.push(s + (pl.beats.1 - pl.beats.0));
         }
         v

@@ -102,7 +102,7 @@ impl Tab {
 impl Settings {
     pub fn new(audio: AudioConfig, midi_port: Option<String>) -> Settings {
         let mapping = MidiMapping::load(&mapping_path()).unwrap_or_else(|_| MidiMapping { name: "My controller".into(), device: None, bindings: vec![] });
-        let mapper = MidiMapper::new(mapping).unwrap_or_else(|_| MidiMapper::new(MidiMapping::default()).unwrap());
+        let mapper = MidiMapper::new(mapping).unwrap_or_else(|_| MidiMapper::unmapped("My controller"));
         Settings {
             open: false,
             audio,

@@ -10,3 +10,6 @@ anyhow.workspace = true
 log.workspace = true
 symphonia = { version = "0.6", features = ["all"] }
 lofty = "0.25"
+
+[lints]
+workspace = true

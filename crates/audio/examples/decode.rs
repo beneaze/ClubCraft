@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // developer tool: failing loudly is fine
 fn main() {
     let p = std::env::args().nth(1).unwrap();
     let t = std::time::Instant::now();

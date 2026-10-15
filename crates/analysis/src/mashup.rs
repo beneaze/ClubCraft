@@ -112,7 +112,7 @@ impl MashupFeatures {
         if take(4)? != MAGIC {
             return None;
         }
-        let u32_ = |s: &[u8]| u32::from_le_bytes(s.try_into().unwrap());
+        let u32_ = |s: &[u8]| u32::from_le_bytes(s.try_into().unwrap_or([0; 4]));
         let version = u32_(take(4)?);
         let bpm = f64::from_le_bytes(take(8)?.try_into().ok()?);
         let downbeat = f64::from_le_bytes(take(8)?.try_into().ok()?);
@@ -128,7 +128,7 @@ impl MashupFeatures {
         let mut bars = Vec::with_capacity(n.min(100_000));
         for _ in 0..n {
             let raw = take(FLOATS_PER_BAR * 4)?;
-            let v: Vec<f32> = raw.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
+            let v: Vec<f32> = raw.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect();
             let mut f = BarFeatures::default();
             f.vocal.copy_from_slice(&v[0..12]);
             f.bass.copy_from_slice(&v[12..24]);

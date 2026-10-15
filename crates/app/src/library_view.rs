@@ -15,7 +15,6 @@ pub enum SortBy {
     Key,
     Energy,
     Duration,
-    Added,
 }
 
 pub struct LibraryView {
@@ -79,12 +78,11 @@ impl LibraryView {
         }
         match self.sort {
             SortBy::Artist => v.sort_by(|a, b| a.artist.to_lowercase().cmp(&b.artist.to_lowercase()).then(a.title.cmp(&b.title))),
-            SortBy::Title => v.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase())),
+            SortBy::Title => v.sort_by_key(|a| a.title.to_lowercase()),
             SortBy::Bpm => v.sort_by(|a, b| bpm(a).total_cmp(&bpm(b))),
             SortBy::Key => v.sort_by_key(|t| key(t)),
             SortBy::Energy => v.sort_by_key(|t| an.get(&t.id).and_then(|a| a.energy).unwrap_or(0)),
             SortBy::Duration => v.sort_by(|a, b| a.duration.total_cmp(&b.duration)),
-            SortBy::Added => v.sort_by_key(|t| t.added_at),
         }
         if !self.ascending {
             v.reverse();

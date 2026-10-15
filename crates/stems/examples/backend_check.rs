@@ -1,6 +1,7 @@
 //! Developer check: run one segment through a backend and print timing and output statistics.
 //! `cargo run --release -p clubcraft-stems --example backend_check -- [coreml|ort] [input.npy [offset_s]]`
 //! or `-- roformer [seconds]` (vocal model alone; `RUST_LOG`-style debug timing via the `log` crate).
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // developer tool: failing loudly is fine
 use clubcraft_stems::backend::{self, BackendKind, SourceOut};
 use clubcraft_stems::{npy, stft::Spectro, Manifest};
 

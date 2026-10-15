@@ -9,6 +9,7 @@
 //! ```
 //! Caveat: the reference stems are themselves model outputs, so absolute numbers are optimistic;
 //! the comparison between presets is what matters.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // developer tool: failing loudly is fine
 
 use anyhow::{bail, Context, Result};
 use clubcraft_audio::AudioBuffer;

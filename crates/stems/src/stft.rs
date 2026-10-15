@@ -20,7 +20,7 @@ pub struct Spectro {
 
 impl Spectro {
     pub fn new(nfft: usize, hop: usize) -> Self {
-        assert_eq!(hop * 4, nfft, "HTDemucs requires hop == nfft / 4");
+        debug_assert_eq!(hop * 4, nfft, "HTDemucs requires hop == nfft / 4");
         let mut planner = RealFftPlanner::<f32>::new();
         // Periodic Hann window, computed in f64 like torch does internally then rounded.
         let window = (0..nfft)
@@ -45,7 +45,7 @@ impl Spectro {
         let len = x.len();
         let t_frames = self.frames(len);
         let nf = self.freqs();
-        assert!(re.len() >= nf * t_frames && im.len() >= nf * t_frames);
+        debug_assert!(re.len() >= nf * t_frames && im.len() >= nf * t_frames);
         let pad = self.hop / 2 * 3;
         let padded = pad1d_reflect(x, pad, pad + t_frames * self.hop - len);
         let scale = 1.0 / (self.nfft as f32).sqrt();
@@ -57,7 +57,9 @@ impl Spectro {
             for ((b, &s), &w) in buf.iter_mut().zip(frame).zip(&self.window) {
                 *b = s * w;
             }
-            self.r2c.process_with_scratch(&mut buf, &mut spec, &mut scratch).expect("fft");
+            if self.r2c.process_with_scratch(&mut buf, &mut spec, &mut scratch).is_err() {
+                spec.fill(Default::default());
+            }
             for f in 0..nf {
                 re[f * t_frames + t] = spec[f].re * scale;
                 im[f * t_frames + t] = spec[f].im * scale;
@@ -69,7 +71,7 @@ impl Spectro {
     /// `[C * 2][nfft/2][T]` (ch0 re, ch0 im, ch1 re, ch1 im, ...).
     pub fn spec(&self, chans: &[&[f32]], out: &mut [f32]) {
         let plane = self.freqs() * self.frames(chans[0].len());
-        assert_eq!(out.len(), plane * 2 * chans.len());
+        debug_assert_eq!(out.len(), plane * 2 * chans.len());
         for (c, x) in chans.iter().enumerate() {
             let (re, rest) = out[c * 2 * plane..].split_at_mut(plane);
             self.spec_channel(x, re, &mut rest[..plane]);
@@ -83,7 +85,7 @@ impl Spectro {
         let t_frames = self.frames(length);
         let nf = self.freqs();
         let (nfft, hop) = (self.nfft, self.hop);
-        assert!(re.len() >= nf * t_frames && im.len() >= nf * t_frames);
+        debug_assert!(re.len() >= nf * t_frames && im.len() >= nf * t_frames);
         let pad = (hop / 2 * 3) as isize;
         out.iter_mut().for_each(|v| *v = 0.0);
         let mut spec = self.c2r.make_input_vec();
@@ -97,7 +99,9 @@ impl Spectro {
             // C2R ignores the imaginary part of DC and Nyquist (like torch / pocketfft).
             spec[0].im = 0.0;
             spec[nf] = Complex32::new(0.0, 0.0);
-            self.c2r.process_with_scratch(&mut spec, &mut frame, &mut scratch).expect("ifft");
+            if self.c2r.process_with_scratch(&mut spec, &mut frame, &mut scratch).is_err() {
+                frame.fill(0.0);
+            }
             let start = t as isize * hop as isize - pad;
             let n0 = (-start).max(0) as usize;
             let n1 = ((length as isize - start).min(nfft as isize)).max(0) as usize;

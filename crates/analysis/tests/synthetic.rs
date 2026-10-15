@@ -1,4 +1,5 @@
 //! End-to-end tests on synthetic house-style signals.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // tests fail by panicking
 
 use clubcraft_analysis::{
     analyze, beatgrid, key, waveform, AnalyzeOptions, AudioBuffer, OwnedStems,

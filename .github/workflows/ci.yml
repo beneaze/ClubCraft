@@ -27,7 +27,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
+      # Lints: no unwrap / expect / panic outside tests, documented unsafe (see AGENTS.md).
+      - name: Clippy
+        if: runner.os == 'macOS'
+        run: cargo clippy --workspace --all-targets -- -D warnings
       # Unit tests that need no separation models.
       - name: Test
         run: cargo test --release -p clubcraft-core -p clubcraft-audio -p clubcraft-engine --lib

@@ -43,7 +43,10 @@ pub mod player;
 pub mod render;
 pub mod samples;
 pub mod state;
+#[allow(unsafe_code)] // FFI to the vendored Signalsmith Stretch
 pub mod stretch;
+#[allow(unsafe_code)] // the few OS calls: page-fault counter, mlock
+mod sys;
 pub mod track;
 pub mod wav;
 

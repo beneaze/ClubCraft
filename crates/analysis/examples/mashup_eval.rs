@@ -5,6 +5,7 @@
 //! For every track with stems: computes the per-bar features (timing them), then compares the
 //! harmony of each vocal phrase over its *own* instrumental (a known-good pairing) with the best
 //! and the median pairing over the other tracks' instrumentals.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // developer tool: failing loudly is fine
 
 use clubcraft_analysis::mashup::{self, MashupFeatures, MatchOptions};
 use clubcraft_analysis::OwnedStems;

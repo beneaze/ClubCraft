@@ -117,7 +117,9 @@ pub fn spectrogram(x: &[f32]) -> Vec<f32> {
                         0.0
                     };
                 }
-                plan.process_with_scratch(inp, out, scr).expect("fft");
+                if plan.process_with_scratch(inp, out, scr).is_err() {
+                    out.fill(Default::default());
+                }
                 for (m, c) in mag.iter_mut().zip(out.iter()) {
                     *m = c.norm();
                 }

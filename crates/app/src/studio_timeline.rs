@@ -1383,8 +1383,7 @@ impl StudioView {
                     remove = Some(j);
                     ui.close();
                 }
-            })
-            .map(|_| ());
+            });
             resp.on_hover_text(format!("{name} · {:.1} s · drag to move (snaps to beats, Shift: free) · right-click for more", dur));
         }
         if let Some(j) = dup {

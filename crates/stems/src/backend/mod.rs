@@ -4,7 +4,9 @@ use crate::model::Manifest;
 use anyhow::Result;
 
 #[cfg(target_os = "macos")]
+#[allow(unsafe_code)] // CoreML FFI (objc2)
 pub mod coreml;
+#[allow(unsafe_code)] // reads ONNX Runtime output tensors in place
 pub mod onnx;
 
 /// Output of one model for one source: `spec` is `[4][F][T]` complex-as-channels, `wave` is `[2][L]`.

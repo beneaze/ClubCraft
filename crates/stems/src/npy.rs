@@ -41,7 +41,7 @@ pub fn parse_npy(b: &[u8]) -> Result<NpyArray> {
     if body.len() < n * 4 {
         bail!("truncated data");
     }
-    let data = body[..n * 4].chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    let data = body[..n * 4].as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
     Ok(NpyArray { shape, data })
 }
 

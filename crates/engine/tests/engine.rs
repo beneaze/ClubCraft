@@ -1,4 +1,5 @@
 //! Offline engine tests: sync, render alignment, limiter, automix, CPU budget.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // tests fail by panicking
 
 use clubcraft_audio::AudioBuffer;
 use clubcraft_core::{BeatGrid, Cue, CueKind, Mix, MixTrack, StemKind, StemLane, StemTrack, TempoMode, Transition, TransitionStyle};
@@ -371,7 +372,11 @@ fn cpu_budget_4_decks_keylock_stems_fx() {
     // thread CPU time (excludes time the OS spent running other processes)
     fn cpu_now() -> f64 {
         let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
-        unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+        // SAFETY: clock_gettime only writes the timespec we pass.
+        #[allow(unsafe_code)]
+        unsafe {
+            libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts)
+        };
         ts.tv_sec as f64 + ts.tv_nsec as f64 * 1e-9
     }
     let mut times = Vec::with_capacity(blocks);

@@ -29,3 +29,6 @@ cc = "1.2"
 [dev-dependencies]
 libc = "0.2"
 rustfft.workspace = true
+
+[lints]
+workspace = true

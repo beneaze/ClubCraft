@@ -31,3 +31,6 @@ objc2-core-ml = { version = "0.3.2", features = ["MLModel", "MLModelConfiguratio
 
 [dev-dependencies]
 hound = "3.5"
+
+[lints]
+workspace = true

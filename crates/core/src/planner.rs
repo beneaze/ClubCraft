@@ -137,9 +137,15 @@ pub fn order_groups(groups: &[Vec<OrderItem>], o: &OrderOptions) -> Vec<usize> {
         return (0..n).collect();
     }
     let m: Vec<Vec<f32>> = (0..n)
-        .map(|i| (0..n).map(|j| if i == j { 0.0 } else { pair_cost(groups[i].last().unwrap(), &groups[j][0], o) }).collect())
+        .map(|i| (0..n).map(|j| if i == j { 0.0 } else { match (groups[i].last(), groups[j].first()) {
+                        (Some(a), Some(b)) => pair_cost(a, b, o),
+                        _ => 0.0,
+                    } }).collect())
         .collect();
-    let reps: Vec<OrderItem> = groups.iter().map(|g| g[0].clone()).collect();
+    let reps: Vec<OrderItem> = groups.iter().filter_map(|g| g.first().cloned()).collect();
+    if reps.len() != n {
+        return (0..n).collect();
+    }
     order_indices(&reps, &m, o)
 }
 
@@ -154,7 +160,7 @@ fn order_indices(items: &[OrderItem], m: &[Vec<f32>], o: &OrderOptions) -> Vec<u
                 let kb = items[b].bpm.unwrap_or(999.0) + items[b].energy.unwrap_or(5) as f64 * 0.5;
                 ka.total_cmp(&kb)
             })
-            .unwrap();
+            .unwrap_or(0);
     }
     let last_locked = if o.lock_last { Some(n - 1) } else { None };
     let mut used = vec![false; n];
@@ -164,8 +170,8 @@ fn order_indices(items: &[OrderItem], m: &[Vec<f32>], o: &OrderOptions) -> Vec<u
         used[l] = true;
     }
     while order.len() < n - last_locked.is_some() as usize {
-        let cur = *order.last().unwrap();
-        let next = (0..n).filter(|&j| !used[j]).min_by(|&a, &b| m[cur][a].total_cmp(&m[cur][b])).unwrap();
+        let cur = order.last().copied().unwrap_or(start);
+        let Some(next) = (0..n).filter(|&j| !used[j]).min_by(|&a, &b| m[cur][a].total_cmp(&m[cur][b])) else { break };
         used[next] = true;
         order.push(next);
     }
