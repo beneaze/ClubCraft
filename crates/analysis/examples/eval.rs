@@ -55,10 +55,16 @@ struct Truth {
     auto_gain: Option<f64>,
 }
 
-/// DJ.Studio's integer key numbers → keys. Being re-derived from observation under the
-/// clean-room process (see `docs/interop/djstudio.md`); until then no reference keys are read.
-fn camelot_int_to_key(_v: i64) -> Option<Key> {
-    None
+/// DJ.Studio's integer key numbers (`camelotKey`, `noteKey`, `mikKey`) → keys: 0..=11 are the
+/// major keys by pitch class (0 = C), 12..=23 the relative minor of major key `n - 12`
+/// (12 = A minor, 22 = G minor); −1 = unknown. Derived from records that also carry a key tag and
+/// from ClubCraft's own analysis of the same files (`docs/interop/djstudio.md`, §2.3).
+fn camelot_int_to_key(v: i64) -> Option<Key> {
+    match v {
+        0..=11 => Some(Key::new(v as u8, false)),
+        12..=23 => Some(Key::new(((v - 12 + 9) % 12) as u8, true)),
+        _ => None,
+    }
 }
 
 fn home() -> PathBuf {
@@ -1070,4 +1076,21 @@ fn main() -> anyhow::Result<()> {
         std::fs::write(p, s)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+
+    #[test]
+    fn djstudio_key_numbers() {
+        // a record with key number 14 is tagged "10A" (B minor); 22 matches ClubCraft's G minor
+        assert_eq!(camelot_int_to_key(14).unwrap().camelot(), "10A");
+        assert_eq!(camelot_int_to_key(22), Some(Key::new(7, true)));
+        assert_eq!(camelot_int_to_key(12), Some(Key::new(9, true)));
+        assert_eq!(camelot_int_to_key(0), Some(Key::new(0, false)));
+        assert_eq!(camelot_int_to_key(9), Some(Key::new(9, false)));
+        assert_eq!(camelot_int_to_key(-1), None);
+        assert_eq!(camelot_int_to_key(24), None);
+    }
 }

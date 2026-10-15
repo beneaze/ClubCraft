@@ -94,7 +94,7 @@ Every screenshot here is the real app at work on a mix imported from DJ.Studio. 
       <h3>A library that analyses itself</h3>
       Drop a folder in and every track is analysed within about a second. Stems are separated on demand: when a transition needs them, when you export a mix, or for the whole library in the background if you switch that on. Sort and search by artist, title, BPM, key or energy, and drag tracks onto a deck or into a mix.
       <br><br>
-      Exports beat grids, keys, hot cues and automix points to <b>VirtualDJ</b>. The <b>DJ.Studio</b> project import is being rebuilt under ClubCraft's [clean-room policy](docs/clean-room.md).
+      Imports your <b>DJ.Studio</b> projects: mix points, cues, transitions with their curves, stem automation and DJ.Studio's timing. The importer is built clean-room, from DJ.Studio's own files and exports only ([how it works](docs/interop/djstudio.md)). Exports beat grids, keys, hot cues and automix points to <b>VirtualDJ</b>.
     </td>
     <td width="50%" valign="top">
       <img src="docs/images/home.jpg" alt="The home page: recent mixes as a searchable list with their key colours, track count, length and last edit on the left; a New mix panel (start empty, from selected tracks, a playlist or auto-built from the library) and the library status with analysis and stem progress and recently added tracks on the right" width="100%">
@@ -168,7 +168,7 @@ Want the vocals of one track over another? The **🎤 Mashups** tab of the studi
     </td>
     <td width="33%" valign="top">
       <h4>🔗 Interop</h4>
-      DJ.Studio project import (being rebuilt clean-room) · VirtualDJ <code>database.xml</code> export and import (merges safely and keeps a backup) · MIDI learn mappings in JSON · native macOS menu bar and a window without a title bar
+      DJ.Studio project import (read-only, clean-room) · VirtualDJ <code>database.xml</code> export and import (merges safely and keeps a backup) · MIDI learn mappings in JSON · native macOS menu bar and a window without a title bar
     </td>
   </tr>
 </table>
@@ -213,7 +213,7 @@ The cue generator places Mix In at least 32 beats before the first drop or vocal
 - **No page faults while playing:** a background thread locks the audio and stems of every track a deck or mix player holds in RAM (`mlock`), and unlocks them when they are released. Without it, a Mac under memory pressure compresses the part ahead of the playhead, and a single read stalled the audio callback for up to 6 ms.
 - **One conductor:** the studio preview, live automix and offline render all run the same code path, so what you hear in the preview is exactly what you export.
 - **Exact timing:** tempo is piecewise linear in mix beats and integrated analytically, which keeps overlapping tracks beat-locked to within a millisecond.
-- **Clean-room:** ClubCraft is independent. Other DJ software is only studied through its files, its output and public documentation, never through its program code, and none of its code, models or assets are used. The DJ.Studio importer is being rebuilt under that rule; see [docs/clean-room.md](docs/clean-room.md).
+- **Clean-room:** ClubCraft is independent. Other DJ software is only studied through its files, its output and public documentation, never through its program code, and none of its code, models or assets are used. The DJ.Studio importer was rebuilt under that rule; see [docs/clean-room.md](docs/clean-room.md).
 - **Tested:** 84 unit and integration tests, plus evaluations against Python Demucs and a 137-track analysis corpus.
 
 ## Talk to it: built-in MCP server

@@ -8,7 +8,13 @@
 //! `i` stops. Tempo is piecewise linear in mix beats:
 //! * [`TempoMode::Glide`]: each track plays at its native BPM; during a transition the tempo
 //!   holds the outgoing BPM for the first half and ramps linearly to the incoming BPM over the
-//!   second half, so the incoming track settles at its own tempo by the end of the overlap.
+//!   second half, so the incoming track settles at its own tempo by the end of the overlap. A
+//!   transition with its own [`Transition::tempo`](crate::Transition::tempo) holds and ramps
+//!   between those two values instead (both tracks then play slightly off their native speed
+//!   inside the overlap).
+//!
+//! A track's beats come from [`Mix::grids`] when the mix has a grid for it (imported projects),
+//! otherwise from its analysis.
 //! * [`TempoMode::Fixed`]: constant tempo.
 //!
 //! Seconds are obtained by exact integration of `60 / bpm(beat)`.
@@ -110,7 +116,7 @@ impl MixTimeline {
         for (i, mt) in mix.tracks.iter().enumerate() {
             let a = analysis(mt.track_id);
             let duration = a.as_ref().map(|a| a.duration).unwrap_or(0.0);
-            let (grid, has_grid) = match a.as_ref().and_then(|a| a.grid) {
+            let (grid, has_grid) = match mix.grids.get(&mt.track_id).copied().or_else(|| a.as_ref().and_then(|a| a.grid)) {
                 Some(g) => (g, true),
                 None => (BeatGrid::new(120.0, 0.0), false),
             };
@@ -161,8 +167,8 @@ impl MixTimeline {
             TempoMode::Glide => {
                 let mut cur = 0.0;
                 for (k, tr) in tl.transitions.iter().enumerate() {
-                    let (a, c) = (native(k), native(k + 1));
-                    push(cur, tr.start_beat - cur, a, a);
+                    push(cur, tr.start_beat - cur, native(k), native(k));
+                    let (a, c) = mix.transitions.get(k).and_then(|t| t.tempo).map(|t| (t[0], t[1])).unwrap_or((native(k), native(k + 1)));
                     let h = tr.beats / 2.0;
                     push(tr.start_beat, h, a, a);
                     push(tr.start_beat + h, tr.beats - h, a, c);
@@ -295,5 +301,38 @@ mod tests {
         assert!((ph[0] - ph[1]).abs() < 1e-6, "{ph:?}");
         assert!(matches!(act[0].transition, Some((0, Side::Out, _))));
         assert!(matches!(act[1].transition, Some((0, Side::In, _))));
+    }
+
+    #[test]
+    fn mix_grids_and_transition_tempo() {
+        let mut mix = Mix::default();
+        mix.tracks.push(MixTrack::new(1, 0.0, 60.0));
+        mix.tracks.push(MixTrack::new(2, 0.0, 60.0));
+        mix.normalize();
+        mix.transitions[0] = Transition::new(TransitionStyle::Crossfade, 32);
+        // the analysis says 61 BPM (half time), the mix grid 122 BPM from 0.25 s
+        let an = |_id| Some(Analysis { version: 1, duration: 200.0, grid: Some(BeatGrid::new(61.0, 0.0)), ..Default::default() });
+        mix.grids.insert(1, BeatGrid::new(122.0, 0.25));
+        mix.grids.insert(2, BeatGrid::new(122.0, 0.25));
+        let tl = MixTimeline::build(&mix, &an);
+        assert_eq!(tl.tracks[0].grid.bpm, 122.0);
+        assert!((tl.transitions[0].start_sec - 60.0).abs() < 1e-9, "{}", tl.transitions[0].start_sec);
+        let plain = tl.transitions[0].end_sec - tl.transitions[0].start_sec;
+        assert!((plain - 32.0 * 60.0 / 122.0).abs() < 1e-9);
+        // a transition tempo 0.2 % faster shortens the overlap by that much, the solo parts not
+        mix.transitions[0].tempo = Some([122.244, 122.244]);
+        let tl2 = MixTimeline::build(&mix, &an);
+        let fast = tl2.transitions[0].end_sec - tl2.transitions[0].start_sec;
+        assert!((fast - 32.0 * 60.0 / 122.244).abs() < 1e-9);
+        assert!((tl2.transitions[0].start_sec - 60.0).abs() < 1e-9);
+        assert!((tl2.bpm_at_beat(tl2.transitions[0].start_beat + 1.0) - 122.244).abs() < 1e-9);
+        assert!((tl2.bpm_at_beat(tl2.transitions[0].start_beat + 40.0) - 122.0).abs() < 1e-9);
+        // both tracks stay beat-locked inside the overlap
+        let t = tl2.sec_at_beat(tl2.transitions[0].start_beat + 10.5);
+        let act = tl2.active_at(t);
+        assert_eq!(act.len(), 2);
+        let ph: Vec<f64> = act.iter().map(|a| tl2.tracks[a.index].grid.beat_phase(a.track_pos)).collect();
+        assert!((ph[0] - ph[1]).abs() < 1e-6, "{ph:?}");
+        assert!((act[0].rate - 122.244 / 122.0).abs() < 1e-9);
     }
 }

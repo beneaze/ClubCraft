@@ -34,10 +34,11 @@ the commit that introduced this document:
 - **The benchmark's key lookup table** (`crates/analysis/examples/eval.rs`), which reads
   DJ.Studio's key numbers.
 
-They are being re-implemented under the rules above, by an implementer who has not seen
-DJ.Studio's program code, the removed code, or notes derived from it. The specification
-they work from is [`interop/djstudio.md`](interop/djstudio.md); every fact in it names its
-observational or public source. The removed code remains in this repository's git history.
+They were re-implemented under the rules above, by an implementer who had not seen
+DJ.Studio's program code, the removed code, or notes derived from it. The implementer worked
+only from DJ.Studio's data files and exports, its public help pages, and its own measurements.
+It also wrote the specification [`interop/djstudio.md`](interop/djstudio.md), in which every
+fact names its observational or public source. The removed code remains in this repository's git history.
 
 The VirtualDJ export was built from VirtualDJ's resource and database files, read as data,
 and from the public VirtualDJ wiki.

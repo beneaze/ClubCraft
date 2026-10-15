@@ -2,8 +2,9 @@
 //! automation lanes (volume, per-stem gains, EQ, filter, echo). The same model drives the
 //! offline renderer, the studio preview and the live-deck automix.
 
-use crate::analysis::StemKind;
+use crate::analysis::{BeatGrid, StemKind};
 use crate::library::TrackId;
+use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -228,11 +229,18 @@ pub struct Transition {
     /// points, and not editable until unlocked.
     #[serde(default)]
     pub locked: bool,
+    /// Mix tempo during the transition (BPM, [`TempoMode::Glide`] only): held at `[0]` over the
+    /// first half and ramping linearly (in beats) to `[1]` over the second half. `None` (the
+    /// default) = the outgoing track's tempo, ramping to the incoming track's tempo. Imported
+    /// DJ.Studio projects set it to DJ.Studio's tempo-lane values, which run slightly faster than
+    /// the beat grids (see `docs/interop/djstudio.md`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tempo: Option<[f64; 2]>,
 }
 
 impl Transition {
     pub fn new(style: TransitionStyle, beats: u32) -> Self {
-        Transition { style, beats, lanes: style.lanes(beats as f32), locked: false }
+        Transition { style, beats, lanes: style.lanes(beats as f32), locked: false, tempo: None }
     }
 
     /// Change the length to `beats`, keeping the shape of every curve (points scale with the
@@ -327,7 +335,7 @@ impl Transition {
                 }
             }
         }
-        Transition { style: self.style, beats: self.beats, lanes, locked: self.locked }
+        Transition { style: self.style, beats: self.beats, lanes, locked: self.locked, tempo: self.tempo }
     }
 }
 
@@ -525,6 +533,11 @@ pub struct Mix {
     /// Mixer settings of the sample lanes (gain, mute, solo).
     #[serde(default = "default_sample_lanes")]
     pub sample_lanes: Vec<LaneSettings>,
+    /// Beat grids that tracks follow in this mix instead of their analysed grid, by track id.
+    /// Imported projects keep the other application's grid so that mix points and transitions
+    /// land on the same beats there and here. Empty for ClubCraft's own mixes.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub grids: BTreeMap<TrackId, BeatGrid>,
 }
 
 fn default_sample_lanes() -> Vec<LaneSettings> {
@@ -537,7 +550,7 @@ fn default_lanes() -> Vec<LaneSettings> {
 
 impl Default for Mix {
     fn default() -> Self {
-        Mix { id: 0, name: "New mix".into(), tracks: vec![], transitions: vec![], tempo: TempoMode::Glide, keylock: true, lanes: default_lanes(), samples: vec![], sample_lanes: default_sample_lanes() }
+        Mix { id: 0, name: "New mix".into(), tracks: vec![], transitions: vec![], tempo: TempoMode::Glide, keylock: true, lanes: default_lanes(), samples: vec![], sample_lanes: default_sample_lanes(), grids: BTreeMap::new() }
     }
 }
 
@@ -598,6 +611,31 @@ mod tests {
 }
 
 #[cfg(test)]
+mod serde_tests {
+    use super::*;
+
+    #[test]
+    fn grids_and_transition_tempo_are_optional() {
+        let mut mix = Mix::default();
+        mix.tracks.push(MixTrack::new(1, 0.0, 60.0));
+        mix.tracks.push(MixTrack::new(2, 0.0, 60.0));
+        mix.normalize();
+        // ClubCraft's own mixes do not write the new fields ...
+        let json = serde_json::to_string(&mix).unwrap();
+        assert!(!json.contains("grids") && !json.contains("tempo\":["), "{json}");
+        // ... and mixes saved before they existed still load
+        let back: Mix = serde_json::from_str(&json).unwrap();
+        assert!(back.grids.is_empty() && back.transitions[0].tempo.is_none());
+        // imported mixes keep them
+        mix.grids.insert(2, crate::analysis::BeatGrid::new(124.0, 0.1));
+        mix.transitions[0].tempo = Some([124.2, 126.3]);
+        let back: Mix = serde_json::from_str(&serde_json::to_string(&mix).unwrap()).unwrap();
+        assert_eq!(back.grids[&2].bpm, 124.0);
+        assert_eq!(back.transitions[0].tempo, Some([124.2, 126.3]));
+    }
+}
+
+#[cfg(test)]
 mod stemless_tests {
     use super::*;
 
@@ -642,7 +680,7 @@ mod stemless_tests {
     fn each_stem_transition_keeps_its_own_shape() {
         use StemKind::*;
         let side = |d: &[(f32, f32)], rest: f32| {
-            let mut t = Transition { style: TransitionStyle::StemBlend, beats: 32, lanes: vec![], locked: false };
+            let mut t = Transition { style: TransitionStyle::StemBlend, beats: 32, lanes: vec![], locked: false, tempo: None };
             t.lanes.push(Lane::new(Side::Out, Param::Stem(Drums), d));
             for k in [Bass, Other, Vocals] {
                 t.lanes.push(Lane::new(Side::Out, Param::Stem(k), &[(0.0, rest)]));
