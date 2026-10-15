@@ -55,16 +55,10 @@ struct Truth {
     auto_gain: Option<f64>,
 }
 
-fn camelot_int_to_key(v: i64) -> Option<Key> {
-    // 0..11 = major by pitch class from C; 12+i = relative minor of major i.
-    if !(0..24).contains(&v) {
-        return None;
-    }
-    if v < 12 {
-        Some(Key::new(v as u8, false))
-    } else {
-        Some(Key::new(((v - 12 + 9) % 12) as u8, true))
-    }
+/// DJ.Studio's integer key numbers → keys. Being re-derived from observation under the
+/// clean-room process (see `docs/interop/djstudio.md`); until then no reference keys are read.
+fn camelot_int_to_key(_v: i64) -> Option<Key> {
+    None
 }
 
 fn home() -> PathBuf {

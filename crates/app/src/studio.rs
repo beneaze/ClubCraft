@@ -1260,7 +1260,7 @@ mod tests {
     use clubcraft_core::MixTrack;
 
     fn mix() -> Mix {
-        let t = |id| MixTrack { track_id: id, mix_in: 0.0, mix_out: 60.0, key_shift: 0, gain_db: 0.0, stems: Vec::new(), line_bpm: None };
+        let t = |id| MixTrack { track_id: id, mix_in: 0.0, mix_out: 60.0, key_shift: 0, gain_db: 0.0, stems: Vec::new() };
         Mix { tracks: vec![t(1), t(2)], transitions: vec![Transition::new(TransitionStyle::StemBlend, 32)], ..Default::default() }
     }
 

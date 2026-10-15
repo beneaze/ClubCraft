@@ -227,7 +227,7 @@ fn order_indices(items: &[OrderItem], m: &[Vec<f32>], o: &OrderOptions) -> Vec<u
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PlanOptions {
-    /// Preferred transition length in beats (DJ.Studio default: 64 for long tracks, 16 otherwise).
+    /// Preferred transition length in beats (default 32 = 8 bars, shortened to fit).
     pub transition_beats: Option<u32>,
     pub style: Option<TransitionStyle>,
     pub allow_key_shift: bool,
@@ -281,7 +281,7 @@ pub fn choose_transition_beats(out: &Analysis, mix_out: f64, inc: &Analysis, mix
         .map(|s| s.start)
         .unwrap_or(inc.duration);
     let room_in = gi.beat_at(first_peak) - gi.beat_at(mix_in);
-    let want = pref.unwrap_or(if out.duration > 180.0 { 64 } else { 16 }) as f64;
+    let want = pref.unwrap_or(32) as f64;
     let mut beats = want;
     while beats > 8.0 && (beats > room_out - 1.0 || beats > room_in.max(16.0) + 0.5) {
         beats /= 2.0;
@@ -307,7 +307,7 @@ pub fn plan_mix(name: &str, order: &[TrackId], analysis: &dyn Fn(TrackId) -> Opt
             }
         }
         cumulative_shift = key_shift;
-        mix.tracks.push(MixTrack { track_id: id, mix_in, mix_out: mix_out.max(mix_in + 1.0), key_shift, gain_db: 0.0, stems: Vec::new(), line_bpm: None });
+        mix.tracks.push(MixTrack { track_id: id, mix_in, mix_out: mix_out.max(mix_in + 1.0), key_shift, gain_db: 0.0, stems: Vec::new() });
     }
     for i in 0..order.len().saturating_sub(1) {
         let (out, inc) = (analyses[i].clone().unwrap_or_default(), analyses[i + 1].clone().unwrap_or_default());

@@ -86,7 +86,7 @@ fn mode_help(p: Param, m: Mode) -> &'static str {
         (_, Mode::Swap) => "Switch at the middle of the transition",
         (_, Mode::Crossfade) => "Gradual handover",
         (_, Mode::Full) => "Both tracks at full level throughout (stems do the mixing)",
-        (_, Mode::Half) => "Old track fades over the second half, new one comes up over the first (DJ.Studio's bass swap)",
+        (_, Mode::Half) => "Old track fades over the second half, new one comes up over the first",
         (_, Mode::SweepOut) => "High-pass sweep out of the old track",
         (_, Mode::SweepIn) => "Low-pass sweep into the new track",
         (_, Mode::EchoOut) => "The old track echoes out over the last bar",

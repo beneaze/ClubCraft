@@ -19,9 +19,8 @@
 //! builds / the outro are returned as slot-less markers, as are "Phrase" markers (kind `Hot`)
 //! at phrase changes inside a section (where two equally labelled sections were merged). `MixIn` and `MixOut` are on 16- or
 //! 32-beat phrase lines from the anchor, because the studio aligns the incoming track's mix-in
-//! with the outgoing track's mix-out. Without structure, DJ.Studio's defaults are used (mix-in
-//! at beat 32 / mix-out at the last 32-beat line at least 32 beats before the end for tracks
-//! longer than 3 minutes, else beat 0 / end − 16).
+//! with the outgoing track's mix-out. Without structure, mix-in is the first 32-beat line at
+//! least 15 s into the track and mix-out the last 32-beat line at least 30 s before the end.
 
 use crate::structure::BarFeatures;
 use clubcraft_core::{BeatGrid, Cue, CueKind, Section, SectionKind};
@@ -127,11 +126,15 @@ pub(crate) fn generate_from(
 
     // --- slot 1: mix-in. The 8-bar line where the drums are established, at least 32 beats
     // before the first drop and the first vocal so the blend happens over intro material.
+    // Without structure: the first phrase line at least 15 s in (0 when that is past 40 % of the
+    // track), the last phrase line at least 30 s before the end (ClubCraft's own fallback).
+    let beats_per_sec = total_beats / duration.max(1.0);
     let mix_in = if !has_bars {
-        if duration > 180.0 {
-            PHRASE
-        } else {
+        let m = (15.0 * beats_per_sec / PHRASE).ceil() * PHRASE;
+        if at_beat(m) > duration * 0.4 {
             0.0
+        } else {
+            m
         }
     } else {
         let limit = [first_drop_beat, vocal_beat]
@@ -217,8 +220,9 @@ pub(crate) fn generate_from(
     // 64 / 32 beats before the end of the music.
     let end_line = round_to(music_end, 16.0);
     let mut mix_out = if !has_bars {
-        if duration > 180.0 {
-            floor_to(total_beats - PHRASE, PHRASE)
+        let m = floor_to(total_beats - 30.0 * beats_per_sec, PHRASE);
+        if m > mix_in {
+            m
         } else {
             floor_to(total_beats - 16.0, 16.0)
         }

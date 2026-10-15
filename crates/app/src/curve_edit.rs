@@ -1,6 +1,6 @@
-//! Automation curve editor, drawn over a clip like DJ.Studio's: press on the line to add a point
-//! and drag it, drag a point to move it (over a neighbour to delete that one), double-click or
-//! right-click a point to remove it. A hard switch (two points at the same time) moves sideways as
+//! Automation curve editor, drawn over a clip: press on the line to add a point and drag it, drag
+//! a point to move it (it stops at its neighbours), double-click or right-click a point to remove
+//! it. A hard switch (two points at the same time) moves sideways as
 //! one: drag its vertical edge, or either of its points. Times snap to the beat grid (hold Shift
 //! for free placement), values snap to 0, 100 % and (for EQ / filter) the centre.
 
@@ -226,8 +226,8 @@ fn move_step(points: &mut [(f32, f32)], i: usize, px: f32, c: &Curve, fine: bool
     true
 }
 
-/// Move point `k` to the pointer; points it passes over are removed (DJ.Studio's drag-to-delete).
-/// A point of a hard switch takes its twin along sideways. Returns the point's new index.
+/// Move point `k` to the pointer, between its neighbours. A point of a hard switch takes its twin
+/// along sideways. Returns the point's index.
 fn move_point(points: &mut Vec<(f32, f32)>, k: usize, q: Pos2, c: &Curve, fine: bool, from_y: &dyn Fn(f32) -> f32) -> Option<usize> {
     let mut v = from_y(q.y);
     let snaps: &[f32] = if c.centered { &[0.0, 0.5, 1.0] } else { &[0.0, 1.0] };
@@ -241,35 +241,17 @@ fn move_point(points: &mut Vec<(f32, f32)>, k: usize, q: Pos2, c: &Curve, fine: 
         points[k].1 = v;
         return (moved || !same).then_some(k);
     }
-    let (ox, _) = points[k];
+    let (ox, ov) = points[k];
     // the first and last point stay at the window edges
     let pinned = (ox - c.x0).abs() < 1e-4 || (ox - c.x1).abs() < 1e-4;
-    let x = if pinned { ox } else { (c.snap)((c.from_x)(q.x), fine).clamp(c.x0, c.x1) };
-    if (x - ox).abs() < 1e-6 && (v - points[k].1).abs() < 1e-6 {
+    let lo = if k > 0 { points[k - 1].0 } else { c.x0 };
+    let hi = if k + 1 < points.len() { points[k + 1].0 } else { c.x1 };
+    let x = if pinned { ox } else { (c.snap)((c.from_x)(q.x), fine).clamp(lo, hi) };
+    if (x - ox).abs() < 1e-6 && (v - ov).abs() < 1e-6 {
         return None;
     }
-    let (lo, hi) = (ox.min(x), ox.max(x));
-    let mut i = 0;
-    let mut nk = k;
-    points.retain(|pt| {
-        let keep = i == k || !(pt.0 > lo && pt.0 < hi) || (pt.0 - c.x0).abs() < 1e-4 || (pt.0 - c.x1).abs() < 1e-4;
-        if !keep && i < k {
-            nk -= 1;
-        }
-        i += 1;
-        keep
-    });
-    points[nk] = (x, v);
-    // keep the order for equal times (steps)
-    while nk > 0 && points[nk - 1].0 > x {
-        points.swap(nk - 1, nk);
-        nk -= 1;
-    }
-    while nk + 1 < points.len() && points[nk + 1].0 < x {
-        points.swap(nk + 1, nk);
-        nk += 1;
-    }
-    Some(nk)
+    points[k] = (x, v);
+    Some(k)
 }
 
 #[cfg(test)]
@@ -293,10 +275,13 @@ mod tests {
     fn dragging_moves_snaps_and_deletes_passed_points() {
         with_curve(|c| {
             let mut pts = vec![(0.0, 1.0), (2.0, 1.0), (4.0, 0.5), (6.0, 0.0), (8.0, 0.0)];
-            // move the point at 2 to x 5.2 (snaps to 5), half height: the point at 4 is passed and goes
+            // move the point at 2 towards x 5.2: it stops at its neighbour at 4, at half height
             let k = move_point(&mut pts, 1, pos2(520.0, 50.0), c, false, &from_y).unwrap();
-            assert_eq!(pts, vec![(0.0, 1.0), (5.0, 0.5), (6.0, 0.0), (8.0, 0.0)]);
+            assert_eq!(pts, vec![(0.0, 1.0), (4.0, 0.5), (4.0, 0.5), (6.0, 0.0), (8.0, 0.0)]);
             assert_eq!(k, 1);
+            pts.remove(2);
+            move_point(&mut pts, 1, pos2(500.0, 50.0), c, false, &from_y);
+            assert_eq!(pts[1], (5.0, 0.5));
             // values snap to 0 / 100 % near the edges
             move_point(&mut pts, 1, pos2(500.0, 98.0), c, false, &from_y);
             assert_eq!(pts[1], (5.0, 0.0));

@@ -111,8 +111,8 @@ fn sync_phase_locks_124_to_126_within_1ms() {
 
 fn two_track_mix(style: TransitionStyle, keylock: bool) -> Mix {
     let mut mix = Mix { keylock, tempo: TempoMode::Glide, ..Default::default() };
-    mix.tracks.push(MixTrack { track_id: 1, mix_in: 0.0, mix_out: 20.0, key_shift: 0, gain_db: 0.0, stems: Vec::new(), line_bpm: None });
-    mix.tracks.push(MixTrack { track_id: 2, mix_in: 8.0 * 60.0 / 126.0, mix_out: 30.0, key_shift: 0, gain_db: 0.0, stems: Vec::new(), line_bpm: None });
+    mix.tracks.push(MixTrack { track_id: 1, mix_in: 0.0, mix_out: 20.0, key_shift: 0, gain_db: 0.0, stems: Vec::new() });
+    mix.tracks.push(MixTrack { track_id: 2, mix_in: 8.0 * 60.0 / 126.0, mix_out: 30.0, key_shift: 0, gain_db: 0.0, stems: Vec::new() });
     mix.normalize();
     mix.transitions[0] = Transition::new(style, 16);
     mix
@@ -520,8 +520,8 @@ fn rms(x: &[f32], t0: f64, t1: f64) -> f64 {
 /// Two 120 BPM tracks, transition of 16 beats starting at 20 s (track 2 mixed in at beat 8).
 fn lane_mix(style: TransitionStyle, lanes: [clubcraft_core::LaneSettings; 2]) -> Mix {
     let mut mix = Mix { keylock: false, tempo: TempoMode::Glide, ..Default::default() };
-    mix.tracks.push(MixTrack { track_id: 1, mix_in: 0.0, mix_out: 20.0, key_shift: 0, gain_db: 0.0, stems: Vec::new(), line_bpm: None });
-    mix.tracks.push(MixTrack { track_id: 2, mix_in: 4.0, mix_out: 30.0, key_shift: 0, gain_db: 0.0, stems: Vec::new(), line_bpm: None });
+    mix.tracks.push(MixTrack { track_id: 1, mix_in: 0.0, mix_out: 20.0, key_shift: 0, gain_db: 0.0, stems: Vec::new() });
+    mix.tracks.push(MixTrack { track_id: 2, mix_in: 4.0, mix_out: 30.0, key_shift: 0, gain_db: 0.0, stems: Vec::new() });
     mix.normalize();
     mix.transitions[0] = Transition::new(style, 16);
     mix.lanes = lanes.to_vec();
@@ -658,7 +658,7 @@ fn live_lane_edits_apply_immediately_without_clicks() {
 fn six_track_mix() -> Mix {
     let mut mix = Mix { keylock: false, tempo: TempoMode::Glide, ..Default::default() };
     for i in 0..6 {
-        mix.tracks.push(MixTrack { track_id: 1 + i, mix_in: if i == 0 { 0.0 } else { 2.0 }, mix_out: 20.0, key_shift: 0, gain_db: 0.0, stems: Vec::new(), line_bpm: None });
+        mix.tracks.push(MixTrack { track_id: 1 + i, mix_in: if i == 0 { 0.0 } else { 2.0 }, mix_out: 20.0, key_shift: 0, gain_db: 0.0, stems: Vec::new() });
     }
     mix.normalize();
     for t in mix.transitions.iter_mut() {

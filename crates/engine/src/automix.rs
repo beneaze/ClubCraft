@@ -52,7 +52,7 @@ pub fn plan(playlist: &[Arc<LoadedTrack>], opts: &AutomixOptions) -> Mix {
         if mix_out < mix_in + 8.0 * bl {
             mix_out = (t.duration() - opts.beats as f64 * bl).max(mix_in);
         }
-        mix.tracks.push(MixTrack { track_id: i as i64 + 1, mix_in, mix_out, key_shift: 0, gain_db: 0.0, stems: Vec::new(), line_bpm: None });
+        mix.tracks.push(MixTrack { track_id: i as i64 + 1, mix_in, mix_out, key_shift: 0, gain_db: 0.0, stems: Vec::new() });
     }
     for w in playlist.windows(2) {
         let both_stems = w[0].stems.is_some() && w[1].stems.is_some();
