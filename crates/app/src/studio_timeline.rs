@@ -35,6 +35,9 @@ impl ShowMode {
 
 /// What the timeline draws and edits inside the selected transition (like DJ.Studio's
 /// automation choice): one row per stem, or one curve for the volume, an EQ band or the filter.
+/// How much of a track's unplayed audio is shown beside its clip (s).
+const GHOST_SECS: f64 = 16.0;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum CurveTarget {
     #[default]
@@ -58,7 +61,7 @@ impl CurveTarget {
             CurveTarget::Filter => "Filter",
         }
     }
-    fn param(self) -> Option<Param> {
+    pub(crate) fn param(self) -> Option<Param> {
         match self {
             CurveTarget::Stems => None,
             CurveTarget::Volume => Some(Param::Volume),
@@ -322,6 +325,7 @@ impl StudioView {
             if r.right() < canvas.left() || r.left() > canvas.right() {
                 continue;
             }
+            self.draw_ghost(&p, r, i, sh, &x_of);
             self.draw_clip(&p, r, i, sh, &x_of);
             // selected range (yellow, like DJ.Studio)
             if let Some(rs) = self.range.filter(|rs| rs.track == i) {
@@ -777,9 +781,13 @@ impl StudioView {
                             set_lane(&mut self.mix.transitions[k], side, Param::Stem(stem), pts);
                             changed = true;
                         }
-                        // on / off per stem and side (DJ.Studio's stem toggles)
-                        let b = Rect::from_min_size(pos2(area.left() + 4.0, rr.center().y - 8.0), vec2(20.0, 16.0));
-                        if b.right() < area.right() && rr.height() >= 12.0 {
+                        // on / off per stem and side (DJ.Studio's stem toggles), outside the window
+                        // at the track's own edge: the outgoing track's at the end, the incoming
+                        // track's at the start (see docs/interop/djstudio.md §5.4), so they cover
+                        // no waveform. Pulled inside when that edge is off screen.
+                        let bx = if side == Side::Out { (area.right() + 4.0).min(canvas.right() - 22.0) } else { (area.left() - 24.0).max(canvas.left() + 2.0) };
+                        let b = Rect::from_min_size(pos2(bx, rr.center().y - 8.0), vec2(20.0, 16.0));
+                        if area.width() > 24.0 && rr.height() >= 12.0 {
                             let br = ui.interact(b, Id::new(("ttoggle", k, side == Side::In, row)), Sense::click());
                             painter.rect_filled(b, 4.0, if off { theme::PANEL } else { col });
                             painter.rect_stroke(b, 4.0, Stroke::new(1.0, col), StrokeKind::Inside);
@@ -986,9 +994,9 @@ impl StudioView {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 for (b, name) in [(2usize, "High"), (1, "Mid"), (0, "Low")] {
                     let col = if ls.eq[b] < 0.02 { Color32::from_rgb(255, 70, 70) } else { EQ_COLORS[b] };
-                    widgets::knob(ui, &mut ls.eq[b], 0.0..=1.0, 0.5, name, col, 26.0);
+                    widgets::knob_with_value(ui, &mut ls.eq[b], 0.0..=1.0, 0.5, name, col, 30.0, &eq_db_text);
                 }
-                widgets::knob(ui, &mut ls.filter, 0.0..=1.0, 0.5, "Filter", FILTER_COLOR, 26.0);
+                widgets::knob_with_value(ui, &mut ls.filter, 0.0..=1.0, 0.5, "Filter", FILTER_COLOR, 30.0, &|v| format!("{:.0}", (v - 0.5) * 200.0));
             });
         }
         if r.height() >= 128.0 {
@@ -1008,6 +1016,44 @@ impl StudioView {
             return true;
         }
         false
+    }
+
+    /// The audio of track `i` that doesn't play, faded out beside its clip `r`: what comes before
+    /// its mix-in and after its end, as far as the file goes (at most [`GHOST_SECS`]). It shows
+    /// where a mix point could move to.
+    fn draw_ghost(&self, p: &egui::Painter, r: Rect, i: usize, sh: &Shared, x_of: &dyn Fn(f64) -> f32) {
+        let tt = &self.timeline.tracks[i];
+        let (Some(wf), Some(a)) = (sh.waveforms.get(&tt.track_id), sh.analyses.get(&tt.track_id)) else { return };
+        if r.height() < 40.0 || !self.mix.lane_audible(i) {
+            return;
+        }
+        let (p0, p1) = (self.timeline.track_pos(i, tt.start_beat), self.timeline.track_pos(i, tt.end_beat));
+        if p1 <= p0 {
+            return;
+        }
+        // mix seconds per track second at the clip's edges (tempo changes inside are ignored)
+        let rate = (tt.end_sec - tt.start_sec) / (p1 - p0);
+        let wave = clip_wave_rect(r);
+        // only in the gap between the clips before and after it on the same lane
+        let lo = i.checked_sub(MIX_LANES).and_then(|j| self.timeline.tracks.get(j)).map_or(f32::NEG_INFINITY, |t| x_of(t.end_sec));
+        let hi = self.timeline.tracks.get(i + MIX_LANES).map_or(f32::INFINITY, |t| x_of(t.start_sec));
+        let gap = Rect::from_x_y_ranges(lo.max(p.clip_rect().left())..=hi.min(p.clip_rect().right()), wave.y_range());
+        if gap.width() <= 0.0 {
+            return;
+        }
+        let mut ghost = p.with_clip_rect(gap);
+        ghost.multiply_opacity(0.22);
+        let wp = WaveParams { wf, grid: a.grid, cues: &[], sections: &[], style: WaveStyle::Stems, stem_gains: [1.0; 4], loop_region: None, accent: theme::deck_color(i % MIX_LANES), volume: 1.0 };
+        let before = (p0 - GHOST_SECS).max(0.0);
+        if p0 > before {
+            let x0 = x_of(tt.start_sec - (p0 - before) * rate);
+            waveform::paint_wave(&ghost, Rect::from_x_y_ranges(x0..=r.left(), wave.y_range()), &wp, before, p0, true);
+        }
+        let after = (p1 + GHOST_SECS).min(a.duration);
+        if after > p1 {
+            let x1 = x_of(tt.end_sec + (after - p1) * rate);
+            waveform::paint_wave(&ghost, Rect::from_x_y_ranges(r.right()..=x1, wave.y_range()), &wp, p1, after, true);
+        }
     }
 
     fn draw_clip(&self, p: &egui::Painter, r: Rect, i: usize, sh: &Shared, x_of: &dyn Fn(f64) -> f32) {
@@ -1205,26 +1251,52 @@ impl StudioView {
         let beat_at_x = |x: f32| self.timeline.beat_at_sec(((x - origin) / self.zoom) as f64);
         let order = [StemKind::Drums, StemKind::Bass, StemKind::Other, StemKind::Vocals];
         let rh = rect.height() / 4.0;
-        let mut mesh = egui::Mesh::default();
+        // Each row shows the whole stem: its colour fills the area under the gain curve, the
+        // waveform stays at full size (dark where the stem plays, grey over hatching where the
+        // transition turns it down), so a cut stem can still be seen and placed.
+        let mut fill = egui::Mesh::default();
+        let mut wave = egui::Mesh::default();
         for (row, k) in order.into_iter().enumerate() {
             let r = Rect::from_min_size(pos2(rect.left(), rect.top() + row as f32 * rh), vec2(rect.width(), rh - 1.0));
             let col = theme::stem_color(k);
-            p.rect_filled(r.intersect(clip), 0.0, theme::blend(theme::PANEL, col, 0.2));
+            let rc = r.intersect(clip);
+            p.rect_filled(rc, 0.0, theme::blend(theme::PANEL, col, 0.12));
+            let hatch = p.with_clip_rect(rc);
+            let mut hx = rc.left() - rc.height() - (rc.left() - origin).rem_euclid(7.0);
+            while hx < rc.right() {
+                hatch.line_segment([pos2(hx, rc.bottom()), pos2(hx + rc.height(), rc.top())], Stroke::new(1.0, theme::STEM_HATCH));
+                hx += 7.0;
+            }
+            // the same plot area as the row's curve (see `edit_transition_curves`)
+            let (plot_top, plot_bottom) = (r.top() + 3.0, r.bottom() - 3.0);
             let data = &stems[k.index()];
             let mut x = clip.left().floor();
             while x < clip.right() {
                 let b = beat_at_x(x + 0.5);
                 let g = (tr.value(side, Param::Stem(k), (b - start) as f32) * tr.value(side, Param::Volume, (b - start) as f32)).clamp(0.0, 1.0);
+                let level = plot_bottom - g * (plot_bottom - plot_top);
+                if g > 0.0 {
+                    fill.add_colored_rect(Rect::from_min_max(pos2(x, level), pos2(x + 1.0, r.bottom())), col);
+                }
                 let pos = self.timeline.track_pos(i, b);
                 let bin = ((pos * wf.rate) as usize).min(data.len().saturating_sub(1));
-                let v = data.get(bin).map(|&v| v as f32 / 255.0).unwrap_or(0.0) * g;
+                let v = data.get(bin).map(|&v| v as f32 / 255.0).unwrap_or(0.0);
                 let hh = v * (rh * 0.5 - 2.0);
-                mesh.add_colored_rect(Rect::from_min_max(pos2(x, r.center().y - hh), pos2(x + 1.0, r.center().y + hh)), col);
+                let (w0, w1) = (r.center().y - hh, r.center().y + hh);
+                // split the bar where it crosses the top of the coloured area
+                let cut = level.clamp(w0, w1);
+                if cut > w0 {
+                    wave.add_colored_rect(Rect::from_min_max(pos2(x, w0), pos2(x + 1.0, cut)), theme::STEM_WAVE_OFF);
+                }
+                if w1 > cut {
+                    wave.add_colored_rect(Rect::from_min_max(pos2(x, cut), pos2(x + 1.0, w1)), theme::STEM_WAVE_ON);
+                }
                 x += 1.0;
             }
         }
         // (each row's level line is drawn, and edited, by `edit_transition_curves`)
-        p.add(egui::Shape::mesh(mesh));
+        p.add(egui::Shape::mesh(fill));
+        p.add(egui::Shape::mesh(wave));
     }
 
     /// Header of sample lane `l`: name, fader, solo / mute, add a file.
@@ -1529,4 +1601,13 @@ fn set_lane(t: &mut Transition, side: Side, param: Param, points: Vec<(f32, f32)
         Some(l) => l.points = points,
         None => t.lanes.push(clubcraft_core::Lane { side, param, points }),
     }
+}
+
+/// Lane EQ knob as dB on the mixer's curve; "kill" at the bottom.
+fn eq_db_text(v: f32) -> String {
+    if v < 0.02 {
+        return "kill".into();
+    }
+    let db = 20.0 * clubcraft_engine::dsp::eq_knob_gain(v).log10();
+    format!("{:.1}", if db.abs() < 0.05 { 0.0 } else { db })
 }

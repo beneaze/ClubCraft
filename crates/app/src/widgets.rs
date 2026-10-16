@@ -6,6 +6,18 @@ use eframe::egui::{self, pos2, vec2, Color32, Rect, Response, Sense, Stroke, Str
 /// Rotary knob. `value` in `range`; double-click resets to `default`. Vertical drag adjusts
 /// (hold shift for fine control). Returns the response (`changed()` when moved).
 pub fn knob(ui: &mut Ui, value: &mut f32, range: std::ops::RangeInclusive<f32>, default: f32, label: &str, color: Color32, size: f32) -> Response {
+    knob_impl(ui, value, range, default, label, color, size, None)
+}
+
+/// [`knob`] that shows its value (`text` of the current value) in the middle; the pointer is a
+/// short tick on the rim.
+#[allow(clippy::too_many_arguments)]
+pub fn knob_with_value(ui: &mut Ui, value: &mut f32, range: std::ops::RangeInclusive<f32>, default: f32, label: &str, color: Color32, size: f32, text: &dyn Fn(f32) -> String) -> Response {
+    knob_impl(ui, value, range, default, label, color, size, Some(text))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn knob_impl(ui: &mut Ui, value: &mut f32, range: std::ops::RangeInclusive<f32>, default: f32, label: &str, color: Color32, size: f32, text: Option<&dyn Fn(f32) -> String>) -> Response {
     let (rect, mut resp) = ui.allocate_exact_size(vec2(size, size + 13.0), Sense::click_and_drag());
     let (lo, hi) = (*range.start(), *range.end());
     if resp.dragged() {
@@ -46,7 +58,16 @@ pub fn knob(ui: &mut Ui, value: &mut f32, range: std::ops::RangeInclusive<f32>, 
         p.add(egui::Shape::line(pts, Stroke::new(3.0, color)));
     }
     let a = a0 + sweep * t;
-    p.line_segment([c + vec2(a.cos(), a.sin()) * (r * 0.25), c + vec2(a.cos(), a.sin()) * (r - 4.0)], Stroke::new(2.0, theme::TEXT));
+    let dir = vec2(a.cos(), a.sin());
+    match text {
+        Some(text) => {
+            p.line_segment([c + dir * (r - 7.0), c + dir * (r - 3.0)], Stroke::new(2.0, theme::TEXT));
+            p.text(c, egui::Align2::CENTER_CENTER, text(*value), egui::FontId::proportional((size * 0.3).min(11.0)), theme::TEXT);
+        }
+        None => {
+            p.line_segment([c + dir * (r * 0.25), c + dir * (r - 4.0)], Stroke::new(2.0, theme::TEXT));
+        }
+    }
     p.text(pos2(rect.center().x, rect.bottom() - 6.0), egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(10.0), theme::TEXT_DIM);
     resp
 }

@@ -161,7 +161,16 @@ impl App {
         for e in events {
             match e {
                 Event::LibraryChanged => reload_all = true,
-                Event::TrackUpdated(id) => self.sh.reload_track(&self.lib, id),
+                Event::TrackUpdated(id) => {
+                    self.sh.reload_track(&self.lib, id);
+                    // the cached audio may predate the new stems: a mix would keep playing the
+                    // stem-less copy and only imitate its stem curves
+                    self.eng.cache.invalidate(id);
+                    // a new grid moves the open mix's beats and tempo lane
+                    if self.studio.mix.tracks.iter().any(|t| t.track_id == id) {
+                        self.studio.timeline_dirty = true;
+                    }
+                }
                 Event::Error { message, .. } => self.status = message,
                 _ => {}
             }
@@ -756,6 +765,13 @@ impl App {
             "undo" => self.studio.undo(),
             "redo" => self.studio.redo(),
             "harmonize" => self.studio.harmonize(&self.sh),
+            "tcat" => {
+                // `tcat <stems|equalizer|effects|curves>`: transition editor category (tests)
+                use crate::studio_transition::TCategory;
+                if let Some(c) = TCategory::ALL.into_iter().find(|c| format!("{c:?}").eq_ignore_ascii_case(arg.trim())) {
+                    self.studio.tcat = c;
+                }
+            }
             "tab" => {
                 use crate::studio::Tab;
                 if let Some(t) = Tab::ALL.into_iter().find(|t| format!("{t:?}").eq_ignore_ascii_case(arg.trim())) {

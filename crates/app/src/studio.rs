@@ -72,6 +72,8 @@ pub struct StudioView {
     /// A mashup preview is playing (set by the app).
     pub preview_playing: bool,
     last_selection: Selection,
+    /// The transition the playhead was in on the last frame.
+    playhead_transition: Option<usize>,
     /// Open panel of the bottom bar.
     pub tab: Option<Tab>,
     /// Undo / redo history of the mix (one step per edit gesture).
@@ -141,6 +143,7 @@ impl Default for StudioView {
             mashup_actions: Vec::new(),
             preview_playing: false,
             last_selection: Selection::None,
+            playhead_transition: None,
             tab: Some(Tab::Playlist),
             undo: Vec::new(),
             redo: Vec::new(),
@@ -352,6 +355,7 @@ impl StudioView {
         if self.timeline_dirty {
             self.refresh_timeline(sh);
         }
+        self.follow_playhead_into_transitions(ui.ctx());
         self.keyboard(ui.ctx(), sh, out);
         self.run_extractions(sh);
         // the finder was opened from elsewhere (library, menu, inspector button)
@@ -372,7 +376,7 @@ impl StudioView {
                 Tab::Playlist => (100.0, 90.0),
                 Tab::Master => (90.0, 80.0),
                 Tab::Track => (330.0, 220.0),
-                Tab::Transition => (215.0, 130.0),
+                Tab::Transition => (260.0, 230.0),
                 Tab::Mashups => (430.0, 240.0),
             };
             egui::Panel::bottom(format!("studio-tab2-{tab:?}"))
@@ -797,6 +801,21 @@ impl StudioView {
     pub(crate) fn track_at_playhead(&self) -> Option<usize> {
         let n = self.timeline.tracks.len();
         (n > 0).then(|| self.timeline.tracks.iter().rposition(|t| t.start_sec <= self.position + 1e-6).unwrap_or(0).min(n - 1))
+    }
+
+    /// When the playhead enters a transition (playing or seeking), select it, which opens its
+    /// settings. Only on entering: inside, the user may close the panel or select something else.
+    /// Not while a mouse button is held, so a drag or curve edit keeps its selection.
+    fn follow_playhead_into_transitions(&mut self, ctx: &egui::Context) {
+        let pos = self.position;
+        let now = self.timeline.transitions.iter().position(|t| t.start_sec <= pos && pos < t.end_sec);
+        if now == self.playhead_transition || ctx.input(|i| i.pointer.any_down()) {
+            return;
+        }
+        self.playhead_transition = now;
+        if let Some(k) = now.filter(|&k| k + 1 < self.mix.tracks.len()) {
+            self.selection = Selection::Transition(k);
+        }
     }
 
     fn transition_at_playhead(&self) -> Option<usize> {
