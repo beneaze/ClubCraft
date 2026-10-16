@@ -45,19 +45,18 @@ impl ParamGroup {
 pub enum TCategory {
     #[default]
     Stems,
+    /// Volume and the three EQ bands side by side (as DJ.Studio's Equalizer category).
     Equalizer,
-    Volume,
     Effects,
     Curves,
 }
 
 impl TCategory {
-    const ALL: [TCategory; 5] = [TCategory::Stems, TCategory::Equalizer, TCategory::Volume, TCategory::Effects, TCategory::Curves];
+    pub const ALL: [TCategory; 4] = [TCategory::Stems, TCategory::Equalizer, TCategory::Effects, TCategory::Curves];
     fn label(self) -> &'static str {
         match self {
             TCategory::Stems => "Stems",
             TCategory::Equalizer => "Equalizer",
-            TCategory::Volume => "Volume",
             TCategory::Effects => "Effects",
             TCategory::Curves => "Curves (draw)",
         }
@@ -68,8 +67,7 @@ impl TCategory {
     fn columns(self) -> Vec<(Param, &'static str, Color32)> {
         match self {
             TCategory::Stems => [StemKind::Drums, StemKind::Bass, StemKind::Other, StemKind::Vocals].into_iter().map(|k| (Param::Stem(k), k.label(), theme::stem_color(k))).collect(),
-            TCategory::Equalizer => vec![(Param::EqLow, "Low", EQ_COLORS[0]), (Param::EqMid, "Mid", EQ_COLORS[1]), (Param::EqHigh, "High", EQ_COLORS[2])],
-            TCategory::Volume => vec![(Param::Volume, "Volume", Color32::from_gray(220))],
+            TCategory::Equalizer => vec![(Param::Volume, "Volume", Color32::from_gray(220)), (Param::EqLow, "Low", EQ_COLORS[0]), (Param::EqMid, "Mid", EQ_COLORS[1]), (Param::EqHigh, "High", EQ_COLORS[2])],
             TCategory::Effects => vec![(Param::Filter, "Filter", FILTER_COLOR), (Param::Echo, "Echo", Color32::from_rgb(255, 160, 90))],
             TCategory::Curves => vec![],
         }
@@ -93,6 +91,19 @@ fn mode_help(p: Param, m: Mode) -> &'static str {
     }
 }
 
+/// Mode name in its column: for stems "Off" silences the stem, for every other parameter it
+/// leaves the parameter alone, so there it is called "None".
+fn mode_label(p: Param, m: Mode) -> &'static str {
+    match (p, m) {
+        (Param::Stem(_), _) => m.label(),
+        (_, Mode::Off) => "None",
+        _ => m.label(),
+    }
+}
+
+/// Height of a mode entry: five modes and "Manual" fit the editor's default height.
+const MODE_H: f32 = 22.0;
+
 /// A titled column in the transition editor.
 fn column(ui: &mut Ui, w: f32, h: f32, title: &str, add: impl FnOnce(&mut Ui)) {
     egui::Frame::new().fill(theme::PANEL_HI).corner_radius(6.0).inner_margin(8.0).show(ui, |ui| {
@@ -109,14 +120,15 @@ fn column(ui: &mut Ui, w: f32, h: f32, title: &str, add: impl FnOnce(&mut Ui)) {
 
 /// A choice column with a coloured header (one stem / band).
 fn mode_column(ui: &mut Ui, title: &str, col: Color32, h: f32, add: impl FnOnce(&mut Ui)) {
-    egui::Frame::new().fill(theme::PANEL_HI).corner_radius(6.0).show(ui, |ui| {
+    egui::Frame::new().fill(theme::blend(theme::PANEL_HI, col, 0.07)).corner_radius(6.0).show(ui, |ui| {
         ui.set_width(144.0);
         ui.set_min_height(h);
         ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 3.0;
+            ui.spacing_mut().item_spacing.y = 2.0;
             let (r, _) = ui.allocate_exact_size(vec2(144.0, 28.0), Sense::hover());
-            ui.painter().rect_filled(r, egui::CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 }, theme::blend(theme::PANEL, col, 0.65));
-            ui.painter().text(r.left_center() + vec2(10.0, 0.0), egui::Align2::LEFT_CENTER, title, egui::FontId::proportional(14.0), Color32::WHITE);
+            // the stem's / band's own colour at full strength, so the columns read at a glance
+            ui.painter().rect_filled(r, egui::CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 }, col);
+            ui.painter().text(r.left_center() + vec2(10.0, 0.0), egui::Align2::LEFT_CENTER, title, egui::FontId::proportional(14.0), header_text(col));
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.add_space(8.0);
@@ -124,6 +136,26 @@ fn mode_column(ui: &mut Ui, title: &str, col: Color32, h: f32, add: impl FnOnce(
             });
         });
     });
+}
+
+/// Dark text on light header colours, white on dark ones.
+fn header_text(bg: Color32) -> Color32 {
+    let l = 0.299 * bg.r() as f32 + 0.587 * bg.g() as f32 + 0.114 * bg.b() as f32;
+    if l > 150.0 {
+        Color32::BLACK
+    } else {
+        Color32::WHITE
+    }
+}
+
+/// One mode entry: the chosen one is filled with the column's colour and outlined in it.
+fn mode_button(ui: &mut Ui, selected: bool, label: &str, col: Color32) -> egui::Response {
+    let b = if selected {
+        egui::Button::new(RichText::new(label).color(Color32::WHITE).strong()).fill(theme::blend(theme::PANEL_HI, col, 0.45)).stroke(Stroke::new(1.5, col))
+    } else {
+        egui::Button::new(label).fill(Color32::TRANSPARENT).stroke(Stroke::NONE)
+    };
+    ui.add_sized([128.0, MODE_H], b)
 }
 
 fn style_help(s: TransitionStyle) -> &'static str {
@@ -175,6 +207,7 @@ impl StudioView {
         let n_tr = self.mix.transitions.len();
         let locked = self.mix.transitions[k].locked;
         let mut changed = false;
+        let mut manual: Option<Param> = None;
 
         // ------------------------------------------------------------ header
         ui.horizontal(|ui| {
@@ -339,13 +372,15 @@ impl StudioView {
                                 let cur = tr.mode(param);
                                 mode_column(ui, name, col, h, |ui| {
                                     for &m in Mode::for_param(param) {
-                                        if ui.add_sized([128.0, 26.0], egui::Button::selectable(cur == Some(m), m.label())).on_hover_text(mode_help(param, m)).clicked() && cur != Some(m) {
+                                        if mode_button(ui, cur == Some(m), mode_label(param, m), col).on_hover_text(mode_help(param, m)).clicked() && cur != Some(m) {
                                             tr.set_mode(param, m);
                                             changed = true;
                                         }
                                     }
-                                    if cur.is_none() {
-                                        ui.label(RichText::new("preset curve").size(10.5).color(theme::TEXT_DIM)).on_hover_text("This parameter follows the preset's own curve (see Curves)");
+                                    // a curve none of the modes describe (a preset's own or a
+                                    // hand-drawn one) is "Manual"; choosing it draws that curve
+                                    if mode_button(ui, cur.is_none(), "Manual", col).on_hover_text("Draw this curve yourself in the timeline").clicked() {
+                                        manual = Some(param);
                                     }
                                 });
                             }
@@ -354,6 +389,20 @@ impl StudioView {
                 });
             });
         });
+        if let Some(p) = manual {
+            // draw it in the timeline where it has a curve row there, else in the curve editor
+            let target = match p {
+                Param::Stem(_) => Some(crate::studio_timeline::CurveTarget::Stems),
+                p => crate::studio_timeline::CurveTarget::ALL.into_iter().find(|t| t.param() == Some(p)),
+            };
+            match target {
+                Some(t) => self.curve_target = t,
+                None => {
+                    self.tcat = TCategory::Curves;
+                    self.tgroup = ParamGroup::FilterFx;
+                }
+            }
+        }
         if changed {
             self.changed();
         }

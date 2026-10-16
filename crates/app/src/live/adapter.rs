@@ -100,15 +100,21 @@ impl TrackCache {
         let sp = stems_path(&t.hash);
         let stems = match clubcraft_stems::load_stem_track(&sp) {
             Ok(st) if st.frames.abs_diff(audio.frames()) < 4096 => Some(Arc::new(st)),
-            _ => match live_sep {
-                Some(sep) => {
-                    let st = Arc::new(StemTrack::new(audio.frames(), "htdemucs"));
-                    let start = analysis.cue(clubcraft_core::CueKind::FirstBeat).map(|c| c.pos).unwrap_or(0.0);
-                    sep.submit(id, t.hash.clone(), audio.clone(), st.clone(), (start * clubcraft_core::SAMPLE_RATE as f64) as usize);
-                    Some(st)
+            other => {
+                // the UI shows stems for this track: say why they don't play
+                if let Ok(st) = &other {
+                    log::warn!("track {id}: stem file has {} frames, the audio {}; ignored", st.frames, audio.frames());
                 }
-                None => None,
-            },
+                match live_sep {
+                    Some(sep) => {
+                        let st = Arc::new(StemTrack::new(audio.frames(), "htdemucs"));
+                        let start = analysis.cue(clubcraft_core::CueKind::FirstBeat).map(|c| c.pos).unwrap_or(0.0);
+                        sep.submit(id, t.hash.clone(), audio.clone(), st.clone(), (start * clubcraft_core::SAMPLE_RATE as f64) as usize);
+                        Some(st)
+                    }
+                    None => None,
+                }
+            }
         };
         let lt = LoadedTrack::from_parts(&t, &analysis, stems, audio).with_user_cues(&lib.cues(id)?);
         let lt = Arc::new(lt);

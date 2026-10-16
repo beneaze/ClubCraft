@@ -931,3 +931,31 @@ fn incoming_track_starts_at_its_automation_not_full_level() {
     eprintln!("vocals switch on {late_ms:+.1} ms from the beat");
     assert!(late_ms.abs() < 8.0, "switched {late_ms} ms off the beat");
 }
+
+#[test]
+fn transition_stem_lanes_mute_each_stem_on_both_sides() {
+    // each track's audio lives in one stem; a transition lane holding that stem at 0 must
+    // silence it for the whole window, on the outgoing and on the incoming side
+    let n = SR as usize * 60;
+    let tone: Vec<f32> = (0..n).map(|i| 0.5 * (i as f32 * 440.0 * std::f32::consts::TAU / SR as f32).sin()).collect();
+    let z = vec![0f32; n];
+    for (k, st) in StemKind::ALL.iter().enumerate() {
+        for side in [clubcraft_core::Side::Out, clubcraft_core::Side::In] {
+            let mut stems: [(Vec<f32>, Vec<f32>); 4] = [(z.clone(), z.clone()), (z.clone(), z.clone()), (z.clone(), z.clone()), (z.clone(), z.clone())];
+            stems[k] = (tone.clone(), tone.clone());
+            let loud = Arc::new(LoadedTrack::new("x", mono(&tone)).with_grid(BeatGrid::new(120.0, 0.0)).with_stems(Arc::new(StemTrack::from_planar("x", &stems))));
+            let quiet = track(&z, 126.0, 0.0);
+            let mut mix = two_track_mix(TransitionStyle::Crossfade, true);
+            let mut t = Transition::new(TransitionStyle::Custom, 16);
+            t.lanes = vec![clubcraft_core::Lane::new(side, clubcraft_core::Param::Stem(*st), &[(0.0, 0.0), (16.0, 0.0)])];
+            mix.transitions[0] = t;
+            let tr = |id: i64| Some(if (id == 1) == (side == clubcraft_core::Side::Out) { loud.clone() } else { quiet.clone() });
+            let opts = RenderOptions { limiter: false, tail_secs: 0.5, ..Default::default() };
+            let (r, rep) = render_mix_to_vec(&mix, &|id| tr(id).map(|t| t.analysis()), &tr, &opts).unwrap();
+            let x = &rep.timeline.transitions[0];
+            let peak = |t0: f64, t1: f64| r[(t0 * SR as f64) as usize * 2..(t1 * SR as f64) as usize * 2].iter().fold(0f32, |m, v| m.max(v.abs()));
+            let inside = peak(x.start_sec + 0.5, x.end_sec - 0.5);
+            assert!(inside < 1e-3, "{st:?} on the {side:?} side still plays at {inside} inside the transition");
+        }
+    }
+}
