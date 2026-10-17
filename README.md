@@ -74,7 +74,7 @@ Every screenshot here is the real app at work on a mix imported from DJ.Studio. 
       <h3>Design the whole set</h3>
       Drop tracks in and <b>✨ Harmonize</b> orders them by Camelot key, tempo and energy arc, using simulated annealing over the whole set. Mix-in and mix-out points come from the analysed structure, and transition lengths fit the intro and outro of each pair.
       <br><br>
-      Slide tracks and transitions by bars, collapse lanes, solo or mute them, shape a lane with its EQ and filter, and render the result to WAV with a cue sheet, faster than real time. Everything else lives in a DJ.Studio-style bar at the bottom: the transport, plus tabs for Zoom, Playlist (a sortable track table with keys, harmonic matches, energy and BPM), Transition, Track, Mashups and Master. Two <b>sample lanes</b> take one-shots, loops and FX dropped from Finder. Drag across a track's waveform to select a range and right-click to copy it to a sample lane: the full sound, or just its drums, bass, melody, vocals, instrumental or drums + bass (⌘L, ⇧⌘1–6). The copy is stretched and key-shifted like the mix plays it, or you can save it as a WAV. Every edit can be undone.
+      Slide tracks and transitions by bars, collapse lanes, solo or mute them, shape a lane with its EQ and filter, and render the result to WAV with a cue sheet, faster than real time. Everything else lives in a DJ.Studio-style bar at the bottom: the transport, plus tabs for Zoom, Playlist (a sortable track table with keys, harmonic matches, energy and BPM), Transition, Track, Mashups and Master. Two <b>sample lanes</b> take one-shots, loops and FX dropped from Finder. Drag across a track's waveform to select a range and right-click to copy it to a sample lane: the full sound, or just its drums, bass, melody, vocals, instrumental or drums + bass (⌘L, ⇧⌘1–6). The copy is stretched and key-shifted like the mix plays it, or you can save it as a WAV. Every edit can be undone, and <b>savepoints</b> keep versions of a mix to switch between (none is lost on the way); <b>Duplicate</b> copies a mix to try something out.
     </td>
     <td width="50%" valign="top">
       <img src="docs/images/live.jpg" alt="The live view during an automix transition: two scrolling stem-coloured waveforms in phase, deck A playing Define (Club Mix) and deck B Alone, both at 122.5 BPM with eight auto-generated hot cues, the mixer in the middle with the automix moving the channel faders, and the browser with the automix queue below" width="100%">
@@ -92,7 +92,7 @@ Every screenshot here is the real app at work on a mix imported from DJ.Studio. 
       <br>
       <sub>The library: BPM, key, energy and cues for every analysed track.</sub>
       <h3>A library that analyses itself</h3>
-      Drop a folder in and every track is analysed within about a second. Stems are separated on demand: when a transition needs them, when you export a mix, or for the whole library in the background if you switch that on. Sort and search by artist, title, BPM, key or energy, and drag tracks onto a deck or into a mix.
+      Drop a folder in and every track is analysed within about a second. Stems are separated on demand: the parts of a track that a stem transition plays in, in seconds at the Fast quality, as soon as a mix needs them; whole tracks at your export quality before an export; or the whole library in the background if you switch that on. Sort and search by artist, title, BPM, key or energy, and drag tracks onto a deck or into a mix.
       <br><br>
       Imports your <b>DJ.Studio</b> projects: mix points, cues, transitions with their curves, stem automation and DJ.Studio's timing. The importer is built clean-room, from DJ.Studio's own files and exports only ([how it works](docs/interop/djstudio.md)). Exports beat grids, keys, hot cues and automix points to <b>VirtualDJ</b>.
     </td>
@@ -118,7 +118,7 @@ Every screenshot here is the real app at work on a mix imported from DJ.Studio. 
       <br><br>
       To switch stems off in any part of a song, drag across the waveform and right-click: mute drums, bass, melody or vocals there, or make that part an acapella or an instrumental.
       <br><br>
-      Until a track has stems, its stem curves are imitated with volume and EQ: each transition keeps its own shape, and the timeline shows it marked "no stems". <b>Stems missing</b> in the transport bar separates them for the whole mix in one click, and an export separates the ones it needs first. The editor also warns when the outgoing track fades out before its transition ends, or when the incoming track comes in much quieter.
+      Stems for a mix's stem transitions are separated automatically, only for the transition windows and at the Fast quality, so they are ready in seconds per transition. Until then the stem curves are imitated with volume and EQ: each transition keeps its own shape, and the timeline shows it marked "no stems". An export separates the whole tracks at the export quality first. The editor also warns when the outgoing track fades out before its transition ends, or when the incoming track comes in much quieter.
       <h3>Keyboard first</h3>
       <b>Studio:</b> Space play · ← → bar (⇧ 8 bars) · [ ] transitions · F follow · + − zoom · ⌘Z / ⇧⌘Z undo / redo · ⌘S save.<br>
       <b>Live:</b> Z X C and M , . cue/play/sync · 1–8 hot cues (⇧ deck B) · ← → crossfader.<br>
@@ -261,12 +261,12 @@ Your library, stems, waveforms, exports and recordings live in `~/Music/ClubCraf
 
 ## Downloads
 
-**[Latest release: v0.2.1](../../releases/tag/v0.2.1)**
+**[Latest release: v0.3.0](../../releases/tag/v0.3.0)**
 
 | Platform | File | Notes |
 |---|---|---|
-| macOS 13+ (Apple Silicon) | `ClubCraft-0.2.1-macos-arm64.dmg` | All CoreML stem models and the COCOLA mashup model bundled. Ad-hoc signed: right-click › Open the first time |
-| Windows 10/11 (x64) | `ClubCraft-0.2.1-windows-x64.zip` | `ClubCraft.exe`, `DirectML.dll`, the ONNX stem models and the COCOLA mashup model |
+| macOS 13+ (Apple Silicon) | `ClubCraft-0.3.0-macos-arm64.dmg` | All CoreML stem models and the COCOLA mashup model bundled. Ad-hoc signed: right-click › Open the first time |
+| Windows 10/11 (x64) | `ClubCraft-0.3.0-windows-x64.zip` | `ClubCraft.exe`, `DirectML.dll`, the ONNX stem models and the COCOLA mashup model |
 
 Development builds: `tools/bundle-macos.sh` (macOS), and the `ClubCraft-windows-x64` artifact of every [CI run](../../actions) (Windows, without models).
 
