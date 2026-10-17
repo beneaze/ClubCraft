@@ -294,6 +294,9 @@ impl LiveEngine {
         };
         if let Some(h) = &handle {
             let _ = h.send(Command::SetAutoGain(true));
+            // the crossfader mixes deck A (left) into deck B (right); channels start "thru"
+            let _ = h.send(Command::SetCrossfaderAssign(LIVE_DECKS[0], clubcraft_engine::CrossfaderAssign::A));
+            let _ = h.send(Command::SetCrossfaderAssign(LIVE_DECKS[1], clubcraft_engine::CrossfaderAssign::B));
         }
         let cache = TrackCache::default();
         cache.spawn_pinner();

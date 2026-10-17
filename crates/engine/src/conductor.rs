@@ -253,6 +253,9 @@ pub(crate) struct Conductor {
     pub finished: bool,
     pub serial: u64,
     slot_track: [Option<usize>; 2],
+    /// Crossfader assignment of the schedule's decks before it started (the mix plays them
+    /// through, with its own volume automation); given back when it stops.
+    saved_assign: [Option<(DeckId, CrossfaderAssign)>; 2],
     state: MixPlaybackState,
 }
 
@@ -309,6 +312,9 @@ impl Conductor {
             if let Some(ch) = mixer.channels.get_mut(d) {
                 ch.reset_automation();
                 ch.fader = 1.0;
+                if let Some(k) = sched.decks.iter().position(|&x| x == d) {
+                    self.saved_assign[k] = Some((d, ch.assign));
+                }
                 ch.assign = CrossfaderAssign::Thru;
             }
         }
@@ -347,6 +353,11 @@ impl Conductor {
             }
             if let Some(ch) = mixer.channels.get_mut(d) {
                 ch.reset_automation();
+            }
+        }
+        for (d, a) in self.saved_assign.iter_mut().filter_map(Option::take) {
+            if let Some(ch) = mixer.channels.get_mut(d) {
+                ch.assign = a;
             }
         }
         self.playing = false;
