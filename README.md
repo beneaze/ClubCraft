@@ -261,12 +261,12 @@ Your library, stems, waveforms, exports and recordings live in `~/Music/ClubCraf
 
 ## Downloads
 
-**[Latest release: v0.3.0](../../releases/tag/v0.3.0)**
+**[Latest release: v0.3.1](../../releases/tag/v0.3.1)**
 
 | Platform | File | Notes |
 |---|---|---|
-| macOS 13+ (Apple Silicon) | `ClubCraft-0.3.0-macos-arm64.dmg` | All CoreML stem models and the COCOLA mashup model bundled. Ad-hoc signed: right-click › Open the first time |
-| Windows 10/11 (x64) | `ClubCraft-0.3.0-windows-x64.zip` | `ClubCraft.exe`, `DirectML.dll`, the ONNX stem models and the COCOLA mashup model |
+| macOS 13+ (Apple Silicon) | `ClubCraft-0.3.1-macos-arm64.dmg` | All CoreML stem models and the COCOLA mashup model bundled. Ad-hoc signed: right-click › Open the first time |
+| Windows 10/11 (x64) | `ClubCraft-0.3.1-windows-x64.zip` | `ClubCraft.exe`, `DirectML.dll`, the ONNX stem models and the COCOLA mashup model |
 
 Development builds: `tools/bundle-macos.sh` (macOS), and the `ClubCraft-windows-x64` artifact of every [CI run](../../actions) (Windows, without models).
 
