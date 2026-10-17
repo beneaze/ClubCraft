@@ -27,6 +27,8 @@ enum Job {
     Import(Vec<PathBuf>, bool),
     /// Separate stems; `Some(quality)` overrides the playback quality (export).
     Separate(TrackId, Option<String>),
+    /// Fast stems for parts of a track only (track seconds): its stem transitions.
+    SeparateRegions(TrackId, Vec<(f64, f64)>),
     Analyze(TrackId),
 }
 
@@ -118,6 +120,11 @@ impl Jobs {
     /// Analyse now (fast, without stems) and separate stems afterwards (if enabled); the
     /// separation job re-analyses with the stems when it is done.
     /// Separate stems now (front of the queue), then re-analyse.
+    /// Fast stems for the parts `regions` (track seconds) of a track, ahead of other separation.
+    pub fn separate_regions(&self, id: TrackId, regions: Vec<(f64, f64)>) {
+        self.gpu.push(Job::SeparateRegions(id, regions), true);
+    }
+
     pub fn separate_now(&self, id: TrackId) {
         self.gpu.push(Job::Separate(id, None), true);
     }
@@ -270,6 +277,23 @@ fn worker(q: Arc<Queue>, other: Arc<Queue>, tx: Sender<Event>, settings: Arc<Mut
                 }
                 // analysis always follows separation
                 other_or_self(&q, &other, gpu, false).push(Job::Analyze(id), true);
+            }
+            Job::SeparateRegions(id, regions) => {
+                let _heavy = heavy();
+                let r = pipeline::separate_regions(&lib, &mut ctx, id, &regions, &cancel, &mut |frac, label| {
+                    let _ = tx.send(Event::Progress { track: Some(id), frac, label: label.to_string() });
+                });
+                match r {
+                    Ok(changed) => {
+                        let _ = tx.send(Event::Finished { track: Some(id) });
+                        if changed {
+                            let _ = tx.send(Event::TrackUpdated(id));
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Event::Error { track: Some(id), message: format!("stems: {e:#}") });
+                    }
+                }
             }
             Job::Analyze(id) => {
                 // Only analysis with stems (and the optional structure model) is heavy; the quick

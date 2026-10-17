@@ -25,6 +25,13 @@ pub enum StudioAction {
     AutoMixPoints,
     /// Separate stems for these tracks now.
     SeparateStems(Vec<TrackId>),
+    /// Save the open mix as a new mix and open that copy.
+    DuplicateMix,
+    /// Keep the open mix's current state as a savepoint with this name (empty: numbered).
+    AddSavepoint(String),
+    /// Go back (or forward) to a savepoint; every other savepoint stays.
+    RestoreSavepoint(i64),
+    DeleteSavepoint(i64),
 }
 
 /// Tabs of the bottom bar; each opens a panel above the transport.
@@ -74,6 +81,13 @@ pub struct StudioView {
     last_selection: Selection,
     /// The transition the playhead was in on the last frame.
     playhead_transition: Option<usize>,
+    /// Counts [`Self::set_mix`] calls: a running preview belongs to the mix it was started with.
+    pub mix_serial: u64,
+    /// Savepoints of the open mix, oldest first: (id, name, created at). Kept by the app.
+    pub savepoints: Vec<(i64, String, i64)>,
+    /// The savepoint the mix is at (saved or restored, unchanged since).
+    pub at_savepoint: Option<i64>,
+    savepoint_name: String,
     /// Open panel of the bottom bar.
     pub tab: Option<Tab>,
     /// Undo / redo history of the mix (one step per edit gesture).
@@ -83,6 +97,12 @@ pub struct StudioView {
     last_change: Option<std::time::Instant>,
     /// Width of the centred transport group (measured the previous frame).
     transport_w: f32,
+    /// Distance from the transport group's left edge to the centre of its play button (last
+    /// frame), so the play button itself sits in the middle of the window.
+    play_offset: f32,
+    /// Width the transport row needs at full size (left + centre + right groups, measured the
+    /// last time it was laid out that way); narrower rows use the compact labels.
+    transport_full_w: f32,
     pub selection: Selection,
     /// Pixels per second in the timeline.
     pub zoom: f32,
@@ -144,12 +164,18 @@ impl Default for StudioView {
             preview_playing: false,
             last_selection: Selection::None,
             playhead_transition: None,
+            mix_serial: 0,
+            savepoints: Vec::new(),
+            at_savepoint: None,
+            savepoint_name: String::new(),
             tab: Some(Tab::Playlist),
             undo: Vec::new(),
             redo: Vec::new(),
             committed: Mix::default(),
             last_change: None,
             transport_w: 420.0,
+            play_offset: 210.0,
+            transport_full_w: 0.0,
             selection: Selection::None,
             zoom: 6.0,
             scroll: 0.0,
@@ -212,6 +238,8 @@ fn analysis_of(sh: &Shared, id: TrackId) -> Option<Analysis> {
 
 impl StudioView {
     pub fn set_mix(&mut self, mix: Mix) {
+        self.mix_serial += 1;
+        self.at_savepoint = None;
         self.committed = mix.clone();
         self.undo.clear();
         self.redo.clear();
@@ -242,6 +270,14 @@ impl StudioView {
         self.timeline_dirty = true;
         self.dirty = true;
         self.edited = true;
+        self.at_savepoint = None;
+    }
+
+    /// Replace the mix with the state of a savepoint, as one undo step.
+    pub fn go_to_savepoint(&mut self, m: Mix) {
+        self.undo.push(self.mix.clone());
+        self.redo.clear();
+        self.restore(m);
     }
 
     fn restore(&mut self, m: Mix) {
@@ -892,14 +928,13 @@ impl StudioView {
     /// Tracks whose stem automation needs stems they don't have: none at all, or (with
     /// `quality`) only weaker ones than that quality.
     pub(crate) fn tracks_needing_stems(&self, sh: &Shared, quality: Option<&str>) -> Vec<TrackId> {
+        // for playback, the parts of the tracks the stem automation plays in are enough
+        let Some(quality) = quality else { return self.missing_stem_regions(sh).into_iter().map(|e| e.0).collect() };
         let mut ids: Vec<TrackId> = Vec::new();
         for (i, t) in self.mix.tracks.iter().enumerate() {
             let uses = !t.stems.is_empty() || (i > 0 && self.mix.transitions.get(i - 1).is_some_and(|x| x.uses_stems())) || self.mix.transitions.get(i).is_some_and(|x| x.uses_stems());
             let model = sh.analyses.get(&t.track_id).and_then(|a| a.stems_model.as_deref());
-            let has = match quality {
-                Some(q) => crate::pipeline::stems_meet(model, q),
-                None => model.is_some(),
-            };
+            let has = crate::pipeline::stems_meet(model, quality);
             if uses && !has && !ids.contains(&t.track_id) {
                 ids.push(t.track_id);
             }
@@ -907,9 +942,55 @@ impl StudioView {
         ids
     }
 
+    /// Savepoints: keep the current state under a name, go back or forward to any of them.
+    fn savepoints_menu(&mut self, ui: &mut Ui, has: bool, compact: bool, out: &mut Vec<StudioAction>) {
+        let n = self.savepoints.len();
+        let label = match (compact, n) {
+            (true, 0) => "⏺ ⏷".to_string(),
+            (true, n) => format!("⏺ {n} ⏷"),
+            (false, 0) => "⏺ Savepoints ⏷".to_string(),
+            (false, n) => format!("⏺ Savepoints ({n}) ⏷"),
+        };
+        ui.menu_button(label, |ui| {
+            ui.set_min_width(300.0);
+            ui.horizontal(|ui| {
+                let hint = format!("Savepoint {}", n + 1);
+                ui.add(egui::TextEdit::singleline(&mut self.savepoint_name).hint_text(hint).desired_width(170.0));
+                if ui.add_enabled(has, egui::Button::new("Save point")).on_hover_text("Keep the mix as it is now").clicked() {
+                    out.push(StudioAction::AddSavepoint(std::mem::take(&mut self.savepoint_name)));
+                    ui.close();
+                }
+            });
+            if n > 0 {
+                ui.separator();
+                egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                    // newest first
+                    for (id, name, at) in self.savepoints.iter().rev() {
+                        ui.horizontal(|ui| {
+                            let here = self.at_savepoint == Some(*id);
+                            let text = format!("{}{name}", if here { "● " } else { "" });
+                            let tip = if here { "The mix is at this savepoint" } else { "Go to this savepoint (the current state is kept as a savepoint first)" };
+                            if ui.add_sized([200.0, 20.0], egui::Button::selectable(here, text)).on_hover_text(tip).clicked() && !here {
+                                out.push(StudioAction::RestoreSavepoint(*id));
+                                ui.close();
+                            }
+                            ui.label(RichText::new(crate::home::fmt_date(*at)).size(11.0).color(theme::TEXT_DIM));
+                            if ui.small_button("🗑").on_hover_text("Delete this savepoint").clicked() {
+                                out.push(StudioAction::DeleteSavepoint(*id));
+                            }
+                        });
+                    }
+                });
+            }
+            ui.separator();
+            ui.label(RichText::new("Going to a savepoint keeps all the others, so you can switch back and forth.").size(11.0).color(theme::TEXT_DIM));
+        });
+    }
+
     fn transport(&mut self, ui: &mut Ui, sh: &Shared, mixes: &[(i64, String, i64)], out: &mut Vec<StudioAction>, load_mix: &mut Option<i64>, new_mix: &mut bool) {
         let full = ui.available_rect_before_wrap();
         let has = !self.mix.tracks.is_empty();
+        let compact = full.width() < self.transport_full_w;
         // ---- left: mixes, name, edit menu, undo / redo
         let mut left = ui.new_child(egui::UiBuilder::new().max_rect(full).layout(Layout::left_to_right(Align::Center)));
         left.spacing_mut().item_spacing.x = 6.0;
@@ -917,6 +998,10 @@ impl StudioView {
             ui.set_min_width(260.0);
             if ui.button("+ New mix").clicked() {
                 *new_mix = true;
+                ui.close();
+            }
+            if ui.add_enabled(has, egui::Button::new("Duplicate this mix")).on_hover_text("Save a copy of this mix and open it, to try something out").clicked() {
+                out.push(StudioAction::DuplicateMix);
                 ui.close();
             }
             ui.separator();
@@ -940,7 +1025,7 @@ impl StudioView {
                 ui.close();
             }
         });
-        if left.add(egui::TextEdit::singleline(&mut self.mix.name).font(egui::FontId::proportional(15.0)).frame(egui::Frame::NONE).desired_width(190.0)).changed() {
+        if left.add(egui::TextEdit::singleline(&mut self.mix.name).font(egui::FontId::proportional(15.0)).frame(egui::Frame::NONE).desired_width(if compact { 110.0 } else { 190.0 })).changed() {
             self.dirty = true;
         }
         if self.dirty {
@@ -950,6 +1035,7 @@ impl StudioView {
         } else {
             left.label(RichText::new("saved").size(11.0).color(theme::TEXT_DIM));
         }
+        self.savepoints_menu(&mut left, has, compact, out);
         left.menu_button("Edit ⏷", |ui| {
             ui.set_min_width(240.0);
             if ui.add_enabled(self.mix.tracks.len() > 2, egui::Button::new("✨ Harmonize order")).on_hover_text("Re-order for harmonic mixing, smooth tempo and an energy arc").clicked() {
@@ -970,11 +1056,14 @@ impl StudioView {
                 ui.close();
             }
         });
-        if left.add_enabled(!self.undo.is_empty(), egui::Button::new("↩").min_size(vec2(28.0, 26.0))).on_hover_text("Undo (⌘Z)").clicked() {
-            self.undo();
-        }
-        if left.add_enabled(!self.redo.is_empty(), egui::Button::new("↪").min_size(vec2(28.0, 26.0))).on_hover_text("Redo (Shift+⌘Z)").clicked() {
-            self.redo();
+        // (compact: undo / redo stay in the Edit menu and on ⌘Z)
+        if !compact {
+            if left.add_enabled(!self.undo.is_empty(), egui::Button::new("↩").min_size(vec2(28.0, 26.0))).on_hover_text("Undo (⌘Z)").clicked() {
+                self.undo();
+            }
+            if left.add_enabled(!self.redo.is_empty(), egui::Button::new("↪").min_size(vec2(28.0, 26.0))).on_hover_text("Redo (Shift+⌘Z)").clicked() {
+                self.redo();
+            }
         }
         // ---- right: output
         let mut right = ui.new_child(egui::UiBuilder::new().max_rect(full).layout(Layout::right_to_left(Align::Center)));
@@ -989,17 +1078,22 @@ impl StudioView {
         }
         let missing = self.tracks_missing_stems(sh);
         if !missing.is_empty() {
-            let b = egui::Button::new(RichText::new(format!("Stems missing ({})", missing.len())).color(theme::WARN).size(12.0));
+            let text = if compact { format!("⚠ {}", missing.len()) } else { format!("Stems missing ({})", missing.len()) };
+            let b = egui::Button::new(RichText::new(text).color(theme::WARN).size(12.0));
             if right.add(b).on_hover_text("These tracks have stem automation (in transitions or on the track) but no stems yet, so it is imitated with volume and EQ. Click to separate their stems for the real sound.").clicked() {
                 out.push(StudioAction::SeparateStems(missing));
             }
         }
-        if !self.message.is_empty() {
-            right.label(RichText::new(&self.message).color(theme::TEXT_DIM).size(11.0));
-        }
-        // ---- centre: transport (centred on the measured width of the last frame)
+        // (the status message is drawn below, where it fits; it doesn't count as width the row needs)
+        let right_w = right.min_rect().width();
+        // ---- centre: transport, placed so the play button is in the middle of the window (by
+        // last frame's measurements), but moved right of the left group when that reaches into
+        // it (and kept off the right group while there is room)
         let cw = self.transport_w.max(100.0);
-        let crect = egui::Rect::from_min_size(egui::pos2(full.center().x - cw / 2.0, full.top()), vec2(cw + 8.0, full.height()));
+        let gap = 12.0;
+        let (left_end, right_start) = (left.min_rect().right() + gap, right.min_rect().left() - gap);
+        let cx = (full.center().x - self.play_offset).min(right_start - cw).max(left_end);
+        let crect = egui::Rect::from_min_size(egui::pos2(cx, full.top()), vec2(cw + 8.0, full.height()));
         let mut c = ui.new_child(egui::UiBuilder::new().max_rect(crect).layout(Layout::left_to_right(Align::Center)));
         c.spacing_mut().item_spacing.x = 8.0;
         let round = |t: &str| egui::Button::new(RichText::new(t).size(15.0)).corner_radius(17.0).min_size(vec2(34.0, 34.0));
@@ -1013,7 +1107,9 @@ impl StudioView {
                 out.push(StudioAction::Seek(self.timeline.transitions[k].start_sec));
             }
         }
-        if crate::widgets::play_button(&mut c, self.playing, has, 40.0).on_hover_text("Play / pause (Space)").clicked() {
+        let play = crate::widgets::play_button(&mut c, self.playing, has, 40.0);
+        self.play_offset = play.rect.center().x - crect.left();
+        if play.on_hover_text("Play / pause (Space)").clicked() {
             out.push(StudioAction::PlayPause);
         }
         if c.add_enabled(!self.timeline.transitions.is_empty(), round("⏩")).on_hover_text("Next transition (])").clicked() {
@@ -1033,6 +1129,19 @@ impl StudioView {
             self.follow = !self.follow;
         }
         self.transport_w = c.min_rect().width();
+        // status message between the transport and the right group, when it fits there
+        if !self.message.is_empty() {
+            let text = RichText::new(&self.message).color(theme::TEXT_DIM).size(11.0);
+            let w = ui.fonts_mut(|f| f.layout_no_wrap(self.message.clone(), egui::FontId::proportional(11.0), theme::TEXT_DIM).size().x);
+            let free = egui::Rect::from_x_y_ranges((cx + cw + gap)..=(right_start), full.y_range());
+            if free.width() >= w {
+                let mut m = ui.new_child(egui::UiBuilder::new().max_rect(free).layout(Layout::right_to_left(Align::Center)));
+                m.label(text);
+            }
+        }
+        if !compact {
+            self.transport_full_w = left.min_rect().width() + self.transport_w + right_w + 4.0 * gap;
+        }
         ui.allocate_rect(full, Sense::hover());
     }
 

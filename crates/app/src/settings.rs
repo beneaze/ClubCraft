@@ -149,47 +149,65 @@ impl Settings {
         if !self.open {
             return;
         }
-        let mut open = self.open;
-        egui::Window::new("Settings")
-            .open(&mut open)
-            .default_size([760.0, 560.0])
-            .min_width(640.0)
-            .resizable(true)
-            .collapsible(false)
-            .show(ctx, |ui| {
-                ui.horizontal_top(|ui| {
-                    ui.vertical(|ui| {
-                        ui.set_width(150.0);
-                        for t in Tab::ALL {
-                            if ui.add(egui::Button::new(RichText::new(t.label()).size(13.0)).selected(self.tab == t).min_size(egui::vec2(146.0, 26.0))).clicked() {
-                                self.tab = t;
-                            }
+        // A dialog in the app's own look: rounded panel over a dimmed backdrop, own header, a
+        // sidebar like the segmented controls; Esc or a click outside closes it.
+        let frame = egui::Frame::new()
+            .fill(theme::PANEL)
+            .stroke(egui::Stroke::new(1.0, theme::LINE))
+            .corner_radius(12.0)
+            .inner_margin(egui::Margin::same(18))
+            .shadow(egui::epaint::Shadow { offset: [0, 8], blur: 28, spread: 0, color: egui::Color32::from_black_alpha(120) });
+        let mut close = false;
+        let resp = egui::Modal::new(egui::Id::new("settings")).frame(frame).backdrop_color(egui::Color32::from_black_alpha(120)).show(ctx, |ui| {
+            settings_style(ui.style_mut());
+            ui.set_width(800.0);
+            ui.set_height(560.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Settings").size(20.0).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    close = close_button(ui).on_hover_text("Close (Esc)").clicked();
+                });
+            });
+            ui.add_space(10.0);
+            ui.horizontal_top(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(170.0);
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    for t in Tab::ALL {
+                        if nav_item(ui, t.label(), self.tab == t).clicked() {
+                            self.tab = t;
                         }
-                    });
-                    ui.separator();
-                    ui.vertical(|ui| {
-                        egui::ScrollArea::vertical().id_salt("settings-body").show(ui, |ui| {
-                            ui.set_min_width(520.0);
-                            match self.tab {
-                                Tab::General => general_ui(ui, prefs),
-                                Tab::Decks => decks_ui(ui, prefs),
-                                Tab::Mixer => mixer_ui(ui, prefs),
-                                Tab::Audio => self.audio_ui(ui, handle),
-                                Tab::Waveforms => waveforms_ui(ui, prefs),
-                                Tab::Analysis => analysis_ui(ui, prefs, actions),
-                                Tab::Studio => studio_ui(ui, prefs),
-                                Tab::Export => export_ui(ui, prefs),
-                                Tab::Controllers => self.midi_ui(ui, handle),
-                            }
-                            if !self.message.is_empty() {
-                                ui.add_space(8.0);
-                                ui.label(RichText::new(&self.message).color(theme::TEXT_DIM));
-                            }
-                        });
+                    }
+                });
+                ui.add_space(10.0);
+                let (sep, _) = ui.allocate_exact_size(egui::vec2(1.0, 520.0), egui::Sense::hover());
+                ui.painter().rect_filled(sep, 0.0, theme::LINE);
+                ui.add_space(14.0);
+                ui.vertical(|ui| {
+                    egui::ScrollArea::vertical().id_salt("settings-body").show(ui, |ui| {
+                        ui.set_min_width(590.0);
+                        match self.tab {
+                            Tab::General => general_ui(ui, prefs),
+                            Tab::Decks => decks_ui(ui, prefs),
+                            Tab::Mixer => mixer_ui(ui, prefs),
+                            Tab::Audio => self.audio_ui(ui, handle),
+                            Tab::Waveforms => waveforms_ui(ui, prefs),
+                            Tab::Analysis => analysis_ui(ui, prefs, actions),
+                            Tab::Studio => studio_ui(ui, prefs),
+                            Tab::Export => export_ui(ui, prefs),
+                            Tab::Controllers => self.midi_ui(ui, handle),
+                        }
+                        if !self.message.is_empty() {
+                            ui.add_space(8.0);
+                            ui.label(RichText::new(&self.message).color(theme::TEXT_DIM));
+                        }
                     });
                 });
             });
-        self.open = open;
+        });
+        if close || resp.should_close() {
+            self.open = false;
+        }
     }
 
     fn audio_ui(&mut self, ui: &mut egui::Ui, handle: Option<&EngineHandle>) {
@@ -328,10 +346,92 @@ pub enum SettingsAction {
     ReanalyseAll,
 }
 
+/// Widget look inside the settings dialog: choices like the app's segmented controls (graphite
+/// segment on a dark track), no hover growth, checkboxes with a visible box and an accent tick.
+fn settings_style(s: &mut egui::Style) {
+    let v = &mut s.visuals;
+    v.selection.bg_fill = theme::SEG_ON;
+    v.selection.stroke = egui::Stroke::new(1.0, theme::TEXT);
+    for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
+        w.expansion = 0.0;
+        w.corner_radius = egui::CornerRadius::same(6);
+        w.fg_stroke = egui::Stroke::new(1.5, theme::accent());
+    }
+    v.widgets.inactive.bg_fill = theme::SEG_TRACK;
+    v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, theme::LINE);
+    v.widgets.hovered.weak_bg_fill = theme::SEG_HOVER;
+    v.widgets.hovered.bg_fill = theme::SEG_HOVER;
+    v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, theme::SEG_ON_LINE);
+    v.widgets.active.weak_bg_fill = theme::SEG_ON;
+    s.spacing.button_padding = egui::vec2(10.0, 4.0);
+    s.spacing.item_spacing = egui::vec2(8.0, 8.0);
+}
+
+fn nav_item(ui: &mut Ui, text: &str, selected: bool) -> egui::Response {
+    let (r, resp) = ui.allocate_exact_size(egui::vec2(170.0, 30.0), egui::Sense::click());
+    let p = ui.painter();
+    if selected {
+        p.rect_filled(r, 6.0, theme::SEG_ON);
+        p.rect_stroke(r, 6.0, egui::Stroke::new(1.0, theme::SEG_ON_LINE), egui::StrokeKind::Inside);
+    } else if resp.hovered() {
+        p.rect_filled(r, 6.0, theme::SEG_HOVER);
+    }
+    let col = if selected || resp.hovered() { theme::TEXT } else { theme::TEXT_DIM };
+    p.text(r.left_center() + egui::vec2(12.0, 0.0), egui::Align2::LEFT_CENTER, text, egui::FontId::proportional(13.5), col);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn close_button(ui: &mut Ui) -> egui::Response {
+    let (r, resp) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::click());
+    let p = ui.painter();
+    if resp.hovered() {
+        p.circle_filled(r.center(), 14.0, theme::SEG_HOVER);
+    }
+    let (c, d) = (r.center(), 5.0);
+    let stroke = egui::Stroke::new(1.6, if resp.hovered() { theme::TEXT } else { theme::TEXT_DIM });
+    p.line_segment([c + egui::vec2(-d, -d), c + egui::vec2(d, d)], stroke);
+    p.line_segment([c + egui::vec2(-d, d), c + egui::vec2(d, -d)], stroke);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Checkbox in the dialog's look: a small rounded square, accent-filled with a tick when on.
+fn check(ui: &mut Ui, value: &mut bool, label: &str) -> egui::Response {
+    let font = egui::FontId::proportional(13.0);
+    let w = ui.fonts_mut(|f| f.layout_no_wrap(label.to_string(), font.clone(), theme::TEXT).size().x);
+    let (r, mut resp) = ui.allocate_exact_size(egui::vec2(16.0 + 7.0 + w, 22.0), egui::Sense::click());
+    if resp.clicked() {
+        *value = !*value;
+        resp.mark_changed();
+    }
+    let p = ui.painter();
+    let b = egui::Rect::from_center_size(egui::pos2(r.left() + 8.0, r.center().y), egui::vec2(16.0, 16.0));
+    if *value {
+        p.rect_filled(b, 4.0, theme::accent());
+        let c = theme::BG;
+        p.line_segment([b.left_center() + egui::vec2(3.5, 0.5), b.center_bottom() + egui::vec2(-1.0, -4.0)], egui::Stroke::new(2.0, c));
+        p.line_segment([b.center_bottom() + egui::vec2(-1.0, -4.0), b.right_top() + egui::vec2(-3.5, 4.0)], egui::Stroke::new(2.0, c));
+    } else {
+        p.rect_filled(b, 4.0, if resp.hovered() { theme::SEG_HOVER } else { theme::SEG_TRACK });
+        p.rect_stroke(b, 4.0, egui::Stroke::new(1.0, if resp.hovered() { theme::SEG_ON_LINE } else { theme::LINE }), egui::StrokeKind::Inside);
+    }
+    p.text(egui::pos2(b.right() + 7.0, r.center().y), egui::Align2::LEFT_CENTER, label, font, theme::TEXT);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 fn section(ui: &mut Ui, title: &str) {
     ui.add_space(2.0);
     ui.label(RichText::new(title).size(16.0).strong());
-    ui.add_space(4.0);
+    ui.add_space(6.0);
+}
+
+/// A row whose options are one choice: drawn as a segmented control.
+fn row_choice(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
+    row(ui, label, |ui| {
+        egui::Frame::new().fill(theme::SEG_TRACK).corner_radius(8.0).inner_margin(egui::Margin::same(3)).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.horizontal(add);
+        });
+    });
 }
 
 fn hint(ui: &mut Ui, text: &str) {
@@ -340,14 +440,16 @@ fn hint(ui: &mut Ui, text: &str) {
 
 fn row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
     ui.horizontal(|ui| {
-        ui.add_sized(egui::vec2(190.0, 20.0), egui::Label::new(label));
+        // labels left-aligned in a fixed column, like a form
+        let (r, _) = ui.allocate_exact_size(egui::vec2(170.0, 26.0), egui::Sense::hover());
+        ui.painter().text(r.left_center(), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(13.0), theme::TEXT_DIM);
         add(ui);
     });
 }
 
 fn general_ui(ui: &mut Ui, p: &mut Prefs) {
     section(ui, "General");
-    row(ui, "Key notation", |ui| {
+    row_choice(ui, "Key notation", |ui| {
         ui.selectable_value(&mut p.key_notation, KeyNotation::Camelot, "Camelot (8A)");
         ui.selectable_value(&mut p.key_notation, KeyNotation::OpenKey, "Open Key (1m)");
         ui.selectable_value(&mut p.key_notation, KeyNotation::Musical, "Musical (Am)");
@@ -371,7 +473,7 @@ fn general_ui(ui: &mut Ui, p: &mut Prefs) {
         ui.add(egui::Slider::new(&mut p.ui_scale, 0.8..=1.5).step_by(0.05).custom_formatter(|v, _| format!("{:.0} %", v * 100.0)));
     });
     row(ui, "On start", |ui| {
-        ui.checkbox(&mut p.start_on_home, "Open the home page");
+        check(ui, &mut p.start_on_home, "Open the home page");
     });
     ui.add_space(8.0);
     hint(ui, &format!("Library, stems and exports are stored in {}", clubcraft_core::paths::data_dir().display()));
@@ -379,69 +481,74 @@ fn general_ui(ui: &mut Ui, p: &mut Prefs) {
 
 fn decks_ui(ui: &mut Ui, p: &mut Prefs) {
     section(ui, "Decks");
-    row(ui, "Cue button", |ui| {
+    row_choice(ui, "Cue button", |ui| {
         ui.selectable_value(&mut p.cue_button, CueButton::Cdj, "CDJ").on_hover_text("Stopped: set / preview the cue. Playing: back to the cue and stop.");
         ui.selectable_value(&mut p.cue_button, CueButton::Hold, "Hold").on_hover_text("Plays while held, returns on release");
         ui.selectable_value(&mut p.cue_button, CueButton::Cup, "Cue-up-play").on_hover_text("Release starts playback from the cue");
     });
-    row(ui, "Hot cue while stopped", |ui| {
+    row_choice(ui, "Hot cue while stopped", |ui| {
         ui.selectable_value(&mut p.hot_cue_press, HotCuePress::Preview, "Preview while held");
         ui.selectable_value(&mut p.hot_cue_press, HotCuePress::Play, "Start playing");
     });
-    row(ui, "Park loaded track at", |ui| {
+    row_choice(ui, "Park loaded track at", |ui| {
         ui.selectable_value(&mut p.load_position, LoadPosition::FirstBeat, "First beat");
         ui.selectable_value(&mut p.load_position, LoadPosition::MixIn, "Mix-in cue");
         ui.selectable_value(&mut p.load_position, LoadPosition::FileStart, "Start of file");
     });
-    row(ui, "Default pitch range", |ui| {
+    row_choice(ui, "Default pitch range", |ui| {
         for r in [6u32, 8, 10, 16, 25, 50, 100] {
             ui.selectable_value(&mut p.pitch_range, r, format!("±{r}%"));
         }
     });
     row(ui, "On load", |ui| {
-        ui.checkbox(&mut p.keylock, "Keylock on");
-        ui.checkbox(&mut p.quantize, "Quantize on");
-        ui.checkbox(&mut p.sync_on_load, "Sync to master");
+        check(ui, &mut p.keylock, "Keylock on");
+        check(ui, &mut p.quantize, "Quantize on");
+        check(ui, &mut p.sync_on_load, "Sync to master");
     });
     row(ui, "Reset on load", |ui| {
-        ui.checkbox(&mut p.reset_eq_on_load, "EQ & filter");
-        ui.checkbox(&mut p.reset_stems_on_load, "Stems");
-        ui.checkbox(&mut p.reset_key_on_load, "Key shift");
-        ui.checkbox(&mut p.reset_pitch_on_load, "Pitch");
+        check(ui, &mut p.reset_eq_on_load, "EQ & filter");
+        check(ui, &mut p.reset_stems_on_load, "Stems");
+        check(ui, &mut p.reset_key_on_load, "Key shift");
+        check(ui, &mut p.reset_pitch_on_load, "Pitch");
     });
 }
 
 fn mixer_ui(ui: &mut Ui, p: &mut Prefs) {
     section(ui, "Mixer");
-    row(ui, "Crossfader curve", |ui| {
+    row_choice(ui, "Crossfader curve", |ui| {
         ui.selectable_value(&mut p.crossfader_curve, XfCurve::Smooth, "Smooth");
         ui.selectable_value(&mut p.crossfader_curve, XfCurve::Full, "Full");
         ui.selectable_value(&mut p.crossfader_curve, XfCurve::Cut, "Cut");
         ui.selectable_value(&mut p.crossfader_curve, XfCurve::Scratch, "Scratch");
     });
-    row(ui, "Channel fader curve", |ui| {
+    row_choice(ui, "Channel fader curve", |ui| {
         ui.selectable_value(&mut p.fader_curve, FaderLaw::Linear, "Linear");
         ui.selectable_value(&mut p.fader_curve, FaderLaw::Smooth, "Smooth");
         ui.selectable_value(&mut p.fader_curve, FaderLaw::Fast, "Fast");
     });
     row(ui, "Auto gain", |ui| {
-        ui.checkbox(&mut p.auto_gain, "Match the loudness of every track");
+        check(ui, &mut p.auto_gain, "Match the loudness of every track");
     });
     row(ui, "Master limiter", |ui| {
-        ui.checkbox(&mut p.limiter, "On");
+        check(ui, &mut p.limiter, "On");
         ui.add_enabled(p.limiter, egui::Slider::new(&mut p.limiter_ceiling_db, -6.0..=0.0).suffix(" dB").text("ceiling"));
     });
 }
 
 fn waveforms_ui(ui: &mut Ui, p: &mut Prefs) {
     section(ui, "Waveforms");
-    row(ui, "Colours", |ui| {
+    row_choice(ui, "Colours", |ui| {
         ui.selectable_value(&mut p.stem_waveforms, true, "By stem");
         ui.selectable_value(&mut p.stem_waveforms, false, "By frequency band");
     });
     row(ui, "Stem palette", |ui| {
-        ui.selectable_value(&mut p.soft_stem_colors, true, "Soft");
-        ui.selectable_value(&mut p.soft_stem_colors, false, "Vivid");
+        egui::Frame::new().fill(theme::SEG_TRACK).corner_radius(8.0).inner_margin(egui::Margin::same(3)).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut p.soft_stem_colors, true, "Soft");
+                ui.selectable_value(&mut p.soft_stem_colors, false, "Vivid");
+            });
+        });
         for k in [clubcraft_core::StemKind::Drums, clubcraft_core::StemKind::Bass, clubcraft_core::StemKind::Other, clubcraft_core::StemKind::Vocals] {
             ui.label(RichText::new("■").size(14.0).color(theme::stem_color(k)));
         }
@@ -461,26 +568,26 @@ fn analysis_ui(ui: &mut Ui, p: &mut Prefs, actions: &mut Vec<SettingsAction>) {
     });
     hint(ui, "Detected tempos are folded into this range (e.g. 70–180 for house and techno, 85–175 for drum & bass at half time).");
     row(ui, "Structure", |ui| {
-        ui.checkbox(&mut p.deep_structure, "Deep structure analysis (All-In-One model)");
+        check(ui, &mut p.deep_structure, "Deep structure analysis (All-In-One model)");
     });
     hint(ui, "Slightly better sections and cues; needs stems, about 1 min and 1.5 GB extra per track.");
     ui.add_space(6.0);
     section(ui, "Stems");
     row(ui, "Separate automatically", |ui| {
-        ui.checkbox(&mut p.separate_stems, "For every imported track (in the background)");
+        check(ui, &mut p.separate_stems, "For every imported track (in the background)");
     });
     let qualities = [
         ("best", "Best", "Mel-Band RoFormer vocals + htdemucs_ft: cleanest vocals, ~2.5 min per track"),
         ("high", "High", "htdemucs_ft, ~80 s per track"),
         ("fast", "Fast", "htdemucs, ~17 s per track"),
     ];
-    row(ui, "Quality for playback", |ui| {
+    row_choice(ui, "Quality for playback", |ui| {
         for (q, l, h) in qualities {
             ui.selectable_value(&mut p.stem_quality, q.to_string(), l).on_hover_text(h);
         }
     });
     hint(ui, "Used for the decks, the studio and background separation. A deck plays a track while its stems are separated: with Fast the part under the playhead has stems within a second, with Best after about 15 s.");
-    row(ui, "Quality for export", |ui| {
+    row_choice(ui, "Quality for export", |ui| {
         for (q, l, h) in qualities {
             ui.selectable_value(&mut p.export_stem_quality, q.to_string(), l).on_hover_text(h);
         }
@@ -510,7 +617,7 @@ fn studio_ui(ui: &mut Ui, p: &mut Prefs) {
             }
         });
     });
-    row(ui, "Transition length", |ui| {
+    row_choice(ui, "Transition length", |ui| {
         ui.selectable_value(&mut p.transition_bars, None, "Auto");
         for b in [4u32, 8, 16, 32] {
             ui.selectable_value(&mut p.transition_bars, Some(b), format!("{b} bars"));
@@ -518,29 +625,29 @@ fn studio_ui(ui: &mut Ui, p: &mut Prefs) {
     });
     hint(ui, "Auto picks the length from the outro of the outgoing and the intro of the incoming track. Stem transitions fall back to a bass swap for tracks without stems.");
     row(ui, "Harmonic mixing", |ui| {
-        ui.checkbox(&mut p.allow_key_shift, "Shift keys by ±1 semitone to avoid clashes");
+        check(ui, &mut p.allow_key_shift, "Shift keys by ±1 semitone to avoid clashes");
     });
     row(ui, "Keylock in mixes", |ui| {
-        ui.checkbox(&mut p.mix_keylock, "Keep the original key when the tempo changes");
+        check(ui, &mut p.mix_keylock, "Keep the original key when the tempo changes");
     });
 }
 
 fn export_ui(ui: &mut Ui, p: &mut Prefs) {
     section(ui, "Mix export");
-    row(ui, "Format", |ui| {
+    row_choice(ui, "Format", |ui| {
         for f in [AudioFormat::Wav16, AudioFormat::Wav24, AudioFormat::Wav32Float] {
             ui.selectable_value(&mut p.export_format, f, f.label());
         }
     });
     row(ui, "Cue sheet", |ui| {
-        ui.checkbox(&mut p.export_cue_sheet, "Write a .cue track list next to the mix");
+        check(ui, &mut p.export_cue_sheet, "Write a .cue track list next to the mix");
     });
     row(ui, "Tail", |ui| {
         ui.add(egui::Slider::new(&mut p.export_tail_secs, 0.0..=10.0).suffix(" s").text("after the last track"));
     });
     ui.add_space(6.0);
     section(ui, "Recording (live)");
-    row(ui, "Format", |ui| {
+    row_choice(ui, "Format", |ui| {
         for f in [AudioFormat::Wav16, AudioFormat::Wav24, AudioFormat::Wav32Float] {
             ui.selectable_value(&mut p.record_format, f, f.label());
         }

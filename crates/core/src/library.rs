@@ -124,6 +124,13 @@ CREATE TABLE IF NOT EXISTS mixes (
     created_at INTEGER NOT NULL,
     modified_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS mix_savepoints (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mix_id INTEGER NOT NULL REFERENCES mixes(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    json TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
 "#;
 
 fn now() -> i64 {
@@ -466,7 +473,61 @@ impl Library {
     }
 
     pub fn delete_mix(&self, id: i64) -> Result<()> {
+        self.conn.execute("DELETE FROM mix_savepoints WHERE mix_id = ?1", params![id])?;
         self.conn.execute("DELETE FROM mixes WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Copy mix `id` as a new mix named `name` (its savepoints stay with the original). Returns
+    /// the new mix.
+    pub fn duplicate_mix(&self, id: i64, name: &str) -> Result<Option<Mix>> {
+        let Some(mut m) = self.mix(id)? else { return Ok(None) };
+        m.id = 0;
+        m.name = name.to_string();
+        self.save_mix(&mut m)?;
+        Ok(Some(m))
+    }
+
+    /// Keep the state `mix` of saved mix `mix_id` as a savepoint named `name`. Savepoints are
+    /// never replaced: restoring one leaves all others, earlier and later, in place.
+    pub fn add_savepoint(&self, mix_id: i64, name: &str, mix: &Mix) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO mix_savepoints (mix_id, name, json, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![mix_id, name, serde_json::to_string(mix)?, now()],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Savepoints of mix `mix_id`, oldest first: (id, name, created at).
+    pub fn savepoints(&self, mix_id: i64) -> Result<Vec<(i64, String, i64)>> {
+        let mut st = self.conn.prepare("SELECT id, name, created_at FROM mix_savepoints WHERE mix_id = ?1 ORDER BY created_at, id")?;
+        let rows = st.query_map(params![mix_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The mix as it was at savepoint `id` (with its mix's id).
+    pub fn savepoint(&self, id: i64) -> Result<Option<Mix>> {
+        let row: Option<(i64, String)> = self
+            .conn
+            .query_row("SELECT mix_id, json FROM mix_savepoints WHERE id = ?1", params![id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?;
+        Ok(match row {
+            Some((mix_id, j)) => {
+                let mut m: Mix = serde_json::from_str(&j)?;
+                m.id = mix_id;
+                Some(m)
+            }
+            None => None,
+        })
+    }
+
+    pub fn rename_savepoint(&self, id: i64, name: &str) -> Result<()> {
+        self.conn.execute("UPDATE mix_savepoints SET name = ?2 WHERE id = ?1", params![id, name])?;
+        Ok(())
+    }
+
+    pub fn delete_savepoint(&self, id: i64) -> Result<()> {
+        self.conn.execute("DELETE FROM mix_savepoints WHERE id = ?1", params![id])?;
         Ok(())
     }
 }
@@ -544,6 +605,12 @@ pub fn stems_path(hash: &str) -> PathBuf {
     crate::paths::stems_dir().join(format!("{hash}.stems.flac"))
 }
 
+/// Path of the partial stem file for a track hash: stems for the parts of the track that mix
+/// playback needs (its stem transitions), until complete stems replace them.
+pub fn region_stems_path(hash: &str) -> PathBuf {
+    crate::paths::stems_dir().join(format!("{hash}.regions.stems.flac"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -566,5 +633,31 @@ mod tests {
         assert_eq!(lib.cues(id).unwrap(), vec![c]);
         let w = Waveform { rate: 100.0, peak: vec![1, 2], low: vec![3, 4], mid: vec![5, 6], high: vec![7, 8], stems: None };
         assert_eq!(Waveform::from_bytes(&w.to_bytes()).unwrap(), w);
+    }
+
+    #[test]
+    fn savepoints_keep_every_state_and_duplicates_are_separate() {
+        let lib = Library::in_memory().unwrap();
+        let mut mix = crate::Mix { name: "Set".into(), ..Default::default() };
+        lib.save_mix(&mut mix).unwrap();
+        let a = lib.add_savepoint(mix.id, "A", &mix).unwrap();
+        mix.keylock = !mix.keylock;
+        let b = lib.add_savepoint(mix.id, "B", &mix).unwrap();
+        // going back to A leaves B (the later state) in place
+        let back = lib.savepoint(a).unwrap().unwrap();
+        assert_eq!((back.id, back.keylock), (mix.id, !mix.keylock));
+        assert_eq!(lib.savepoints(mix.id).unwrap().iter().map(|s| s.1.as_str()).collect::<Vec<_>>(), ["A", "B"]);
+        assert_eq!(lib.savepoint(b).unwrap().unwrap().keylock, mix.keylock);
+        lib.rename_savepoint(b, "B2").unwrap();
+        lib.delete_savepoint(a).unwrap();
+        assert_eq!(lib.savepoints(mix.id).unwrap().iter().map(|s| s.1.as_str()).collect::<Vec<_>>(), ["B2"]);
+        // a duplicate is its own mix, without the savepoints
+        let copy = lib.duplicate_mix(mix.id, "Set (copy)").unwrap().unwrap();
+        assert_ne!(copy.id, mix.id);
+        assert_eq!(lib.mix(copy.id).unwrap().unwrap().name, "Set (copy)");
+        assert!(lib.savepoints(copy.id).unwrap().is_empty());
+        lib.delete_mix(mix.id).unwrap();
+        assert!(lib.savepoints(mix.id).unwrap().is_empty());
+        assert!(lib.mix(copy.id).unwrap().is_some());
     }
 }
