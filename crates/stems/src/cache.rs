@@ -38,6 +38,17 @@ fn vorbis_comment(tags: &[(&str, String)]) -> Vec<u8> {
 /// Model name recorded in a stem cache file (`CLUBCRAFT_MODEL`), reading only the FLAC metadata
 /// blocks (a few hundred bytes), not the audio. `Ok(None)` if the file has no (or an empty) model tag.
 pub fn read_model_name(path: &Path) -> Result<Option<String>> {
+    Ok(read_header_tags(path)?.into_iter().find(|(k, _)| k == "CLUBCRAFT_MODEL").map(|(_, v)| v).filter(|v| !v.is_empty()))
+}
+
+/// The chunks (of [`STEM_CHUNK_FRAMES`]) a partial stem file holds (`CLUBCRAFT_CHUNKS`), reading
+/// only the metadata; `Ok(None)` for a complete file.
+pub fn read_partial_chunks(path: &Path) -> Result<Option<Vec<usize>>> {
+    Ok(read_header_tags(path)?.into_iter().find(|(k, _)| k == "CLUBCRAFT_CHUNKS").map(|(_, v)| parse_chunks(&v)))
+}
+
+/// The Vorbis comments of a FLAC file, reading only its metadata blocks.
+fn read_header_tags(path: &Path) -> Result<Vec<(String, String)>> {
     use std::io::Read;
     let mut f = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
     // The metadata blocks are tiny (STREAMINFO + Vorbis comment); read until the last one.
@@ -70,8 +81,37 @@ pub fn read_model_name(path: &Path) -> Result<Option<String>> {
         }
         want = if complete { p } else { p + 4 }.max(buf.len() + 1);
     }
-    let tags = read_tags(&buf)?;
-    Ok(tags.into_iter().find(|(k, _)| k == "CLUBCRAFT_MODEL").map(|(_, v)| v).filter(|v| !v.is_empty()))
+    read_tags(&buf)
+}
+
+/// Chunk list as ranges: `0-3,10,12-15`.
+fn format_chunks(chunks: &[usize]) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < chunks.len() {
+        let mut j = i;
+        while j + 1 < chunks.len() && chunks[j + 1] == chunks[j] + 1 {
+            j += 1;
+        }
+        out.push(if j > i { format!("{}-{}", chunks[i], chunks[j]) } else { chunks[i].to_string() });
+        i = j + 1;
+    }
+    out.join(",")
+}
+
+fn parse_chunks(s: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    for part in s.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        match part.split_once('-') {
+            Some((a, b)) => {
+                if let (Ok(a), Ok(b)) = (a.parse::<usize>(), b.parse::<usize>()) {
+                    out.extend(a..=b.min(a + 1_000_000));
+                }
+            }
+            None => out.extend(part.parse::<usize>().ok()),
+        }
+    }
+    out
 }
 
 /// Read the Vorbis comments of a FLAC file (only the metadata header is parsed).
@@ -157,6 +197,7 @@ fn write_flac(
     frames: usize,
     model: &str,
     peak: f32,
+    extra_tags: &[(&str, String)],
     fill: &FillFn,
 ) -> Result<()> {
     let scale = (peak * (32768.0 / 32767.0)).max(1.0);
@@ -166,11 +207,13 @@ fn write_flac(
     let source = StemSource { frames, pos: 0, k: 32768.0 / scale, fill, buf: Vec::new() };
     let mut stream =
         flacenc::encode_with_fixed_block_size(&config, source, BLOCK).map_err(|e| anyhow!("flac encode: {e:?}"))?;
-    let tags = vorbis_comment(&[
-        ("CLUBCRAFT_STEMS", "drums,bass,other,vocals".into()),
+    let mut tags = vec![
+        ("CLUBCRAFT_STEMS", "drums,bass,other,vocals".to_string()),
         ("CLUBCRAFT_MODEL", model.to_string()),
         ("CLUBCRAFT_SCALE", format!("{scale}")),
-    ]);
+    ];
+    tags.extend(extra_tags.iter().cloned());
+    let tags = vorbis_comment(&tags);
     stream.add_metadata_block(MetadataBlockData::new_unknown(4, &tags).map_err(|e| anyhow!("{e:?}"))?);
     let mut sink = flacenc::bitsink::ByteSink::new();
     stream.write(&mut sink).map_err(|e| anyhow!("flac write: {e:?}"))?;
@@ -210,7 +253,7 @@ pub fn save_stems_with_model(path: &Path, stems: &Stems, model: &str) -> Result<
     }
     let n = stems.frames();
     let peak = stems.stems.iter().flat_map(|(l, r)| l.iter().chain(r)).fold(0f32, |m, v| m.max(v.abs()));
-    write_flac(path, n, model, peak, &|a, b, k, out| {
+    write_flac(path, n, model, peak, &[], &|a, b, k, out| {
         for f in a..b {
             for (l, r) in &stems.stems {
                 out.push(q(l[f], k));
@@ -227,11 +270,22 @@ pub fn save_stem_track(path: &Path, t: &StemTrack) -> Result<()> {
 
 /// [`save_stem_track`], recording `model` as the model that produced the stems.
 pub fn save_stem_track_as(path: &Path, t: &StemTrack, model: &str) -> Result<()> {
+    write_stem_track(path, t, model, &[])
+}
+
+/// Save the chunks of `t` that are ready as a partial stem file: the other chunks are silence and
+/// the file lists the real ones (`CLUBCRAFT_CHUNKS`), so [`load_stem_track`] leaves them unset.
+pub fn save_partial_stem_track(path: &Path, t: &StemTrack, model: &str) -> Result<()> {
+    let ready: Vec<usize> = (0..t.num_chunks()).filter(|&c| t.is_chunk_ready(c)).collect();
+    write_stem_track(path, t, model, &[("CLUBCRAFT_CHUNKS", format_chunks(&ready))])
+}
+
+fn write_stem_track(path: &Path, t: &StemTrack, model: &str, extra_tags: &[(&str, String)]) -> Result<()> {
     let peak = (0..t.num_chunks())
         .filter_map(|c| t.chunk(c))
         .map(|c| c.peak())
         .fold(0f32, f32::max);
-    write_flac(path, t.frames, model, peak, &|a, b, k, out| {
+    write_flac(path, t.frames, model, peak, extra_tags, &|a, b, k, out| {
         // Blocks never straddle chunks: BLOCK divides STEM_CHUNK_FRAMES.
         let c = a / STEM_CHUNK_FRAMES;
         let o = (a - c * STEM_CHUNK_FRAMES) * STEM_CHANNELS;
@@ -246,7 +300,7 @@ pub fn save_stem_track_as(path: &Path, t: &StemTrack, model: &str) -> Result<()>
 /// Decode a stem cache file into interleaved 8-channel chunks of `STEM_CHUNK_FRAMES` frames
 /// (already scaled). FLAC frames are independent, so chunks are decoded on several threads.
 /// Returns (frames, model, chunks).
-fn decode(path: &Path) -> Result<(usize, String, Vec<StemChunk>)> {
+fn decode(path: &Path) -> Result<(usize, String, Vec<StemChunk>, Option<Vec<usize>>)> {
     use symphonia::core::codecs::audio::AudioDecoderOptions;
     use symphonia::core::errors::Error;
     use symphonia::core::formats::probe::Hint;
@@ -262,6 +316,7 @@ fn decode(path: &Path) -> Result<(usize, String, Vec<StemChunk>)> {
     }
     let scale: f32 = tag("CLUBCRAFT_SCALE").and_then(|s| s.parse().ok()).unwrap_or(1.0);
     let model = tag("CLUBCRAFT_MODEL").unwrap_or_default();
+    let partial = tag("CLUBCRAFT_CHUNKS").map(|v| parse_chunks(&v));
     // STREAMINFO (always the first block): block sizes and total sample count.
     let si = bytes.get(8..26).ok_or_else(|| anyhow!("truncated STREAMINFO"))?;
     let (min_bs, max_bs) = (u16::from_be_bytes([si[0], si[1]]) as usize, u16::from_be_bytes([si[2], si[3]]) as usize);
@@ -346,12 +401,12 @@ fn decode(path: &Path) -> Result<(usize, String, Vec<StemChunk>)> {
         Ok(())
     })?;
     let chunks = chunks.into_iter().map(|c| c.ok_or_else(|| anyhow!("missing chunk"))).collect::<Result<Vec<_>>>()?;
-    Ok((total, model, chunks))
+    Ok((total, model, chunks, partial))
 }
 
 /// Load a stem cache file into planar [`Stems`].
 pub fn load_stems(path: &Path) -> Result<Stems> {
-    let (frames, _, chunks) = decode(path)?;
+    let (frames, _, chunks, _) = decode(path)?;
     let mut stems: [(Vec<f32>, Vec<f32>); 4] = Default::default();
     std::thread::scope(|s| {
         for (k, (l, r)) in stems.iter_mut().enumerate() {
@@ -371,12 +426,15 @@ pub fn load_stems(path: &Path) -> Result<Stems> {
     Ok(Stems { sample_rate: SAMPLE_RATE, stems })
 }
 
-/// Load a stem cache file as a complete [`StemTrack`] (for the live engine).
+/// Load a stem cache file as a [`StemTrack`] (for the live engine). Of a partial file only the
+/// chunks it holds are set.
 pub fn load_stem_track(path: &Path) -> Result<StemTrack> {
-    let (frames, model, chunks) = decode(path)?;
+    let (frames, model, chunks, partial) = decode(path)?;
     let t = StemTrack::new(frames, model);
     for (i, c) in chunks.into_iter().enumerate() {
-        t.set_stem_chunk(i, c);
+        if partial.as_ref().is_none_or(|p| p.contains(&i)) {
+            t.set_stem_chunk(i, c);
+        }
     }
     Ok(t)
 }
@@ -425,6 +483,25 @@ mod tests {
         assert_eq!(back.frames(), 1000);
         assert!((back.stems[3].0[999] - 0.3).abs() < 1e-4);
         assert_eq!(read_model_name(&p).unwrap(), None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn partial_files_keep_only_their_chunks() {
+        let t = StemTrack::new(2 * STEM_CHUNK_FRAMES + 1000, "htdemucs");
+        let chunk = |i: usize, v: f32| vec![v; t.chunk_frames(i) * STEM_CHANNELS];
+        t.set_chunk(0, chunk(0, 0.25));
+        t.set_chunk(2, chunk(2, -0.5));
+        let dir = std::env::temp_dir().join(format!("ccstems-partial-{}", std::process::id()));
+        let p = dir.join("t.regions.stems.flac");
+        save_partial_stem_track(&p, &t, "htdemucs").unwrap();
+        assert_eq!(read_partial_chunks(&p).unwrap(), Some(vec![0, 2]));
+        assert_eq!(read_model_name(&p).unwrap().as_deref(), Some("htdemucs"));
+        let back = load_stem_track(&p).unwrap();
+        assert!(back.is_chunk_ready(0) && !back.is_chunk_ready(1) && back.is_chunk_ready(2));
+        assert!((back.frame(10).unwrap()[0] - 0.25).abs() < 1e-3);
+        assert!((back.frame(2 * STEM_CHUNK_FRAMES + 10).unwrap()[7] + 0.5).abs() < 1e-3);
+        assert_eq!(parse_chunks(&format_chunks(&[0, 1, 2, 5, 7, 8])), vec![0, 1, 2, 5, 7, 8]);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

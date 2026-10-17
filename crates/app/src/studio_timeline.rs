@@ -816,7 +816,7 @@ impl StudioView {
                             }
                         }
                     }
-                    if !has_stems && area.width() > 200.0 {
+                    if !self.side_has_stems(sh, k, side) && area.width() > 200.0 {
                         painter.text(pos2(area.right() - 6.0, area.top() + 3.0), egui::Align2::RIGHT_TOP, "no stems yet: imitated with volume and EQ", egui::FontId::proportional(10.0), theme::TEXT_DIM);
                     }
                 }
@@ -1475,16 +1475,78 @@ impl StudioView {
 
     /// Both tracks of transition `k` have stems.
     pub(crate) fn stems_ok(&self, sh: &Shared, k: usize) -> bool {
-        let has = |i: usize| self.mix.tracks.get(i).is_some_and(|t| sh.analyses.get(&t.track_id).is_some_and(|a| a.stems_model.is_some()));
-        has(k) && has(k + 1)
+        self.side_has_stems(sh, k, Side::Out) && self.side_has_stems(sh, k, Side::In)
+    }
+
+    /// Whether the track on `side` of transition `k` has stems for the transition's window:
+    /// complete stems, or the part separated for mix playback.
+    pub(crate) fn side_has_stems(&self, sh: &Shared, k: usize, side: Side) -> bool {
+        let i = if side == Side::Out { k } else { k + 1 };
+        let Some(x) = self.timeline.transitions.get(k) else { return false };
+        let (a, b) = (self.timeline.track_pos(i, x.start_beat), self.timeline.track_pos(i, x.start_beat + x.beats));
+        self.has_stems_for(sh, i, a, b)
+    }
+
+    /// Whether track `i` has stems for its part `a..b` (track seconds).
+    fn has_stems_for(&self, sh: &Shared, i: usize, a: f64, b: f64) -> bool {
+        let Some(id) = self.mix.tracks.get(i).map(|t| t.track_id) else { return false };
+        let an = sh.analyses.get(&id);
+        if an.is_some_and(|a| a.stems_model.is_some()) {
+            return true;
+        }
+        // the part beyond the file's ends needs nothing
+        let end = an.map_or(f64::INFINITY, |an| an.duration);
+        let (a, b) = (a.max(0.0), b.min(end));
+        b <= a || sh.stem_regions.get(&id).is_some_and(|r| r.iter().any(|&(x, y)| x <= a + 1e-6 && y >= b - 1e-6))
+    }
+
+    /// Parts of track `i` (track seconds) whose stem automation needs stems: the windows of its
+    /// stem transitions and the span of its own stem lanes.
+    pub(crate) fn stem_regions_needed(&self, i: usize) -> Vec<(f64, f64)> {
+        let tl = &self.timeline;
+        let window = |k: usize| tl.transitions.get(k).map(|x| (tl.track_pos(i, x.start_beat), tl.track_pos(i, x.start_beat + x.beats)));
+        let mut out = Vec::new();
+        if i > 0 && self.mix.transitions.get(i - 1).is_some_and(|t| t.uses_stems()) {
+            out.extend(window(i - 1));
+        }
+        if self.mix.transitions.get(i).is_some_and(|t| t.uses_stems()) {
+            out.extend(window(i));
+        }
+        if let Some(mt) = self.mix.tracks.get(i) {
+            for l in &mt.stems {
+                let (a, b) = l.points.iter().fold((f32::MAX, f32::MIN), |(a, b), p| (a.min(p.0), b.max(p.0)));
+                if a <= b {
+                    out.push((a as f64, b as f64));
+                }
+            }
+        }
+        out.retain(|&(a, b)| b > a.max(0.0));
+        out
+    }
+
+    /// Tracks of the mix whose stem automation still lacks stems, in mix order, with the parts
+    /// (track seconds) that need them.
+    pub(crate) fn missing_stem_regions(&self, sh: &Shared) -> Vec<(clubcraft_core::TrackId, Vec<(f64, f64)>)> {
+        let mut out: Vec<(clubcraft_core::TrackId, Vec<(f64, f64)>)> = Vec::new();
+        for (i, t) in self.mix.tracks.iter().enumerate() {
+            let missing: Vec<(f64, f64)> = self.stem_regions_needed(i).into_iter().filter(|&(a, b)| !self.has_stems_for(sh, i, a, b)).collect();
+            if missing.is_empty() {
+                continue;
+            }
+            match out.iter_mut().find(|e| e.0 == t.track_id) {
+                Some(e) => e.1.extend(missing),
+                None => out.push((t.track_id, missing)),
+            }
+        }
+        out
     }
 
     /// Transition `k` as it plays: on a track without stems, the stem lanes are emulated with its
     /// volume and EQ.
     pub(crate) fn effective_transition(&self, sh: &Shared, k: usize) -> Option<Transition> {
         let tr = self.mix.transitions.get(k)?;
-        let has = |i: usize| self.mix.tracks.get(i).is_some_and(|t| sh.analyses.get(&t.track_id).is_some_and(|a| a.stems_model.is_some()));
-        Some(if tr.uses_stems() && !self.stems_ok(sh, k) { tr.without_stems_on(!has(k), !has(k + 1)) } else { tr.clone() })
+        let (out, inn) = (self.side_has_stems(sh, k, Side::Out), self.side_has_stems(sh, k, Side::In));
+        Some(if tr.uses_stems() && !(out && inn) { tr.without_stems_on(!out, !inn) } else { tr.clone() })
     }
 
     /// Ruler strip at the top of a clip: bar numbers of the track (bar 1 = first downbeat), bar and

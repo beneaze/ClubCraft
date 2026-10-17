@@ -80,7 +80,7 @@ fn fmt_dur(s: f64) -> String {
     }
 }
 
-fn fmt_date(ts: i64) -> String {
+pub(crate) fn fmt_date(ts: i64) -> String {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
     let d = (now - ts).max(0);
     match d {
@@ -111,10 +111,10 @@ impl HomeView {
         row.label(RichText::new(greeting).size(26.0).strong().color(theme::TEXT));
         row.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            if ui.add(button("Go live ▶", true)).clicked() {
+            if pill_button(ui, "Go live ▶", true).clicked() {
                 out.push(HomeAction::GoLive);
             }
-            if ui.add(button("Open library", false)).clicked() {
+            if pill_button(ui, "Open library", false).clicked() {
                 out.push(HomeAction::GoLibrary);
             }
         });
@@ -242,14 +242,21 @@ fn panel_bg(ui: &Ui, r: Rect) {
     p.rect_stroke(r, 12.0, Stroke::new(1.0, theme::LINE), StrokeKind::Inside);
 }
 
-fn button(text: &str, primary: bool) -> egui::Button<'_> {
-    let t = RichText::new(text).size(13.0);
-    let b = egui::Button::new(if primary { t.strong().color(Color32::BLACK) } else { t.color(theme::TEXT) }).corner_radius(8.0).min_size(vec2(0.0, 32.0));
-    if primary {
-        b.fill(theme::accent())
-    } else {
-        b.fill(theme::PANEL).stroke(Stroke::new(1.0, theme::LINE))
+/// Button sized to its label, painted like [`wide_button`]: hovering only changes the fill (a
+/// stock egui button also swaps its border and grows on hover, which flickered here).
+fn pill_button(ui: &mut Ui, text: &str, primary: bool) -> egui::Response {
+    let font = FontId::proportional(13.0);
+    let w = ui.fonts_mut(|f| f.layout_no_wrap(text.to_string(), font.clone(), theme::TEXT).size().x);
+    let (r, resp) = ui.allocate_exact_size(vec2(w + 28.0, 32.0), Sense::click());
+    let p = ui.painter();
+    let hover = resp.hovered();
+    let (fill, col) = if primary { (if hover { theme::accent().gamma_multiply(0.88) } else { theme::accent() }, Color32::BLACK) } else { (if hover { theme::PANEL_HI } else { theme::PANEL }, theme::TEXT) };
+    p.rect_filled(r, 8.0, fill);
+    if !primary {
+        p.rect_stroke(r, 8.0, Stroke::new(1.0, theme::LINE), StrokeKind::Inside);
     }
+    p.text(r.center(), Align2::CENTER_CENTER, text, font, col);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Full-width button with a centred label.

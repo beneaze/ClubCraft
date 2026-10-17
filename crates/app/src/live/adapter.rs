@@ -86,7 +86,8 @@ impl TrackCache {
     /// Load (decode, stems, analysis) a track; cached. Analyses the track first if needed.
     pub fn load(&self, id: TrackId, live_sep: Option<&LiveSeparator>) -> Result<Arc<LoadedTrack>> {
         if let Some(t) = self.get(id) {
-            if t.stems.is_some() || live_sep.is_none() {
+            // a deck separates the whole track: stems for a mix's transitions only don't do
+            if t.stems.as_ref().is_some_and(|s| !is_region_stems(s)) || live_sep.is_none() {
                 return Ok(t);
             }
         }
@@ -112,7 +113,8 @@ impl TrackCache {
                         sep.submit(id, t.hash.clone(), audio.clone(), st.clone(), (start * clubcraft_core::SAMPLE_RATE as f64) as usize);
                         Some(st)
                     }
-                    None => None,
+                    // mix playback: the stems separated for the mix's stem transitions, if any
+                    None => load_region_stems(&t.hash, audio.frames()),
                 }
             }
         };
@@ -129,8 +131,29 @@ pub(crate) fn load_uncached(id: TrackId) -> Result<Arc<LoadedTrack>> {
     let t = lib.track(id)?.context("unknown track")?;
     let analysis = lib.analysis(id)?.unwrap_or_default();
     let audio = Arc::new(clubcraft_audio::decode_file(&t.path, clubcraft_core::SAMPLE_RATE)?);
-    let stems = clubcraft_stems::load_stem_track(&stems_path(&t.hash)).ok().filter(|st| st.frames.abs_diff(audio.frames()) < 4096).map(Arc::new);
+    let stems = clubcraft_stems::load_stem_track(&stems_path(&t.hash)).ok().filter(|st| st.frames.abs_diff(audio.frames()) < 4096).map(Arc::new).or_else(|| load_region_stems(&t.hash, audio.frames()));
     Ok(Arc::new(LoadedTrack::from_parts(&t, &analysis, stems, audio).with_user_cues(&lib.cues(id)?)))
+}
+
+/// Marks a [`StemTrack`] that holds only the parts separated for a mix's stem transitions.
+const REGION_STEMS: &str = " (transitions)";
+
+fn is_region_stems(s: &StemTrack) -> bool {
+    s.model.ends_with(REGION_STEMS)
+}
+
+/// The partial stems of a track (its stem transitions, see `pipeline::separate_regions`).
+fn load_region_stems(hash: &str, frames: usize) -> Option<Arc<StemTrack>> {
+    let p = clubcraft_core::library::region_stems_path(hash);
+    if !p.exists() {
+        return None;
+    }
+    let mut st = clubcraft_stems::load_stem_track(&p).map_err(|e| log::warn!("{}: {e:#}", p.display())).ok()?;
+    if st.frames.abs_diff(frames) >= 4096 {
+        return None;
+    }
+    st.model.push_str(REGION_STEMS);
+    Some(Arc::new(st))
 }
 
 /// Background separation of tracks loaded on a deck before their stems were cached.

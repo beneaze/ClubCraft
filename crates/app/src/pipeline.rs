@@ -119,7 +119,84 @@ pub fn separate(
     }
     progress(1.0, "Saving stems");
     clubcraft_stems::save_stems_with_model(&path, &stems, sep.model_name())?;
+    // complete stems replace the parts separated for mix playback
+    let _ = std::fs::remove_file(clubcraft_core::library::region_stems_path(&t.hash));
     Ok(())
+}
+
+/// Margin around each region (s): the stretcher reads ahead, and curves are edited at the edges.
+const REGION_MARGIN: f64 = 3.0;
+
+/// Stems for parts of a track only (`regions` in track seconds), at the Fast quality: what mix
+/// playback needs for stem transitions, ready in seconds instead of minutes (complete, Best stems
+/// are separated for export). Added to the track's partial stem file
+/// ([`clubcraft_core::library::region_stems_path`]); a track with complete stems is left alone.
+/// Returns whether new stems were saved.
+pub fn separate_regions(
+    lib: &Library,
+    ctx: &mut WorkerContext,
+    id: TrackId,
+    regions: &[(f64, f64)],
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(f32, &str),
+) -> Result<bool> {
+    use clubcraft_core::STEM_CHUNK_FRAMES as CHUNK;
+    let t = lib.track(id)?.context("unknown track")?;
+    if cached_stems_model(&t.hash).is_some() {
+        return Ok(false);
+    }
+    let path = clubcraft_core::library::region_stems_path(&t.hash);
+    progress(0.0, "Decoding");
+    let audio = clubcraft_audio::decode_file(&t.path, clubcraft_core::SAMPLE_RATE)?;
+    let n = audio.frames();
+    if n == 0 {
+        return Ok(false);
+    }
+    let last = (n - 1) / CHUNK;
+    let chunk_of = |sec: f64| ((sec.max(0.0) * clubcraft_core::SAMPLE_RATE as f64) as usize / CHUNK).min(last);
+    let wanted: Vec<(usize, usize)> = regions.iter().map(|&(a, b)| (chunk_of(a - REGION_MARGIN), chunk_of(b + REGION_MARGIN))).filter(|(a, b)| a <= b).collect();
+    progress(0.0, "Loading models");
+    let sep = ctx.separator(Quality::Fast)?;
+    let model = sep.model_name().to_string();
+    // extend an earlier partial file of the same model
+    let st = match path.exists().then(|| clubcraft_stems::load_stem_track(&path).ok()).flatten() {
+        Some(e) if e.frames == n && e.model == model => e,
+        _ => clubcraft_core::StemTrack::new(n, model.clone()),
+    };
+    let todo: Vec<(usize, usize)> = wanted.into_iter().filter(|&(a, b)| !(a..=b).all(|c| st.is_chunk_ready(c))).collect();
+    if todo.is_empty() {
+        return Ok(false);
+    }
+    let total: usize = todo.iter().map(|(a, b)| b - a + 1).sum();
+    let label = format!("Stems for transitions ({model})");
+    for &(c0, c1) in &todo {
+        // runs from the region's start onwards; stopped as soon as the region is covered
+        let stop = AtomicBool::new(false);
+        let r = sep.separate_into(
+            &audio,
+            &st,
+            c0 * CHUNK,
+            &mut |_| {
+                let done: usize = todo.iter().map(|&(a, b)| (a..=b).filter(|&c| st.is_chunk_ready(c)).count()).sum();
+                progress(done as f32 / total as f32, &label);
+                if (c0..=c1).all(|c| st.is_chunk_ready(c)) || cancel.load(Ordering::Relaxed) {
+                    stop.store(true, Ordering::Relaxed);
+                }
+            },
+            &stop,
+        );
+        if cancel.load(Ordering::Relaxed) {
+            bail!("cancelled");
+        }
+        if let Err(e) = r {
+            if !e.is::<clubcraft_stems::Cancelled>() {
+                return Err(e);
+            }
+        }
+    }
+    progress(1.0, "Saving stems");
+    clubcraft_stems::save_partial_stem_track(&path, &st, &model)?;
+    Ok(true)
 }
 
 /// Full analysis (uses the structure model when stems exist; can take ~20 s).

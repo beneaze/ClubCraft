@@ -28,6 +28,34 @@ pub struct Shared {
     pub waveforms: HashMap<TrackId, std::sync::Arc<clubcraft_core::Waveform>>,
     pub user_cues: HashMap<TrackId, Vec<clubcraft_core::Cue>>,
     pub deck_count: usize,
+    /// Parts of tracks without complete stems that have stems for mix playback (track seconds,
+    /// see `pipeline::separate_regions`).
+    pub stem_regions: HashMap<TrackId, Vec<(f64, f64)>>,
+}
+
+/// Identity of a region separation job: the track and its parts to 0.1 s.
+fn region_key(id: TrackId, regions: &[(f64, f64)]) -> (TrackId, Vec<(i64, i64)>) {
+    (id, regions.iter().map(|&(a, b)| ((a * 10.0).round() as i64, (b * 10.0).round() as i64)).collect())
+}
+
+/// The parts (track seconds) a track's partial stem file covers, merged into ranges.
+fn region_cover(hash: &str) -> Option<Vec<(f64, f64)>> {
+    use clubcraft_core::{SAMPLE_RATE, STEM_CHUNK_FRAMES};
+    let p = clubcraft_core::library::region_stems_path(hash);
+    if !p.exists() {
+        return None;
+    }
+    let mut chunks = clubcraft_stems::read_partial_chunks(&p).ok().flatten()?;
+    chunks.sort_unstable();
+    let sec = |c: usize| (c * STEM_CHUNK_FRAMES) as f64 / SAMPLE_RATE as f64;
+    let mut out: Vec<(f64, f64)> = Vec::new();
+    for c in chunks {
+        match out.last_mut() {
+            Some(last) if (last.1 - sec(c)).abs() < 1e-9 => last.1 = sec(c + 1),
+            _ => out.push((sec(c), sec(c + 1))),
+        }
+    }
+    Some(out)
 }
 
 impl Shared {
@@ -55,6 +83,10 @@ impl Shared {
                     self.waveforms.insert(id, std::sync::Arc::new(wf));
                 }
             }
+            match region_cover(&hash) {
+                Some(r) => self.stem_regions.insert(id, r),
+                None => self.stem_regions.remove(&id),
+            };
         }
         let cues = lib.cues(id).unwrap_or_default();
         self.cue_counts.insert(id, cues.len());
@@ -106,6 +138,11 @@ pub struct App {
     applied_prefs: Option<crate::prefs::Prefs>,
     pub mix_summaries: Vec<crate::home::MixSummary>,
     prepared: (i64, usize),
+    /// [`StudioView::mix_serial`] of the mix the studio preview was last reset for.
+    preview_serial: u64,
+    /// Parts of tracks queued for separation because stem automation plays in them (see
+    /// [`region_key`]).
+    stems_queued: std::collections::HashSet<(TrackId, Vec<(i64, i64)>)>,
     /// Export waiting for stem separation.
     pending_export: Option<PendingExport>,
     /// Last seen change from `clubcraft mcp` (marker mtime) and when it was checked.
@@ -142,7 +179,7 @@ impl App {
         }
         let audio_cfg: clubcraft_engine::AudioConfig = cc.storage.and_then(|s| eframe::get_value(s, "audio")).unwrap_or_default();
         let midi_port: Option<String> = cc.storage.and_then(|s| eframe::get_value(s, "midi_port"));
-        let mut app = App { lib, sh, jobs, view, library: LibraryView::default(), status: String::new(), devctl: crate::devctl::DevCtl::from_env(), live: Default::default(), decks: vec![Default::default(); 2], mixer: Default::default(), browser: LibraryView::default(), studio: Default::default(), mixes: Vec::new(), eng: crate::live::adapter::LiveEngine::start(audio_cfg.clone()), settings: crate::settings::Settings::new(audio_cfg, midi_port), home: Default::default(), prefs, applied_prefs: None, menu: crate::menu::AppMenu::install(&cc.egui_ctx), ui_ctx_cmd: None, mix_summaries: Vec::new(), prepared: (-1, 0), pending_export: None, queued: Default::default(), external: (std::fs::metadata(crate::mcp::change_marker()).and_then(|m| m.modified()).ok(), 0.0) };
+        let mut app = App { lib, sh, jobs, view, library: LibraryView::default(), status: String::new(), devctl: crate::devctl::DevCtl::from_env(), live: Default::default(), decks: vec![Default::default(); 2], mixer: Default::default(), browser: LibraryView::default(), studio: Default::default(), mixes: Vec::new(), eng: crate::live::adapter::LiveEngine::start(audio_cfg.clone()), settings: crate::settings::Settings::new(audio_cfg, midi_port), home: Default::default(), prefs, applied_prefs: None, menu: crate::menu::AppMenu::install(&cc.egui_ctx), ui_ctx_cmd: None, mix_summaries: Vec::new(), prepared: (-1, 0), preview_serial: 0, stems_queued: Default::default(), pending_export: None, queued: Default::default(), external: (std::fs::metadata(crate::mcp::change_marker()).and_then(|m| m.modified()).ok(), 0.0) };
         app.settings.connect_midi(app.eng.handle.as_ref());
         if let Some(e) = &app.eng.error {
             app.status = e.clone();
@@ -206,10 +243,36 @@ impl App {
         for id in std::mem::take(&mut self.eng.touched) {
             self.sh.reload_track(&self.lib, id);
         }
+        // another mix was opened: the running preview still plays the old one, so stop it (the
+        // next play builds the preview from the open mix)
+        if self.studio.mix_serial != self.preview_serial {
+            self.preview_serial = self.studio.mix_serial;
+            self.refresh_savepoints();
+            self.studio.at_savepoint = self.matching_savepoint();
+            if self.eng.studio_player.is_some() {
+                self.eng.stop_mix(crate::live::adapter::STUDIO_DECKS);
+                self.studio.playing = false;
+            }
+        }
         let key = (self.studio.mix.id, self.studio.mix.tracks.len());
         if key != self.prepared {
             self.prepared = key;
             self.prepare_mix_tracks();
+        }
+        // Stem automation (stem transitions, a track's own stem lanes) on tracks without stems is
+        // only imitated with volume and EQ, so the parts it plays in are separated right away, at
+        // the Fast quality (seconds per track; complete Best stems are made for export), whatever
+        // the background setting. Mix order (front of the queue, so pushed in reverse); each part
+        // once per session; not while the timeline is stale or being dragged.
+        if !self.studio.timeline_dirty && !ctx.input(|i| i.pointer.any_down()) {
+            let fresh: Vec<(TrackId, Vec<(f64, f64)>)> = self.studio.missing_stem_regions(&self.sh).into_iter().filter(|(id, r)| !self.stems_queued.contains(&region_key(*id, r))).collect();
+            if !fresh.is_empty() {
+                for (id, r) in fresh.iter().rev() {
+                    self.jobs.separate_regions(*id, r.clone());
+                }
+                self.stems_queued.extend(fresh.iter().map(|(id, r)| region_key(*id, r)));
+                self.status = format!("Separating stems for the stem transitions of {} track(s)", fresh.len());
+            }
         }
         let st = self.eng.state();
         self.settings.tick(&st);
@@ -437,6 +500,55 @@ impl App {
         }
     }
 
+    /// Save the open mix even when nothing changed, so it has a library id. False (with a status
+    /// message) when it can't be saved.
+    fn save_mix_now(&mut self) -> bool {
+        if self.studio.mix.tracks.is_empty() {
+            return false;
+        }
+        if self.studio.mix.id <= 0 {
+            self.studio.dirty = true;
+        }
+        self.save_mix();
+        self.studio.mix.id > 0 && !self.studio.dirty
+    }
+
+    /// Keep the open mix's current state as savepoint `name`; returns its id.
+    fn add_savepoint(&mut self, name: &str) -> Option<i64> {
+        if !self.save_mix_now() {
+            return None;
+        }
+        match self.lib.add_savepoint(self.studio.mix.id, name, &self.studio.mix) {
+            Ok(id) => {
+                self.studio.at_savepoint = Some(id);
+                self.refresh_savepoints();
+                self.status = format!("Savepoint \"{name}\" kept");
+                Some(id)
+            }
+            Err(e) => {
+                self.status = format!("savepoint: {e}");
+                None
+            }
+        }
+    }
+
+    fn refresh_savepoints(&mut self) {
+        self.studio.savepoints = if self.studio.mix.id > 0 { self.lib.savepoints(self.studio.mix.id).unwrap_or_default() } else { Vec::new() };
+    }
+
+    /// The newest savepoint the open mix equals (its name aside), if any.
+    fn matching_savepoint(&self) -> Option<i64> {
+        let mut cur = self.studio.mix.clone();
+        cur.normalize();
+        self.studio.savepoints.iter().rev().map(|s| s.0).find(|&id| {
+            self.lib.savepoint(id).ok().flatten().is_some_and(|mut m| {
+                m.name = cur.name.clone();
+                m.normalize();
+                m == cur
+            })
+        })
+    }
+
     /// Start a waiting export once its stems are separated (or the jobs ended / were stopped).
     fn tick_pending_export(&mut self) {
         let Some(pe) = &self.pending_export else { return };
@@ -513,11 +625,68 @@ impl App {
         for a in actions {
             match a {
                 A::SaveMix => self.save_mix(),
+                A::DuplicateMix => {
+                    if !self.save_mix_now() {
+                        continue;
+                    }
+                    let base = format!("{} (copy)", self.studio.mix.name);
+                    let mut name = base.clone();
+                    let mut n = 2;
+                    while self.mixes.iter().any(|m| m.1 == name) {
+                        name = format!("{base} {n}");
+                        n += 1;
+                    }
+                    match self.lib.duplicate_mix(self.studio.mix.id, &name) {
+                        Ok(Some(copy)) => {
+                            self.studio.set_mix(copy);
+                            self.refresh_mixes();
+                            self.status = format!("Duplicated as \"{name}\"");
+                        }
+                        Ok(None) => {}
+                        Err(e) => self.status = format!("duplicate mix: {e}"),
+                    }
+                }
+                A::AddSavepoint(name) => {
+                    let name = if name.trim().is_empty() { format!("Savepoint {}", self.studio.savepoints.len() + 1) } else { name.trim().to_string() };
+                    self.add_savepoint(&name);
+                }
+                A::RestoreSavepoint(id) => {
+                    let Some(target) = self.studio.savepoints.iter().find(|s| s.0 == id).map(|s| s.1.clone()) else { continue };
+                    // the state being left is kept, so going back and forth loses nothing
+                    if self.studio.at_savepoint.is_none() && self.matching_savepoint().is_none() && !self.studio.mix.tracks.is_empty() && self.add_savepoint(&format!("Before going to \"{target}\"")).is_none() {
+                        continue;
+                    }
+                    match self.lib.savepoint(id) {
+                        Ok(Some(mut m)) => {
+                            m.name = self.studio.mix.name.clone();
+                            self.studio.go_to_savepoint(m);
+                            self.save_mix();
+                            self.studio.at_savepoint = Some(id);
+                            self.status = format!("Went to savepoint \"{target}\"");
+                        }
+                        Ok(None) => self.refresh_savepoints(),
+                        Err(e) => self.status = format!("savepoint: {e}"),
+                    }
+                }
+                A::DeleteSavepoint(id) => {
+                    if let Err(e) = self.lib.delete_savepoint(id) {
+                        self.status = format!("delete savepoint: {e}");
+                    }
+                    if self.studio.at_savepoint == Some(id) {
+                        self.studio.at_savepoint = None;
+                    }
+                    self.refresh_savepoints();
+                }
                 A::FindMashups(id) => self.studio.mashup.open_for(id, &self.sh),
                 A::Harmonize => self.studio.harmonize(&self.sh),
                 A::SeparateStems(ids) => {
-                    for id in &ids {
-                        self.jobs.separate_now(*id);
+                    // the parts the mix's stem automation plays in (Fast); whole tracks otherwise
+                    let regions = self.studio.missing_stem_regions(&self.sh);
+                    for id in ids.iter().rev() {
+                        match regions.iter().find(|e| e.0 == *id) {
+                            Some((_, r)) => self.jobs.separate_regions(*id, r.clone()),
+                            None => self.jobs.separate_now(*id),
+                        }
                     }
                     self.status = format!("Separating stems for {} track(s)", ids.len());
                 }
@@ -684,7 +853,9 @@ impl App {
         match c {
             "djs-import" => self.handle_studio_actions(vec![crate::studio::StudioAction::ImportDjStudio]),
             "mix" => {
-                if let Some((id, _, _)) = self.mixes.iter().find(|m| m.1.to_lowercase().contains(&arg.to_lowercase())) {
+                // an exact name first, else the first name containing `arg`
+                let q = arg.trim().to_lowercase();
+                if let Some((id, _, _)) = self.mixes.iter().find(|m| m.1.to_lowercase() == q).or_else(|| self.mixes.iter().find(|m| m.1.to_lowercase().contains(&q))) {
                     if let Ok(Some(m)) = self.lib.mix(*id) {
                         self.studio.set_mix(m);
                         self.view = View::Studio;
@@ -765,6 +936,14 @@ impl App {
             "undo" => self.studio.undo(),
             "redo" => self.studio.redo(),
             "harmonize" => self.studio.harmonize(&self.sh),
+            "duplicate" => self.handle_studio_actions(vec![crate::studio::StudioAction::DuplicateMix]),
+            "savepoint" => self.handle_studio_actions(vec![crate::studio::StudioAction::AddSavepoint(arg.trim().to_string())]),
+            "goto-savepoint" => {
+                // `goto-savepoint <name>` (tests)
+                if let Some(id) = self.studio.savepoints.iter().find(|s| s.1 == arg.trim()).map(|s| s.0) {
+                    self.handle_studio_actions(vec![crate::studio::StudioAction::RestoreSavepoint(id)]);
+                }
+            }
             "tcat" => {
                 // `tcat <stems|equalizer|effects|curves>`: transition editor category (tests)
                 use crate::studio_transition::TCategory;

@@ -48,7 +48,7 @@ pub mod stft;
 
 pub use backend::BackendKind;
 pub use roformer::Roformer;
-pub use cache::{load_stem_track, load_stems, save_stem_track, save_stem_track_as, read_model_name, save_stems, save_stems_with_model};
+pub use cache::{load_stem_track, load_stems, read_model_name, read_partial_chunks, save_partial_stem_track, save_stem_track, save_stem_track_as, save_stems, save_stems_with_model};
 pub use model::Manifest;
 
 use anyhow::{bail, Result};
