@@ -6,24 +6,31 @@ use eframe::egui::{self, pos2, vec2, Color32, Rect, Response, Sense, Stroke, Str
 /// Rotary knob. `value` in `range`; double-click resets to `default`. Vertical drag adjusts
 /// (hold shift for fine control). Returns the response (`changed()` when moved).
 pub fn knob(ui: &mut Ui, value: &mut f32, range: std::ops::RangeInclusive<f32>, default: f32, label: &str, color: Color32, size: f32) -> Response {
-    knob_impl(ui, value, range, default, label, color, size, None)
+    knob_impl(ui, value, range, default, label, color, size, None, false)
+}
+
+/// [`knob`] for a level (a stem's volume): the coloured arc runs from the bottom of the range to
+/// the value, so a part that plays is coloured and one turned off is not.
+#[allow(clippy::too_many_arguments)]
+pub fn knob_level(ui: &mut Ui, value: &mut f32, range: std::ops::RangeInclusive<f32>, default: f32, label: &str, color: Color32, size: f32) -> Response {
+    knob_impl(ui, value, range, default, label, color, size, None, true)
 }
 
 /// [`knob`] that shows its value (`text` of the current value) in the middle; the pointer is a
 /// short tick on the rim.
 #[allow(clippy::too_many_arguments)]
 pub fn knob_with_value(ui: &mut Ui, value: &mut f32, range: std::ops::RangeInclusive<f32>, default: f32, label: &str, color: Color32, size: f32, text: &dyn Fn(f32) -> String) -> Response {
-    knob_impl(ui, value, range, default, label, color, size, Some(text))
+    knob_impl(ui, value, range, default, label, color, size, Some(text), false)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn knob_impl(ui: &mut Ui, value: &mut f32, range: std::ops::RangeInclusive<f32>, default: f32, label: &str, color: Color32, size: f32, text: Option<&dyn Fn(f32) -> String>) -> Response {
+fn knob_impl(ui: &mut Ui, value: &mut f32, range: std::ops::RangeInclusive<f32>, default: f32, label: &str, color: Color32, size: f32, text: Option<&dyn Fn(f32) -> String>, level: bool) -> Response {
     let (rect, mut resp) = ui.allocate_exact_size(vec2(size, size + 13.0), Sense::click_and_drag());
     let (lo, hi) = (*range.start(), *range.end());
     if resp.dragged() {
         let fine = ui.input(|i| i.modifiers.shift);
         let d = -resp.drag_delta().y / if fine { 600.0 } else { 150.0 };
-        *value = (*value + d * (hi - lo)).clamp(lo, hi);
+        *value = drag_to(ui, &resp, *value, |v| (v + d * (hi - lo)).clamp(lo, hi));
         resp.mark_changed();
     }
     if resp.double_clicked() {
@@ -45,8 +52,8 @@ fn knob_impl(ui: &mut Ui, value: &mut f32, range: std::ops::RangeInclusive<f32>,
     let t = (*value - lo) / (hi - lo);
     let a0 = std::f32::consts::PI * 0.75;
     let sweep = std::f32::consts::PI * 1.5;
-    let td = (default - lo) / (hi - lo);
-    // arc from default to value
+    // arc from the default to the value (a level: from the bottom of the range)
+    let td = if level { 0.0 } else { (default - lo) / (hi - lo) };
     let (from, to) = if t < td { (t, td) } else { (td, t) };
     let steps = 24;
     let mut pts = Vec::with_capacity(steps + 1);
@@ -72,15 +79,26 @@ fn knob_impl(ui: &mut Ui, value: &mut f32, range: std::ops::RangeInclusive<f32>,
     resp
 }
 
+/// One step of a drag: `step` applied to the value the drag has reached so far, which the widget
+/// keeps from the drag's start. The value the caller passes in comes back from the engine's state
+/// a buffer or two late; dragging from it pulled the handle back and made it jump.
+fn drag_to(ui: &Ui, resp: &Response, value: f32, step: impl FnOnce(f32) -> f32) -> f32 {
+    let base = if resp.drag_started() { value } else { ui.data(|d| d.get_temp::<f32>(resp.id)).unwrap_or(value) };
+    let v = step(base);
+    ui.data_mut(|d| d.insert_temp(resp.id, v));
+    v
+}
+
 /// Vertical fader. `value` 0..1 (top = 1). Double-click resets.
 pub fn vfader(ui: &mut Ui, value: &mut f32, default: f32, size: egui::Vec2, color: Color32) -> Response {
     let (rect, mut resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
     let track = Rect::from_center_size(rect.center(), vec2(4.0, rect.height() - 14.0));
     if resp.dragged() || resp.clicked() {
         if let Some(pos) = resp.interact_pointer_pos() {
-            if resp.dragged() && !resp.drag_started() {
+            if resp.dragged() {
                 let fine = ui.input(|i| i.modifiers.shift);
-                *value = (*value - resp.drag_delta().y / track.height() * if fine { 0.2 } else { 1.0 }).clamp(0.0, 1.0);
+                let d = resp.drag_delta().y / track.height() * if fine { 0.2 } else { 1.0 };
+                *value = drag_to(ui, &resp, *value, |v| (v - d).clamp(0.0, 1.0));
             } else if resp.clicked() {
                 *value = (1.0 - (pos.y - track.top()) / track.height()).clamp(0.0, 1.0);
             }
@@ -113,7 +131,8 @@ pub fn hfader_with_default(ui: &mut Ui, value: &mut f32, bipolar: bool, default:
     let (lo, hi) = if bipolar { (-1.0, 1.0) } else { (0.0, 1.0) };
     if resp.dragged() {
         let fine = ui.input(|i| i.modifiers.shift);
-        *value = (*value + resp.drag_delta().x / track.width() * (hi - lo) * if fine { 0.2 } else { 1.0 }).clamp(lo, hi);
+        let d = resp.drag_delta().x / track.width() * (hi - lo) * if fine { 0.2 } else { 1.0 };
+        *value = drag_to(ui, &resp, *value, |v| (v + d).clamp(lo, hi));
         resp.mark_changed();
     }
     if resp.double_clicked() {

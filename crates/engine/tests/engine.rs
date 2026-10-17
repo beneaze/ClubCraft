@@ -959,3 +959,48 @@ fn transition_stem_lanes_mute_each_stem_on_both_sides() {
         }
     }
 }
+
+#[test]
+fn crossfader_mixes_assigned_decks_and_a_mix_gives_them_back() {
+    let mut core = EngineCore::new(SR, 2);
+    let n = SR as usize * 20;
+    let s: Vec<f32> = (0..n).map(|i| (2.0 * std::f64::consts::PI * 440.0 * i as f64 / SR as f64).sin() as f32 * 0.5).collect();
+    let tone = Arc::new(LoadedTrack::new("tone", mono(&s)));
+    core.apply(Command::SetCrossfaderAssign(0, CrossfaderAssign::A));
+    core.apply(Command::SetCrossfaderAssign(1, CrossfaderAssign::B));
+    core.apply(Command::LoadTrack(0, tone.clone()));
+    core.apply(Command::SetKeylock(0, false));
+    core.apply(Command::Play(0));
+    let mut m = vec![0f32; 256 * 2];
+    let mut c = vec![0f32; 256 * 2];
+    let mut rms = |core: &mut EngineCore| {
+        let mut acc = 0f64;
+        for _ in 0..100 {
+            core.process(&mut m, &mut c);
+            acc += m.iter().map(|v| (*v as f64).powi(2)).sum::<f64>();
+        }
+        (acc / (100.0 * m.len() as f64)).sqrt()
+    };
+    core.apply(Command::SetCrossfader(0.0));
+    let _ = rms(&mut core);
+    let on_a = rms(&mut core);
+    core.apply(Command::SetCrossfader(1.0));
+    let _ = rms(&mut core);
+    let on_b = rms(&mut core);
+    eprintln!("deck A with the crossfader at A {on_a:.4}, at B {on_b:.4}");
+    assert!(on_a > 0.1 && on_b < 1e-3, "the crossfader should fade deck A out ({on_a} → {on_b})");
+    // a mix on decks 0/1 plays them through and gives the assignment back when it stops
+    let mix = two_track_mix(TransitionStyle::Crossfade, false);
+    let tr = |id: i64| Some(if id == 1 { tone.clone() } else { track(&s, 126.0, 0.0) });
+    let mut player = MixPlayer::new(&mix, &tr, [0, 1]).unwrap();
+    player.play(&mut core, 0.0).unwrap();
+    let _ = rms(&mut core);
+    let during = rms(&mut core);
+    player.stop(&mut core).unwrap();
+    core.apply(Command::Play(0));
+    let _ = rms(&mut core);
+    let after = rms(&mut core);
+    eprintln!("mix playing with the crossfader at B {during:.4}; deck A after the mix {after:.4}");
+    assert!(during > 0.1, "a mix plays its decks through, whatever the crossfader");
+    assert!(after < 1e-3, "after the mix deck A is on side A again ({after})");
+}

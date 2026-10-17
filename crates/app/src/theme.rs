@@ -118,6 +118,9 @@ pub fn apply(ctx: &egui::Context) {
     ctx.set_theme(egui::Theme::Dark);
     ctx.set_visuals_of(egui::Theme::Dark, v);
     ctx.style_mut_of(egui::Theme::Dark, |s| {
+        // label text isn't selectable: hovering a track name showed a text cursor, and dragging it
+        // selected text instead of dragging the track
+        s.interaction.selectable_labels = false;
         s.spacing.item_spacing = egui::vec2(6.0, 5.0);
         s.spacing.button_padding = egui::vec2(8.0, 3.0);
         s.text_styles.insert(TextStyle::Body, FontId::new(13.0, FontFamily::Proportional));

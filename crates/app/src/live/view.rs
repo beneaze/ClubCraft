@@ -296,20 +296,24 @@ impl LiveView {
             if widgets::toggle(ui, d.keylock, "KEYLOCK", accent, vec2(56.0, 20.0)).clicked() {
                 out.push(LiveAction::Keylock(i, !d.keylock));
             }
+            // three buttons across the column's 56 px: small padding, so the labels don't widen them
+            let key_w = (56.0 - 2.0 * 2.0) / 3.0;
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                if ui.add(egui::Button::new("-").min_size(vec2(17.0, 18.0))).on_hover_text("Key down").clicked() {
+                ui.spacing_mut().button_padding = vec2(1.0, 1.0);
+                if ui.add(egui::Button::new("-").min_size(vec2(key_w, 18.0))).on_hover_text("Key down").clicked() {
                     out.push(LiveAction::KeyShift(i, d.key_shift - 1));
                 }
-                if ui.add(egui::Button::new(RichText::new("K").size(10.0)).min_size(vec2(17.0, 18.0))).on_hover_text("Match key to master (click again to reset)").clicked() {
+                if ui.add(egui::Button::new(RichText::new("K").size(10.0)).min_size(vec2(key_w, 18.0))).on_hover_text("Match key to master (click again to reset)").clicked() {
                     out.push(if d.key_shift != 0 { LiveAction::KeyShift(i, 0) } else { LiveAction::MatchKey(i) });
                 }
-                if ui.add(egui::Button::new("+").min_size(vec2(17.0, 18.0))).on_hover_text("Key up").clicked() {
+                if ui.add(egui::Button::new("+").min_size(vec2(key_w, 18.0))).on_hover_text("Key up").clicked() {
                     out.push(LiveAction::KeyShift(i, d.key_shift + 1));
                 }
             });
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
+                ui.spacing_mut().button_padding = vec2(1.0, 1.0);
                 for (lbl, s) in [("◀", -1.0f32), ("▶", 1.0)] {
                     let r = ui.add(egui::Button::new(lbl).min_size(vec2(27.0, 18.0)).sense(Sense::click_and_drag())).on_hover_text("Pitch bend");
                     let (p, rel) = press_release(ui, &r);
@@ -472,7 +476,7 @@ impl LiveView {
             ui.add_enabled_ui(d.has_stems, |ui| {
                 for k in [StemKind::Vocals, StemKind::Other, StemKind::Bass, StemKind::Drums] {
                     let mut g = d.stem_gains[k.index()];
-                    if widgets::knob(ui, &mut g, 0.0..=1.0, 1.0, k.label(), theme::stem_color(k), 34.0).changed() {
+                    if widgets::knob_level(ui, &mut g, 0.0..=1.0, 1.0, k.label(), theme::stem_color(k), 34.0).changed() {
                         out.push(LiveAction::StemGain(i, k.index(), g));
                     }
                 }
@@ -523,6 +527,7 @@ impl LiveView {
             self.channel(&mut cu, i, d, out);
         }
         let mut mu = ui.new_child(egui::UiBuilder::new().max_rect(cols[1]).layout(Layout::top_down(Align::Center)));
+        beat_bars(&mut mu, decks);
         self.master_col(&mut mu, m, out);
         let xr = Rect::from_min_max(pos2(inner.left() + 14.0, inner.bottom() - 48.0), pos2(inner.right() - 14.0, inner.bottom() - 20.0));
         let mut xu = ui.new_child(egui::UiBuilder::new().max_rect(xr).layout(Layout::left_to_right(Align::Center)));
@@ -560,20 +565,26 @@ impl LiveView {
             if widgets::toggle(ui, d.pfl, "🎧", accent, vec2(40.0, 20.0)).on_hover_text("Headphone cue").clicked() {
                 out.push(LiveAction::Pfl(i, !d.pfl));
             }
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 3.0;
-                widgets::vu(ui, d.vu[0], d.vu[1], vec2(12.0, 84.0));
-                // the fader shows what plays: automix moves it with its volume automation
-                let auto = d.auto_volume.clamp(0.0, 1.0);
-                let mut v = d.fader * auto;
-                let r = widgets::vfader(ui, &mut v, 1.0, vec2(34.0, 88.0), accent);
-                if r.changed() {
-                    out.push(LiveAction::Fader(i, if auto > 0.05 { (v / auto).min(1.0) } else { v }));
-                }
-                if auto < 0.999 {
-                    r.on_hover_text(format!("Automix volume {:.0} %", auto * 100.0));
-                }
-            });
+            ui.add_space(8.0);
+            // the fader is centred under the knobs above it; the level meter sits beside it on
+            // the channel's outer side (left deck left, right deck right)
+            let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 88.0), Sense::hover());
+            let fr = Rect::from_center_size(row.center(), vec2(34.0, 88.0));
+            let vx = if i.is_multiple_of(2) { fr.left() - 3.0 - 12.0 } else { fr.right() + 3.0 };
+            let vr = Rect::from_min_size(pos2(vx, row.center().y - 42.0), vec2(12.0, 84.0));
+            let mut vu_ui = ui.new_child(egui::UiBuilder::new().max_rect(vr));
+            widgets::vu(&mut vu_ui, d.vu[0], d.vu[1], vr.size());
+            let mut fu = ui.new_child(egui::UiBuilder::new().max_rect(fr));
+            // the fader shows what plays: automix moves it with its volume automation
+            let auto = d.auto_volume.clamp(0.0, 1.0);
+            let mut v = d.fader * auto;
+            let r = widgets::vfader(&mut fu, &mut v, 1.0, fr.size(), accent);
+            if r.changed() {
+                out.push(LiveAction::Fader(i, if auto > 0.05 { (v / auto).min(1.0) } else { v }));
+            }
+            if auto < 0.999 {
+                r.on_hover_text(format!("Automix volume {:.0} %", auto * 100.0));
+            }
         }
     }
 
@@ -604,6 +615,25 @@ impl LiveView {
                 out.push(LiveAction::Automix(!m.automix));
             }
             ui.label(RichText::new(&m.output_name).size(9.5).color(theme::TEXT_DIM));
+        }
+    }
+}
+
+/// Where each deck is in its bar: one row of beats per deck (A on top) in the deck's colour, the
+/// current beat lit. Dark for a deck without a track or beat grid.
+fn beat_bars(ui: &mut Ui, decks: &[DeckUi]) {
+    let (pill, gap) = (vec2(28.0, 8.0), vec2(5.0, 4.0));
+    let rows = decks.len().min(2);
+    let (r, _) = ui.allocate_exact_size(vec2(4.0 * pill.x + 3.0 * gap.x, rows as f32 * pill.y + (rows.saturating_sub(1)) as f32 * gap.y + 4.0), Sense::hover());
+    let p = ui.painter();
+    for (row, d) in decks.iter().take(rows).enumerate() {
+        let grid = d.grid.filter(|_| d.loaded);
+        let n = grid.map_or(4, |g| g.beats_per_bar.clamp(1, 8)) as usize;
+        let lit = grid.map(|g| (g.beat_at(d.position).floor() as i64).rem_euclid(n as i64) as usize);
+        let w = (r.width() - (n - 1) as f32 * gap.x) / n as f32;
+        for k in 0..n {
+            let b = Rect::from_min_size(pos2(r.left() + k as f32 * (w + gap.x), r.top() + row as f32 * (pill.y + gap.y)), vec2(w, pill.y));
+            p.rect_filled(b, pill.y / 2.0, if lit == Some(k) { theme::deck_color(row) } else { theme::BG });
         }
     }
 }
