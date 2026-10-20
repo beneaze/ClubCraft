@@ -1,6 +1,8 @@
 use anyhow::{anyhow, Context, Result};
 use std::path::Path;
+use std::sync::LazyLock;
 use symphonia::core::codecs::audio::AudioDecoderOptions;
+use symphonia::core::codecs::registry::CodecRegistry;
 use symphonia::core::errors::Error;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, TrackType};
@@ -56,7 +58,16 @@ impl AudioBuffer {
     }
 }
 
-/// Decode an audio file (mp3, aac/m4a, alac, flac, wav, aiff, ogg ...) to stereo f32 at
+/// Symphonia's own decoders plus libopus, which Symphonia lacks. Without it `.opus` files (what
+/// yt-dlp and many web sources hand out) import fine but can never be analysed or played.
+static CODECS: LazyLock<CodecRegistry> = LazyLock::new(|| {
+    let mut registry = CodecRegistry::new();
+    symphonia::default::register_enabled_codecs(&mut registry);
+    registry.register_audio_decoder::<symphonia_adapter_libopus::OpusDecoder>();
+    registry
+});
+
+/// Decode an audio file (mp3, aac/m4a, alac, flac, wav, aiff, ogg, opus ...) to stereo f32 at
 /// `target_rate` (use [`clubcraft_core::SAMPLE_RATE`]). Mono files are duplicated, multichannel
 /// files are folded down to their first two channels.
 pub fn decode_file(path: &Path, target_rate: u32) -> Result<AudioBuffer> {
@@ -86,8 +97,7 @@ pub fn decode_native(path: &Path) -> Result<AudioBuffer> {
         .and_then(|p| p.audio())
         .ok_or_else(|| anyhow!("no audio codec parameters"))?
         .clone();
-    let mut decoder =
-        symphonia::default::get_codecs().make_audio_decoder(&params, &AudioDecoderOptions::default())?;
+    let mut decoder = CODECS.make_audio_decoder(&params, &AudioDecoderOptions::default())?;
     let track_id = track.id;
 
     let mut left = Vec::new();
@@ -127,4 +137,15 @@ pub fn decode_native(path: &Path) -> Result<AudioBuffer> {
         return Err(anyhow!("unknown sample rate"));
     }
     Ok(AudioBuffer { sample_rate: rate, left, right })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use symphonia::core::codecs::audio::well_known::CODEC_ID_OPUS;
+
+    #[test]
+    fn opus_has_a_decoder() {
+        assert!(CODECS.get_audio_decoder(CODEC_ID_OPUS).is_some());
+    }
 }

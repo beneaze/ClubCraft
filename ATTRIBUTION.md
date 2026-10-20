@@ -42,6 +42,12 @@ Both are unmodified and keep their `LICENSE.txt`.
 | [ONNX Runtime](https://github.com/microsoft/onnxruntime) | macOS, Windows | MIT (Microsoft) |
 | DirectML (`DirectML.dll`, from the `Microsoft.AI.DirectML` NuGet package) | Windows | Microsoft's licence terms for that package |
 
+## C libraries compiled into the app
+
+| Library | Used for | Via | Licence |
+|---|---|---|---|
+| [libopus](https://opus-codec.org) | Decoding `.opus` files | `opusic-sys` (built from source) and `symphonia-adapter-libopus` | BSD-3-Clause (Xiph.Org and contributors) |
+
 ## Fonts
 
 The UI uses egui's default fonts (`epaint_default_fonts`):
