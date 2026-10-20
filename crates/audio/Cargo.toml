@@ -9,6 +9,8 @@ clubcraft-core.workspace = true
 anyhow.workspace = true
 log.workspace = true
 symphonia = { version = "0.6", features = ["all"] }
+# Symphonia has no Opus decoder; this one wraps libopus (built from source, no system library).
+symphonia-adapter-libopus = "0.3"
 lofty = "0.25"
 
 [lints]
