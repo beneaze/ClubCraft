@@ -1,10 +1,25 @@
 //! Developer control file for automated checks. When `CLUBCRAFT_DEVCTL=<file>` is set, the app
 //! polls that file; each line is a command: `shot <png path>`, `view <library|studio|live>`,
-//! `quit`. The file is deleted after it has been read.
+//! `drop <path>` (as if dropped from Finder at the pointer), `quit`. The file is deleted after it
+//! has been read.
 
 use crate::app::View;
 use eframe::egui;
 use std::path::PathBuf;
+
+/// A file "dropped" by the `drop` command.
+#[derive(Debug)]
+struct DevDrop(PathBuf);
+
+impl egui::DroppedFile for DevDrop {
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+
+    fn bytes(&self) -> Result<Vec<u8>, String> {
+        std::fs::read(&self.0).map_err(|e| e.to_string())
+    }
+}
 
 #[derive(Default)]
 pub struct DevCtl {
@@ -70,6 +85,10 @@ impl DevCtl {
                     "live" => View::Live,
                     _ => View::Library,
                 })),
+                "drop" => {
+                    let file: egui::DroppedFileHandle = std::sync::Arc::new(DevDrop(PathBuf::from(arg.trim())));
+                    ctx.input_mut(|i| i.raw.dropped_files.push(file));
+                }
                 "quit" => out.push(DevCmd::Quit),
                 "" => {}
                 _ => out.push(DevCmd::Other(line.to_string())),

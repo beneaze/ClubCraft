@@ -192,6 +192,32 @@ impl App {
         Ok(app)
     }
 
+    /// Move files dropped onto the studio into the mix, in drop order, as soon as each is in the
+    /// library with an analysis. Once the jobs are idle, whatever is left joins as it is (a failed
+    /// analysis still gives a playable track) and files that could not be imported are dropped.
+    fn add_dropped_to_mix(&mut self) {
+        if self.studio.pending_adds.is_empty() {
+            return;
+        }
+        let id_of = |sh: &Shared, p: &std::path::Path| sh.tracks.iter().find(|t| t.path == p).map(|t| t.id);
+        let idle = self.jobs.pending() == 0;
+        let mut ready = Vec::new();
+        let mut n = 0;
+        for p in &self.studio.pending_adds {
+            match id_of(&self.sh, p) {
+                Some(id) if idle || self.sh.analyses.get(&id).is_some_and(|a| a.grid.is_some()) => ready.push(id),
+                None if idle => {}
+                _ => break,
+            }
+            n += 1;
+        }
+        self.studio.pending_adds.drain(..n);
+        if !ready.is_empty() {
+            self.studio.add_tracks(&self.sh, &ready);
+            self.status = format!("Added {} track{} to the mix", ready.len(), if ready.len() == 1 { "" } else { "s" });
+        }
+    }
+
     fn handle_events(&mut self, ctx: &egui::Context) {
         let events = self.jobs.poll();
         let mut reload_all = false;
@@ -236,6 +262,7 @@ impl App {
             self.sh.reload(&self.lib);
             self.refresh_mixes();
         }
+        self.add_dropped_to_mix();
         self.sh.job_status = self.jobs.active.clone();
         for m in self.eng.tick(&self.lib, &self.sh, &self.jobs) {
             self.status = m;
@@ -276,6 +303,9 @@ impl App {
         }
         let st = self.eng.state();
         self.settings.tick(&st);
+        if self.eng.preview_player.is_some() && st.mix.active {
+            self.studio.preview_pos = st.mix.time;
+        }
         self.decks = (0..2).map(|d| crate::live::adapter::deck_ui(&st, d, &self.sh, &Default::default(), self.eng.is_loading(d))).collect();
         self.mixer = crate::live::adapter::mixer_ui(&st, &self.eng);
         // studio transport state
@@ -625,6 +655,20 @@ impl App {
         for a in actions {
             match a {
                 A::SaveMix => self.save_mix(),
+                A::PreviewTrack(id, from) => {
+                    // a one-track mix from the start of the file, so mix time is track time
+                    let dur = self.sh.analyses.get(&id).map(|a| a.duration).filter(|d| *d > 0.0).or_else(|| self.sh.track(id).map(|t| t.duration)).unwrap_or(0.0);
+                    let mut mix = clubcraft_core::Mix { name: "Preview".into(), tempo: clubcraft_core::TempoMode::Glide, ..Default::default() };
+                    mix.tracks.push(clubcraft_core::MixTrack { track_id: id, mix_in: 0.0, mix_out: dur.max(1.0), key_shift: 0, gain_db: 0.0, stems: Vec::new() });
+                    mix.normalize();
+                    self.studio.playing = false;
+                    self.eng.play_preview(&mix, from.clamp(0.0, dur.max(0.0)), &self.sh);
+                    self.status = format!("Preview: {}", self.sh.track(id).map(|t| t.display_name()).unwrap_or_default());
+                }
+                A::StopPreview => {
+                    self.eng.stop_preview();
+                    self.status.clear();
+                }
                 A::DuplicateMix => {
                     if !self.save_mix_now() {
                         continue;
@@ -867,6 +911,21 @@ impl App {
                     Some(("track", n)) => crate::studio::Selection::Track(n.parse().unwrap_or(0)),
                     Some(("transition", n)) => crate::studio::Selection::Transition(n.parse().unwrap_or(0)),
                     _ => crate::studio::Selection::None,
+                }
+            }
+            "mute" => self.handle_live_actions(vec![crate::live::model::LiveAction::MasterVol(0.0)]),
+            "add-tracks" => {
+                self.view = View::Studio;
+                self.studio.picker.show_with(arg.trim());
+            }
+            "picker-preview" => {
+                // `picker-preview <track query>`: listen to that track in the open dialog
+                let q = arg.to_lowercase();
+                if let Some(t) = self.sh.tracks.iter().find(|t| t.display_name().to_lowercase().contains(&q)) {
+                    let (id, a) = (t.id, self.sh.analyses.get(&t.id));
+                    let from = crate::track_picker::preview_start(a, a.map(|a| a.duration).unwrap_or(t.duration));
+                    self.studio.picker.set_previewing(id);
+                    self.handle_studio_actions(vec![crate::studio::StudioAction::PreviewTrack(id, from)]);
                 }
             }
             "mashup" => {
@@ -1229,6 +1288,13 @@ impl eframe::App for App {
         egui::Panel::top("top").exact_size(crate::window_chrome::HEADER_H).resizable(false).frame(header).show(ui, |ui| self.top_bar(ui));
         let import_dropped = |app: &mut Self| {
             if !dropped.is_empty() && !app.studio.consumed_drop {
+                if app.view == View::Studio {
+                    let files = crate::importer::collect_audio(&dropped);
+                    if !files.is_empty() {
+                        app.status = format!("Adding {} track{} to the mix after analysis…", files.len(), if files.len() == 1 { "" } else { "s" });
+                    }
+                    app.studio.pending_adds.extend(files);
+                }
                 app.jobs.import(dropped.clone(), true);
             }
         };
