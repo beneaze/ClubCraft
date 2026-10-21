@@ -32,6 +32,9 @@ pub enum StudioAction {
     /// Go back (or forward) to a savepoint; every other savepoint stays.
     RestoreSavepoint(i64),
     DeleteSavepoint(i64),
+    /// Listen to a library track from this many seconds (the "Add tracks" dialog).
+    PreviewTrack(TrackId, f64),
+    StopPreview,
 }
 
 /// Tabs of the bottom bar; each opens a panel above the transport.
@@ -78,6 +81,10 @@ pub struct StudioView {
     pub mashup_actions: Vec<crate::mashup_view::MashupAction>,
     /// A mashup preview is playing (set by the app).
     pub preview_playing: bool,
+    /// Play position of the running preview (s, track time; set by the app).
+    pub preview_pos: f64,
+    /// The "Add tracks" dialog.
+    pub picker: crate::track_picker::TrackPicker,
     last_selection: Selection,
     /// The transition the playhead was in on the last frame.
     playhead_transition: Option<usize>,
@@ -141,6 +148,9 @@ pub struct StudioView {
     pub sample_cache: std::collections::HashMap<std::path::PathBuf, Option<(f64, std::sync::Arc<Vec<f32>>)>>,
     /// Files dropped this frame went onto a sample lane (the app must not import them).
     pub consumed_drop: bool,
+    /// Files dropped from Finder onto the studio, in drop order: they are imported like any drop
+    /// and join the end of the mix once their analysis is in (mix points need the grid and cues).
+    pub pending_adds: Vec<std::path::PathBuf>,
     /// Selected time range on a track and the drag anchor.
     pub range: Option<crate::studio_timeline::RangeSel>,
     pub range_anchor: f64,
@@ -162,6 +172,8 @@ impl Default for StudioView {
             mashup: Default::default(),
             mashup_actions: Vec::new(),
             preview_playing: false,
+            preview_pos: 0.0,
+            picker: Default::default(),
             last_selection: Selection::None,
             playhead_transition: None,
             mix_serial: 0,
@@ -202,6 +214,7 @@ impl Default for StudioView {
             sample_open: [true, false],
             sample_cache: Default::default(),
             consumed_drop: false,
+            pending_adds: Vec::new(),
             range: None,
             range_anchor: 0.0,
             extract_requests: Vec::new(),
@@ -311,6 +324,20 @@ impl StudioView {
         self.timeline_dirty = false;
     }
 
+    fn picker_ui(&mut self, ctx: &egui::Context, sh: &Shared, out: &mut Vec<StudioAction>) {
+        use crate::track_picker::PickerAction;
+        let in_mix: Vec<TrackId> = self.mix.tracks.iter().map(|t| t.track_id).collect();
+        let mut acts = Vec::new();
+        self.picker.ui(ctx, sh, &in_mix, in_mix.last().copied(), self.preview_playing, self.preview_pos, &mut acts);
+        for a in acts {
+            match a {
+                PickerAction::Preview(id, from) => out.push(StudioAction::PreviewTrack(id, from)),
+                PickerAction::StopPreview => out.push(StudioAction::StopPreview),
+                PickerAction::Add(ids) => self.add_tracks(sh, &ids),
+            }
+        }
+    }
+
     /// Add tracks at the end with automatically planned mix points.
     pub fn add_tracks(&mut self, sh: &Shared, ids: &[TrackId]) {
         let mut order: Vec<TrackId> = self.mix.tracks.iter().map(|t| t.track_id).collect();
@@ -388,6 +415,7 @@ impl StudioView {
     }
 
     pub fn ui(&mut self, ui: &mut Ui, sh: &Shared, mixes: &[(i64, String, i64)], out: &mut Vec<StudioAction>, load_mix: &mut Option<i64>, new_mix: &mut bool) {
+        self.picker_ui(ui.ctx(), sh, out);
         if self.timeline_dirty {
             self.refresh_timeline(sh);
         }
@@ -571,31 +599,9 @@ impl StudioView {
         struct RowDrag(usize);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            ui.menu_button("+ Add tracks", |ui| {
-                ui.set_min_width(380.0);
-                let q_id = egui::Id::new("playlist-add-q");
-                let mut q: String = ui.data_mut(|d| d.get_temp(q_id).unwrap_or_default());
-                ui.add(egui::TextEdit::singleline(&mut q).hint_text("search the library").desired_width(360.0));
-                ui.data_mut(|d| d.insert_temp(q_id, q.clone()));
-                let ql = q.to_lowercase();
-                egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                    let mut n = 0;
-                    for t in &sh.tracks {
-                        if self.mix.tracks.iter().any(|m| m.track_id == t.id) || (!ql.is_empty() && !crate::library_view::matches(t, &ql)) {
-                            continue;
-                        }
-                        n += 1;
-                        if n > 200 {
-                            break;
-                        }
-                        let a = sh.analyses.get(&t.id);
-                        let info = a.map(|a| format!("  {:.0} · {}", a.bpm().unwrap_or(0.0), a.key.map(theme::key_label).unwrap_or_default())).unwrap_or_default();
-                        if ui.selectable_label(false, format!("{}{info}", t.display_name())).clicked() {
-                            self.add_tracks(sh, &[t.id]);
-                        }
-                    }
-                });
-            });
+            if ui.button("+ Add tracks").on_hover_text("Search the library, listen and add tracks to the mix").clicked() {
+                self.picker.show();
+            }
             if ui.add_enabled(self.mix.tracks.len() > 2, egui::Button::new("✨ Harmonize")).on_hover_text("Re-order for harmonic mixing, smooth tempo and an energy arc (locked transitions stay together)").clicked() {
                 self.harmonize(sh);
             }

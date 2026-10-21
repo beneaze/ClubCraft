@@ -27,6 +27,7 @@ mod studio;
 mod studio_timeline;
 mod studio_transition;
 mod theme;
+mod track_picker;
 mod waveform;
 mod widgets;
 

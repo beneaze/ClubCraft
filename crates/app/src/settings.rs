@@ -381,7 +381,7 @@ fn nav_item(ui: &mut Ui, text: &str, selected: bool) -> egui::Response {
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-fn close_button(ui: &mut Ui) -> egui::Response {
+pub(crate) fn close_button(ui: &mut Ui) -> egui::Response {
     let (r, resp) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::click());
     let p = ui.painter();
     if resp.hovered() {
