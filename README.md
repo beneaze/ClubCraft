@@ -12,7 +12,7 @@
 
 <p align="center">
   <img alt="Rust" src="https://img.shields.io/badge/Rust-b7410e?style=flat-square&logo=rust">
-  <img alt="macOS · Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Windows-native-2f7bf5?style=flat-square">
+  <img alt="macOS · Windows · Linux" src="https://img.shields.io/badge/macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-native-2f7bf5?style=flat-square">
   <img alt="Stems: HTDemucs + Mel-Band RoFormer" src="https://img.shields.io/badge/stems-HTDemucs%20%2B%20RoFormer-5ac87a?style=flat-square">
   <img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-3a3a3a?style=flat-square">
   <img alt="Status: early alpha" src="https://img.shields.io/badge/status-early%20alpha-d69e2e?style=flat-square">
@@ -146,7 +146,7 @@ Want the vocals of one track over another? The **🎤 Mashups** tab of the studi
   <tr>
     <td width="33%" valign="top">
       <h4>🎚️ Stems</h4>
-      Fast (htdemucs), High (htdemucs_ft, four fine-tuned models) and Best (Mel-Band RoFormer vocals + htdemucs_ft) · CoreML GPU on macOS, DirectML on Windows, ONNX Runtime CPU fallback · progressive separation while a track plays · 8-channel FLAC stem cache · residual playback, so unity stems are bit-exact with the original
+      Fast (htdemucs), High (htdemucs_ft, four fine-tuned models) and Best (Mel-Band RoFormer vocals + htdemucs_ft) · CoreML GPU on macOS, DirectML on Windows, ONNX Runtime CPU on Linux and as the fallback · progressive separation while a track plays · 8-channel FLAC stem cache · residual playback, so unity stems are bit-exact with the original
     </td>
     <td width="33%" valign="top">
       <h4>🧠 Analysis</h4>
@@ -250,9 +250,10 @@ cd ClubCraft
 cargo run --release -p clubcraft          # the app
 cargo test -p clubcraft-core -p clubcraft-engine
 tools/bundle-macos.sh                     # target/ClubCraft.app, models included
+tools/package-linux.sh                    # dist/ClubCraft on Linux, models included
 ```
 
-The separation models (≈ 3 GB) aren't in git. Export them once from the official checkpoints with the script in [`tools/model-export`](tools/model-export); [`models/README.md`](models/README.md) has the commands. On Windows, use `.\tools\package-windows.ps1`.
+The separation models (≈ 3 GB) aren't in git. Export them once from the official checkpoints with the script in [`tools/model-export`](tools/model-export); [`models/README.md`](models/README.md) has the commands. On Windows, use `.\tools\package-windows.ps1`. On Linux, install the ALSA headers and cmake first (`sudo apt install libasound2-dev pkg-config cmake` on Debian/Ubuntu), then `tools/package-linux.sh` builds `dist/ClubCraft`.
 
 Your library, stems, waveforms, exports and recordings live in `~/Music/ClubCraft` (`CLUBCRAFT_HOME` changes that).
 
@@ -267,8 +268,9 @@ Your library, stems, waveforms, exports and recordings live in `~/Music/ClubCraf
 |---|---|---|
 | macOS 13+ (Apple Silicon) | `ClubCraft-0.3.1-macos-arm64.dmg` | All CoreML stem models and the COCOLA mashup model bundled. Ad-hoc signed: right-click › Open the first time |
 | Windows 10/11 (x64) | `ClubCraft-0.3.1-windows-x64.zip` | `ClubCraft.exe`, `DirectML.dll`, the ONNX stem models and the COCOLA mashup model |
+| Linux (x64, glibc 2.35+) | `ClubCraft-0.3.1-linux-x64.tar.gz` | X11 or Wayland, ALSA (PipeWire and PulseAudio through their ALSA plugins), the ONNX stem models and the COCOLA mashup model. Separation runs on the CPU |
 
-Development builds: `tools/bundle-macos.sh` (macOS), and the `ClubCraft-windows-x64` artifact of every [CI run](../../actions) (Windows, without models).
+Development builds: `tools/bundle-macos.sh` (macOS), and the `ClubCraft-windows-x64` and `ClubCraft-linux-x64` artifacts of every [CI run](../../actions) (without models).
 
 ## License
 

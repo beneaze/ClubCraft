@@ -39,7 +39,7 @@ Both are unmodified and keep their `LICENSE.txt`.
 
 | Library | Platform | Licence |
 |---|---|---|
-| [ONNX Runtime](https://github.com/microsoft/onnxruntime) | macOS, Windows | MIT (Microsoft) |
+| [ONNX Runtime](https://github.com/microsoft/onnxruntime) | macOS, Windows, Linux | MIT (Microsoft) |
 | DirectML (`DirectML.dll`, from the `Microsoft.AI.DirectML` NuGet package) | Windows | Microsoft's licence terms for that package |
 
 ## C libraries compiled into the app

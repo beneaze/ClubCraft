@@ -23,6 +23,9 @@ jobs:
             os: macos-14
           - name: Windows (x64)
             os: windows-latest
+          # 22.04 for an older glibc, so the binary runs on more distributions
+          - name: Linux (x64)
+            os: ubuntu-22.04
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -30,9 +33,12 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Install ALSA headers (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config cmake
       # Lints: no unwrap / expect / panic outside tests, documented unsafe (see AGENTS.md).
       - name: Clippy
-        if: runner.os == 'macOS'
+        if: runner.os != 'Windows'
         run: cargo clippy --workspace --all-targets -- -D warnings
       # Unit tests that need no separation models.
       - name: Test
@@ -49,4 +55,17 @@ jobs:
         with:
           name: ClubCraft-windows-x64
           path: dist/ClubCraft
+          retention-days: 14
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          tools/package-linux.sh --no-build
+          tar -czf dist/ClubCraft-linux-x64.tar.gz -C dist ClubCraft
+      # a tarball keeps the executable bits that a plain artifact upload drops
+      - name: Upload Linux build
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClubCraft-linux-x64
+          path: dist/ClubCraft-linux-x64.tar.gz
           retention-days: 14

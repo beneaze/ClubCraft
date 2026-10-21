@@ -2,6 +2,7 @@
 //! Playback, Window and Help. Other platforms keep the in-window toolbar.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only the macOS menu bar sends these
 pub enum MenuCmd {
     Settings,
     NewMix,
