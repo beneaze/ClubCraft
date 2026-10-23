@@ -134,9 +134,20 @@ impl Jobs {
         self.gpu.push(Job::Separate(id, Some(quality.to_string())), true);
     }
 
+    /// Background processing (import, opened mixes): stems only if "Separate in the background" is on.
     pub fn process(&self, id: TrackId, priority: bool) {
+        let stems = self.settings.lock().separate_stems;
+        self.process_with(id, priority, stems);
+    }
+
+    /// Asked for by the user ("Analyse + separate stems"): stems whatever the background setting.
+    pub fn process_with_stems(&self, id: TrackId, priority: bool) {
+        self.process_with(id, priority, true);
+    }
+
+    fn process_with(&self, id: TrackId, priority: bool, stems: bool) {
         self.cpu.push(Job::Analyze(id), priority);
-        if self.settings.lock().separate_stems {
+        if stems {
             self.gpu.push(Job::Separate(id, None), priority);
         }
     }
@@ -167,6 +178,8 @@ impl Jobs {
                     self.active.remove(track);
                 }
                 Event::Error { track, message } => {
+                    // the status line shows it only until the next message
+                    log::warn!("job for track {track:?}: {message}");
                     self.active.remove(track);
                     self.log.push_back(message.clone());
                     if self.log.len() > 50 {

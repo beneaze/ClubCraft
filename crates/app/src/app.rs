@@ -349,7 +349,7 @@ impl App {
             match a {
                 LibraryAction::Process(ids) => {
                     for id in ids {
-                        self.jobs.process(id, true);
+                        self.jobs.process_with_stems(id, true);
                     }
                 }
                 LibraryAction::Reanalyze(ids) => {
@@ -1151,12 +1151,13 @@ impl App {
                 let q = arg.to_lowercase();
                 if let Some(t) = self.sh.tracks.iter().find(|t| t.display_name().to_lowercase().contains(&q)) {
                     let id = t.id;
-                    self.jobs.process(id, true);
+                    self.jobs.process_with_stems(id, true);
                 }
             }
+            "stop-jobs" => self.jobs.cancel_all(),
             "process-all" => {
                 for t in &self.sh.tracks {
-                    self.jobs.process(t.id, false);
+                    self.jobs.process_with_stems(t.id, false);
                 }
             }
             _ => {}
@@ -1359,7 +1360,7 @@ impl eframe::App for App {
             match a {
                 crate::settings::SettingsAction::ProcessAll => {
                     for t in &self.sh.tracks {
-                        self.jobs.process(t.id, false);
+                        self.jobs.process_with_stems(t.id, false);
                     }
                 }
                 crate::settings::SettingsAction::ReanalyseAll => {
