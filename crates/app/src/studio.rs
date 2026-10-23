@@ -239,6 +239,21 @@ struct ExtractDone {
 }
 
 /// A drop indicator line along the top of a hovered playlist row.
+/// Three small level bars bouncing at different rates: the playlist's "now playing" marker.
+fn playing_bars(ui: &mut Ui) -> egui::Response {
+    let (r, resp) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+    let t = ui.input(|i| i.time) as f32;
+    let w = r.width() / 3.0;
+    for (k, (rate, phase)) in [(7.0f32, 0.0f32), (9.5, 1.7), (6.0, 3.1)].into_iter().enumerate() {
+        let level = 0.3 + 0.7 * (0.5 + 0.5 * (t * rate + phase).sin());
+        let x0 = r.left() + k as f32 * w;
+        let bar = egui::Rect::from_min_max(pos2(x0 + 1.0, r.bottom() - level * r.height()), pos2(x0 + w - 1.0, r.bottom()));
+        ui.painter().rect_filled(bar, 1.0, theme::accent());
+    }
+    ui.ctx().request_repaint();
+    resp
+}
+
 /// Runs of tracks joined by locked transitions (only runs of two or more).
 fn link_groups(mix: &Mix) -> Vec<std::ops::RangeInclusive<usize>> {
     let mut out = Vec::new();
@@ -768,7 +783,7 @@ impl StudioView {
                             row.col(|ui| {
                                 tint(ui);
                                 if playing_row == Some(i) {
-                                    ui.label(RichText::new("▶").color(theme::accent())).on_hover_text("Playing");
+                                    playing_bars(ui).on_hover_text("Playing");
                                 } else {
                                     ui.label(RichText::new(format!("{}", i + 1)).color(theme::TEXT_DIM));
                                 }
