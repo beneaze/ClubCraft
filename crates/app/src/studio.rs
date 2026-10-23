@@ -119,6 +119,8 @@ pub struct StudioView {
     pub follow: bool,
     pub order_opts: OrderOptions,
     pub playing: bool,
+    /// Playlist row of the track on air last frame (the playlist follows it when it changes).
+    playlist_on_air: Option<usize>,
     pub position: f64,
     pub render_progress: Option<f32>,
     /// Text on the render progress bar (empty = "Rendering…").
@@ -196,6 +198,7 @@ impl Default for StudioView {
             follow: true,
             order_opts: OrderOptions::default(),
             playing: false,
+            playlist_on_air: None,
             position: 0.0,
             render_progress: None,
             render_label: String::new(),
@@ -236,6 +239,21 @@ struct ExtractDone {
 }
 
 /// A drop indicator line along the top of a hovered playlist row.
+/// Runs of tracks joined by locked transitions (only runs of two or more).
+fn link_groups(mix: &Mix) -> Vec<std::ops::RangeInclusive<usize>> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    for i in 1..=mix.tracks.len() {
+        if !mix.transitions.get(i - 1).is_some_and(|t| t.locked) || i == mix.tracks.len() {
+            if i - 1 > start {
+                out.push(start..=i - 1);
+            }
+            start = i;
+        }
+    }
+    out
+}
+
 fn ui_line(r: &egui::Response) {
     r.ctx.layer_painter(r.layer_id).line_segment([r.rect.left_top(), r.rect.right_top()], Stroke::new(2.0, theme::accent()));
 }
@@ -653,13 +671,22 @@ impl StudioView {
         let mut remove: Option<usize> = None;
         let mut select: Option<Selection> = None;
         let played_key = |i: usize| self.mix.tracks.get(i).and_then(|t| sh.analyses.get(&t.track_id).and_then(|a| a.key).map(|k| k.shifted(t.key_shift)));
+        let groups = link_groups(&self.mix);
+        let group_color = |i: usize| groups.iter().position(|g| g.contains(&i)).map(|n| theme::LINK_GROUPS[n % theme::LINK_GROUPS.len()]);
+        let playing_row = if self.playing { self.on_air_track() } else { None };
+        let follow_row = playing_row.filter(|r| self.playlist_on_air != Some(*r));
+        self.playlist_on_air = playing_row;
         let fixed = match self.mix.tempo {
             TempoMode::Fixed(b) => Some(b),
             TempoMode::Glide => None,
         };
         let resp = ui
             .scope(|ui| {
-                egui_extras::TableBuilder::new(ui)
+                let mut table = egui_extras::TableBuilder::new(ui);
+                if let Some(r) = follow_row {
+                    table = table.scroll_to_row(r, Some(Align::Center));
+                }
+                table
                     .id_salt("playlist")
                     .striped(true)
                     .sense(Sense::click())
@@ -691,8 +718,22 @@ impl StudioView {
                             let t = sh.track(mt.track_id);
                             let a = sh.analyses.get(&mt.track_id);
                             row.set_selected(self.selection == Selection::Track(i));
+                            let linked = group_color(i);
+                            // the row in its link group's colour, the playing track in the accent;
+                            // per cell, as each cell paints its own background
+                            let tint_color = if playing_row == Some(i) { Some(theme::accent().linear_multiply(0.18)) } else { linked.map(|c| c.linear_multiply(0.2)) };
+                            let tint = |ui: &Ui| {
+                                if let Some(c) = tint_color {
+                                    let gap = ui.spacing().item_spacing * 0.5;
+                                    let r = ui.max_rect().expand2(gap);
+                                    // into the spacing between cells, but not over the header row
+                                    egui::Painter::new(ui.ctx().clone(), ui.layer_id(), r.intersect(ui.clip_rect().expand2(gap))).rect_filled(r, 0.0, c);
+                                }
+                            };
                             row.col(|ui| {
-                                let h = ui.add(egui::Label::new(RichText::new("☰").size(13.0).color(theme::TEXT_DIM)).sense(Sense::drag())).on_hover_text("Drag to reorder");
+                                tint(ui);
+                                let tip = if linked.is_some() { "Drag to reorder (with the tracks linked to it)" } else { "Drag to reorder" };
+                                let h = ui.add(egui::Label::new(RichText::new("☰").size(13.0).color(theme::TEXT_DIM)).sense(Sense::drag())).on_hover_text(tip);
                                 if h.hovered() {
                                     ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
                                 }
@@ -700,44 +741,53 @@ impl StudioView {
                             });
                             // a line through tracks linked by locked transitions (they stay together)
                             row.col(|ui| {
+                                tint(ui);
                                 let up = i > 0 && self.mix.transitions.get(i - 1).is_some_and(|t| t.locked);
                                 let down = self.mix.transitions.get(i).is_some_and(|t| t.locked);
-                                if !(up || down) {
-                                    return;
-                                }
+                                let Some(color) = linked else { return };
                                 let gap = vec2(0.0, ui.spacing().item_spacing.y * 0.5 + 1.0);
                                 let r = ui.max_rect().expand2(gap);
                                 // the cell clips at its own edges: reach into the spacing between rows
                                 let p = egui::Painter::new(ui.ctx().clone(), ui.layer_id(), ui.clip_rect().expand2(gap));
                                 let (x, cy) = (r.center().x, r.center().y);
-                                let stroke = Stroke::new(2.0, theme::LINKED);
+                                let stroke = Stroke::new(2.0, color);
                                 if up {
                                     p.line_segment([pos2(x, r.top()), pos2(x, cy)], stroke);
                                 }
                                 if down {
                                     p.line_segment([pos2(x, cy), pos2(x, r.bottom())], stroke);
                                 }
-                                p.circle_filled(pos2(x, cy), 3.5, theme::LINKED);
+                                p.circle_filled(pos2(x, cy), 3.5, color);
                                 let tip = match (up, down) {
+                                    (false, false) => "Linked",
                                     (true, true) => "Linked to the tracks before and after it by locked transitions",
                                     (true, false) => "Linked to the track before it by a locked transition",
                                     _ => "Linked to the track after it by a locked transition",
                                 };
-                                ui.allocate_exact_size(ui.available_size(), Sense::hover()).1.on_hover_text(format!("{tip}: they stay together when you harmonize or re-plan the mix"));
+                                ui.allocate_exact_size(ui.available_size(), Sense::hover()).1.on_hover_text(format!("{tip}: they stay together when you drag, harmonize or re-plan the mix"));
                             });
                             row.col(|ui| {
-                                ui.label(RichText::new(format!("{}", i + 1)).color(theme::TEXT_DIM));
+                                tint(ui);
+                                if playing_row == Some(i) {
+                                    ui.label(RichText::new("▶").color(theme::accent())).on_hover_text("Playing");
+                                } else {
+                                    ui.label(RichText::new(format!("{}", i + 1)).color(theme::TEXT_DIM));
+                                }
                             });
                             row.col(|ui| {
+                                tint(ui);
                                 ui.label(t.map(|t| if t.title.is_empty() { t.display_name() } else { t.title.clone() }).unwrap_or_default());
                             });
                             row.col(|ui| {
+                                tint(ui);
                                 ui.label(RichText::new(t.map(|t| t.artist.clone()).unwrap_or_default()).color(theme::TEXT_DIM));
                             });
                             row.col(|ui| {
+                                tint(ui);
                                 ui.label(RichText::new(t.map(|t| t.genre.clone()).unwrap_or_default()).color(theme::TEXT_DIM).size(11.5));
                             });
                             row.col(|ui| {
+                                tint(ui);
                                 if i > 0 {
                                     if let Some(tr) = self.mix.transitions.get(i - 1) {
                                         let c = theme::style_color(tr.style);
@@ -749,14 +799,17 @@ impl StudioView {
                                 }
                             });
                             row.col(|ui| {
+                                tint(ui);
                                 ui.label(RichText::new(theme::fmt_time_short(a.map(|a| a.duration).unwrap_or(0.0))).monospace().size(12.0));
                             });
                             row.col(|ui| {
+                                tint(ui);
                                 if let Some(k) = played_key(i) {
                                     key_chip(ui, k);
                                 }
                             });
                             row.col(|ui| {
+                                tint(ui);
                                 if let (true, Some(prev), Some(cur)) = (i > 0, played_key(i.wrapping_sub(1)), played_key(i)) {
                                     let c = prev.compatibility(cur);
                                     let (txt, col, tip) = if c >= 0.85 {
@@ -773,11 +826,13 @@ impl StudioView {
                                 }
                             });
                             row.col(|ui| {
+                                tint(ui);
                                 if let Some(e) = a.and_then(|a| a.energy) {
                                     ui.label(RichText::new(format!("{e}")).color(theme::WARN));
                                 }
                             });
                             row.col(|ui| {
+                                tint(ui);
                                 if let Some(b) = a.and_then(|a| a.bpm()) {
                                     ui.label(RichText::new(format!("{b:.0}")).monospace());
                                     if let Some(f) = fixed {
@@ -789,6 +844,7 @@ impl StudioView {
                                 }
                             });
                             row.col(|ui| {
+                                tint(ui);
                                 if ui.add(egui::Button::new(RichText::new("🗑").size(13.0)).frame(false)).on_hover_text("Remove from the mix").clicked() {
                                     remove = Some(i);
                                 }
@@ -816,14 +872,38 @@ impl StudioView {
                 self.last_selection = sel; // stay in the playlist
             }
         }
-        let mut order: Vec<TrackId> = self.mix.tracks.iter().map(|t| t.track_id).collect();
         if let Some((from, to)) = moved.filter(|(f, t)| f != t) {
-            let id = order.remove(from);
-            order.insert(to, id);
-            self.selection = Selection::None;
-            self.replan_keep(sh, &order, true);
+            self.move_track(sh, from, to);
         } else if let Some(i) = remove {
             self.remove_track(sh, i);
+        }
+    }
+
+    /// Move track `from`, with the tracks linked to it by locked transitions, to where track
+    /// `to` is. A drop inside another linked group lands next to that group, so no locked pair is
+    /// split.
+    pub fn move_track(&mut self, sh: &Shared, from: usize, to: usize) {
+        let groups = link_groups(&self.mix);
+        let span = |i: usize| groups.iter().find(|g| g.contains(&i)).cloned().unwrap_or(i..=i);
+        let (block, target) = (span(from), span(to));
+        if from >= self.mix.tracks.len() || to >= self.mix.tracks.len() || block.contains(&to) {
+            return;
+        }
+        let mut order: Vec<TrackId> = self.mix.tracks.iter().map(|t| t.track_id).collect();
+        let moved: Vec<TrackId> = order.drain(block.clone()).collect();
+        // moving down the block ends where the target ends, moving up it starts where it starts
+        let at = if to > *block.end() { target.end() + 1 - moved.len() } else { *target.start() };
+        order.splice(at..at, moved);
+        self.selection = Selection::None;
+        self.replan_keep(sh, &order, true);
+    }
+
+    /// The track on air at the playhead: the incoming one from the middle of a transition.
+    fn on_air_track(&self) -> Option<usize> {
+        let i = self.track_at_playhead()?;
+        match i.checked_sub(1).and_then(|k| self.timeline.transitions.get(k)) {
+            Some(x) if self.position < (x.start_sec + x.end_sec) * 0.5 => Some(i - 1),
+            _ => Some(i),
         }
     }
 
