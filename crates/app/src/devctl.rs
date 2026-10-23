@@ -1,7 +1,7 @@
 //! Developer control file for automated checks. When `CLUBCRAFT_DEVCTL=<file>` is set, the app
 //! polls that file; each line is a command: `shot <png path>`, `view <library|studio|live>`,
-//! `drop <path>` (as if dropped from Finder at the pointer), `quit`. The file is deleted after it
-//! has been read.
+//! `drop <path>` (as if dropped from Finder at the pointer), `key <name>` (a key press, egui's key
+//! names, e.g. `Backspace`), `quit`. The file is deleted after it has been read.
 
 use crate::app::View;
 use eframe::egui;
@@ -89,6 +89,14 @@ impl DevCtl {
                     let file: egui::DroppedFileHandle = std::sync::Arc::new(DevDrop(PathBuf::from(arg.trim())));
                     ctx.input_mut(|i| i.raw.dropped_files.push(file));
                 }
+                "key" => match egui::Key::from_name(arg.trim()) {
+                    Some(key) => ctx.input_mut(|i| {
+                        for pressed in [true, false] {
+                            i.events.push(egui::Event::Key { key, physical_key: Some(key), pressed, repeat: false, modifiers: egui::Modifiers::NONE });
+                        }
+                    }),
+                    None => log::warn!("devctl: unknown key `{arg}`"),
+                },
                 "quit" => out.push(DevCmd::Quit),
                 "" => {}
                 _ => out.push(DevCmd::Other(line.to_string())),

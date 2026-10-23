@@ -451,6 +451,11 @@ impl StudioView {
                 .frame(egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(12, 8)))
                 .show(ui, |ui| self.tab_panel(ui, sh, tab));
         }
+        // The keys and the panels above may have added or removed tracks this frame; the timeline
+        // indexes the mix's tracks by its own, so it must match them before it's drawn.
+        if self.timeline_dirty {
+            self.refresh_timeline(sh);
+        }
         egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin::symmetric(8, 6))).show(ui, |ui| {
             self.timeline_ui(ui, sh, out);
         });
@@ -477,6 +482,7 @@ impl StudioView {
         let bar = self.timeline.tracks.first().map(|t| t.grid.bar_len()).unwrap_or(2.0);
         let total = self.timeline.total_secs;
         let mut seek: Option<f64> = None;
+        let mut remove: Option<usize> = None;
         let (mut undo, mut redo) = (false, false);
         let (cmd, shift) = ctx.input(|i| (i.modifiers.command, i.modifiers.shift));
         ctx.input_mut(|i| {
@@ -525,6 +531,11 @@ impl StudioView {
                     }
                 }
             }
+            if let Selection::Track(t) = self.selection {
+                if i.key_pressed(Key::Backspace) || i.key_pressed(Key::Delete) {
+                    remove = Some(t);
+                }
+            }
             if cmd && i.key_pressed(Key::S) {
                 out.push(StudioAction::SaveMix);
             }
@@ -541,6 +552,9 @@ impl StudioView {
         }
         if redo {
             self.redo();
+        }
+        if let Some(t) = remove {
+            self.remove_track(sh, t);
         }
         // previous / next transition: [ and ]
         let (prev, next) = ctx.input(|i| (i.key_pressed(Key::OpenBracket), i.key_pressed(Key::CloseBracket)));
@@ -562,7 +576,6 @@ impl StudioView {
             self.follow = true;
             out.push(StudioAction::Seek(t));
         }
-        let _ = sh;
     }
 
     /// Re-plan the mix for a new order, keeping the transition (and mix points) of every pair of
@@ -774,10 +787,19 @@ impl StudioView {
             self.selection = Selection::None;
             self.replan_keep(sh, &order, true);
         } else if let Some(i) = remove {
-            order.remove(i);
-            self.selection = Selection::None;
-            self.replan_keep(sh, &order, true);
+            self.remove_track(sh, i);
         }
+    }
+
+    /// Take the `i`-th track out of the mix; the transitions around it are planned again.
+    pub fn remove_track(&mut self, sh: &Shared, i: usize) {
+        let mut order: Vec<TrackId> = self.mix.tracks.iter().map(|t| t.track_id).collect();
+        if i >= order.len() {
+            return;
+        }
+        order.remove(i);
+        self.selection = Selection::None;
+        self.replan_keep(sh, &order, true);
     }
 
     /// Start the extractions asked for (menu / shortcuts) and place finished ones on a sample lane.
