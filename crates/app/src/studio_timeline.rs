@@ -101,6 +101,14 @@ pub enum Drag {
     Clip(usize),
     /// Selecting a time range on track `i`'s waveform.
     Range(usize),
+    /// Moving sample clip `j`, grabbed this many beats after its start.
+    Sample(usize, f64),
+}
+
+/// The snap grid (beats) for dragging at `px_per_beat`: the finest of 1/16 to 1 beat that is
+/// still at least 8 px wide, so zooming in snaps finer.
+fn snap_step(px_per_beat: f32) -> f64 {
+    [0.0625, 0.125, 0.25, 0.5].into_iter().find(|s| *s as f32 * px_per_beat >= 8.0).unwrap_or(1.0)
 }
 
 /// A selected time range of one track (mix beats), for extracting stems / samples.
@@ -1427,15 +1435,35 @@ impl StudioView {
                 }
                 pc.add(egui::Shape::mesh(mesh));
             }
-            pc.rect_stroke(r, 4.0, Stroke::new(1.0, SAMPLE_COLOR), StrokeKind::Inside);
+            let sel = self.selection == Selection::Sample(j);
+            pc.rect_stroke(r, 4.0, if sel { Stroke::new(2.0, theme::accent()) } else { Stroke::new(1.0, SAMPLE_COLOR) }, StrokeKind::Inside);
             let resp = ui.interact(r.intersect(canvas), Id::new(("sample-clip", j)), Sense::click_and_drag());
+            // a click selects the clip (Backspace / Delete then removes it, not a track)
+            if resp.clicked() || resp.drag_started() || resp.secondary_clicked() {
+                self.selection = Selection::Sample(j);
+            }
             if resp.hovered() {
                 ui.ctx().set_cursor_icon(if resp.dragged() { CursorIcon::Grabbing } else { CursorIcon::Grab });
             }
+            if resp.drag_started() {
+                // where the clip was grabbed: it follows the pointer from there, not by frame
+                // deltas (each rounded to the grid, slow drags never moved)
+                let grab = ui.input(|i| i.pointer.press_origin()).map_or(0.0, |q| beat_at_x(&self.timeline, q.x) - c.start_beat);
+                self.drag = Some(Drag::Sample(j, grab));
+            }
+            if resp.drag_stopped() {
+                self.drag = None;
+            }
             if resp.dragged() {
+                let grab = match self.drag {
+                    Some(Drag::Sample(d, g)) if d == j => g,
+                    _ => 0.0,
+                };
                 if let Some(q) = ui.input(|i| i.pointer.latest_pos()) {
-                    let nb = beat_at_x(&self.timeline, x_of(t0) + resp.drag_delta().x).max(0.0);
-                    let snapped = if ui.input(|i| i.modifiers.shift) { nb } else { nb.round() };
+                    let nb = (beat_at_x(&self.timeline, q.x) - grab).max(0.0);
+                    let px_per_beat = ((self.timeline.sec_at_beat(nb + 1.0) - self.timeline.sec_at_beat(nb)) as f32 * self.zoom).max(1e-3);
+                    let step = snap_step(px_per_beat);
+                    let snapped = if ui.input(|i| i.modifiers.shift) { nb } else { (nb / step).round() * step };
                     if (snapped - c.start_beat).abs() > 1e-6 {
                         self.mix.samples[j].start_beat = snapped;
                         edited = true;
@@ -1465,7 +1493,7 @@ impl StudioView {
                     ui.close();
                 }
             });
-            resp.on_hover_text(format!("{name} · {:.1} s · drag to move (snaps to beats, Shift: free) · right-click for more", dur));
+            resp.on_hover_text(format!("{name} · {:.1} s · drag to move (snaps to the beat grid, finer when zoomed in; Shift: free) · Backspace deletes it · right-click for more", dur));
         }
         if let Some(j) = dup {
             let mut c = self.mix.samples[j].clone();
@@ -1473,12 +1501,11 @@ impl StudioView {
             self.mix.samples.push(c);
             edited = true;
         }
-        if let Some(j) = remove {
-            self.mix.samples.remove(j);
-            edited = true;
-        }
         if edited {
             self.changed();
+        }
+        if let Some(j) = remove {
+            self.remove_sample(j);
         }
     }
 

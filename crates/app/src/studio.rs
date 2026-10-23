@@ -68,6 +68,8 @@ pub enum Selection {
     None,
     Track(usize),
     Transition(usize),
+    /// A clip on a sample lane (index into `Mix::samples`).
+    Sample(usize),
 }
 
 pub struct StudioView {
@@ -399,6 +401,9 @@ impl StudioView {
         planned.tempo = self.mix.tempo;
         planned.keylock = self.mix.keylock;
         planned.lanes = self.mix.lanes.clone();
+        // the sample lanes aren't part of the plan
+        planned.samples = self.mix.samples.clone();
+        planned.sample_lanes = self.mix.sample_lanes.clone();
         // locked transitions keep their mix points, curves and key relation
         let old = &self.mix;
         for k in 0..planned.transitions.len() {
@@ -464,7 +469,7 @@ impl StudioView {
             match self.selection {
                 Selection::Track(_) => self.tab = Some(Tab::Track),
                 Selection::Transition(_) => self.tab = Some(Tab::Transition),
-                Selection::None => {}
+                Selection::Sample(_) | Selection::None => {}
             }
         }
         self.last_selection = self.selection;
@@ -482,7 +487,7 @@ impl StudioView {
         let bar = self.timeline.tracks.first().map(|t| t.grid.bar_len()).unwrap_or(2.0);
         let total = self.timeline.total_secs;
         let mut seek: Option<f64> = None;
-        let mut remove: Option<usize> = None;
+        let mut remove: Option<Selection> = None;
         let (mut undo, mut redo) = (false, false);
         let (cmd, shift) = ctx.input(|i| (i.modifiers.command, i.modifiers.shift));
         ctx.input_mut(|i| {
@@ -531,10 +536,8 @@ impl StudioView {
                     }
                 }
             }
-            if let Selection::Track(t) = self.selection {
-                if i.key_pressed(Key::Backspace) || i.key_pressed(Key::Delete) {
-                    remove = Some(t);
-                }
+            if i.key_pressed(Key::Backspace) || i.key_pressed(Key::Delete) {
+                remove = Some(self.selection);
             }
             if cmd && i.key_pressed(Key::S) {
                 out.push(StudioAction::SaveMix);
@@ -553,8 +556,10 @@ impl StudioView {
         if redo {
             self.redo();
         }
-        if let Some(t) = remove {
-            self.remove_track(sh, t);
+        match remove {
+            Some(Selection::Track(t)) => self.remove_track(sh, t),
+            Some(Selection::Sample(j)) => self.remove_sample(j),
+            _ => {}
         }
         // previous / next transition: [ and ]
         let (prev, next) = ctx.input(|i| (i.key_pressed(Key::OpenBracket), i.key_pressed(Key::CloseBracket)));
@@ -587,6 +592,9 @@ impl StudioView {
         planned.tempo = old.tempo;
         planned.keylock = old.keylock;
         planned.lanes = old.lanes.clone();
+        // the sample lanes aren't part of the plan
+        planned.samples = old.samples.clone();
+        planned.sample_lanes = old.sample_lanes.clone();
         for k in 0..planned.transitions.len() {
             let (a, b) = (planned.tracks[k].track_id, planned.tracks[k + 1].track_id);
             if let Some(j) = (0..old.transitions.len()).find(|&j| (keep_all || old.transitions[j].locked) && old.tracks[j].track_id == a && old.tracks[j + 1].track_id == b) {
@@ -789,6 +797,20 @@ impl StudioView {
         } else if let Some(i) = remove {
             self.remove_track(sh, i);
         }
+    }
+
+    /// Delete sample clip `j`.
+    pub fn remove_sample(&mut self, j: usize) {
+        if j >= self.mix.samples.len() {
+            return;
+        }
+        self.mix.samples.remove(j);
+        self.selection = match self.selection {
+            Selection::Sample(s) if s == j => Selection::None,
+            Selection::Sample(s) if s > j => Selection::Sample(s - 1),
+            other => other,
+        };
+        self.changed();
     }
 
     /// Take the `i`-th track out of the mix; the transitions around it are planned again.

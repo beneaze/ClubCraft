@@ -919,6 +919,7 @@ impl App {
                 self.studio.selection = match arg.split_once(' ') {
                     Some(("track", n)) => crate::studio::Selection::Track(n.parse().unwrap_or(0)),
                     Some(("transition", n)) => crate::studio::Selection::Transition(n.parse().unwrap_or(0)),
+                    Some(("sample", n)) => crate::studio::Selection::Sample(n.parse().unwrap_or(0)),
                     _ => crate::studio::Selection::None,
                 }
             }
@@ -1281,6 +1282,10 @@ impl App {
 }
 
 impl eframe::App for App {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.devctl.feed(ctx, raw_input);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.handle_events(&ctx);

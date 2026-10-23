@@ -1,7 +1,8 @@
 //! Developer control file for automated checks. When `CLUBCRAFT_DEVCTL=<file>` is set, the app
 //! polls that file; each line is a command: `shot <png path>`, `view <library|studio|live>`,
 //! `drop <path>` (as if dropped from Finder at the pointer), `key <name>` (a key press, egui's key
-//! names, e.g. `Backspace`), `quit`. The file is deleted after it has been read.
+//! names, e.g. `Backspace`), `drag <x0> <y0> <x1> <y1> [steps] [shift]` (a mouse drag in points,
+//! one move per frame), `quit`. The file is deleted after it has been read.
 
 use crate::app::View;
 use eframe::egui;
@@ -26,6 +27,8 @@ pub struct DevCtl {
     file: Option<PathBuf>,
     pending_shot: Option<PathBuf>,
     last_check: f64,
+    /// Pointer input for the coming frames (`drag`), one batch per frame.
+    frames: std::collections::VecDeque<Vec<egui::Event>>,
 }
 
 pub enum DevCmd {
@@ -38,6 +41,35 @@ pub enum DevCmd {
 impl DevCtl {
     pub fn from_env() -> DevCtl {
         DevCtl { file: std::env::var_os("CLUBCRAFT_DEVCTL").map(PathBuf::from), ..Default::default() }
+    }
+
+    /// Feed queued pointer input into the next frame (from `App::raw_input_hook`, before egui
+    /// works out the pointer state).
+    pub fn feed(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        if let Some(events) = self.frames.pop_front() {
+            raw.events.extend(events);
+            ctx.request_repaint();
+        }
+    }
+
+    fn queue_drag(&mut self, arg: &str) {
+        let v: Vec<&str> = arg.split_whitespace().collect();
+        let num = |i: usize| v.get(i).and_then(|s| s.parse::<f32>().ok());
+        let (Some(x0), Some(y0), Some(x1), Some(y1)) = (num(0), num(1), num(2), num(3)) else {
+            log::warn!("devctl: drag <x0> <y0> <x1> <y1> [steps] [shift]");
+            return;
+        };
+        let steps = num(4).map_or(30, |s| s.max(1.0) as usize);
+        let modifiers = if v.contains(&"shift") { egui::Modifiers::SHIFT } else { egui::Modifiers::NONE };
+        let (p0, p1) = (egui::pos2(x0, y0), egui::pos2(x1, y1));
+        let button = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers };
+        self.frames.push_back(vec![egui::Event::ModifiersChanged(modifiers), egui::Event::PointerMoved(p0)]);
+        self.frames.push_back(vec![button(p0, true)]);
+        for s in 1..=steps {
+            self.frames.push_back(vec![egui::Event::PointerMoved(p0.lerp(p1, s as f32 / steps as f32))]);
+        }
+        self.frames.push_back(vec![button(p1, false)]);
+        self.frames.push_back(vec![egui::Event::ModifiersChanged(egui::Modifiers::NONE)]);
     }
 
     pub fn poll(&mut self, ctx: &egui::Context) -> Vec<DevCmd> {
@@ -89,6 +121,7 @@ impl DevCtl {
                     let file: egui::DroppedFileHandle = std::sync::Arc::new(DevDrop(PathBuf::from(arg.trim())));
                     ctx.input_mut(|i| i.raw.dropped_files.push(file));
                 }
+                "drag" => self.queue_drag(arg),
                 "key" => match egui::Key::from_name(arg.trim()) {
                     Some(key) => ctx.input_mut(|i| {
                         for pressed in [true, false] {
