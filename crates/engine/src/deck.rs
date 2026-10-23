@@ -129,6 +129,11 @@ impl StemEcho {
 }
 
 /// Audio source: original track + stem residuals with smoothed gains.
+///
+/// `out = r·original + Σ (g − r)·stem`, with `r` the mean of the stem gains `g`. That is
+/// `Σ g·stem + r·(original − Σ stem)`: the part of the track no stem holds (21–34 dB below it
+/// with HTDemucs) follows the stems on average, so all stems at 0 is silence and all at 1 is the
+/// original, bit-exact.
 struct Source {
     track: Option<Arc<LoadedTrack>>,
     frames: usize,
@@ -157,13 +162,13 @@ impl Source {
         let mut s1 = [0f32; 4];
         for s in 0..4 {
             let (a, b) = self.gains[s].advance(adv);
-            g0[s] = a - 1.0;
-            g1[s] = b - 1.0;
+            g0[s] = a;
+            g1[s] = b;
             let (a, b) = self.sends[s].advance(adv);
             s0[s] = a;
             s1[s] = b;
         }
-        let gains_unity = g0.iter().chain(g1.iter()).all(|g| *g == 0.0);
+        let gains_unity = g0.iter().chain(g1.iter()).all(|g| *g == 1.0);
         let want_send = send.is_some() && s0.iter().chain(s1.iter()).any(|g| *g != 0.0);
         if let Some(s) = send.as_deref_mut() {
             s[..count * 2].fill(0.0);
@@ -204,12 +209,14 @@ impl Source {
                             }
                             let t = (j + q) as f32 * inv;
                             if !gains_unity && self.amt > 0.0 {
-                                let mut l = 0f32;
-                                let mut r = 0f32;
+                                let g: [f32; 4] = std::array::from_fn(|k| g0[k] + (g1[k] - g0[k]) * t);
+                                let rest = (g[0] + g[1] + g[2] + g[3]) * 0.25;
+                                // the change from the original: (r − 1)·original + Σ (g − r)·stem
+                                let mut l = (rest - 1.0) * dst[(j + q) * 2];
+                                let mut r = (rest - 1.0) * dst[(j + q) * 2 + 1];
                                 for st_i in 0..4 {
-                                    let g = g0[st_i] + (g1[st_i] - g0[st_i]) * t;
-                                    l += g * s[st_i * 2];
-                                    r += g * s[st_i * 2 + 1];
+                                    l += (g[st_i] - rest) * s[st_i * 2];
+                                    r += (g[st_i] - rest) * s[st_i * 2 + 1];
                                 }
                                 dst[(j + q) * 2] += self.amt * l;
                                 dst[(j + q) * 2 + 1] += self.amt * r;
@@ -1778,23 +1785,33 @@ mod tests {
             assert_eq!(out[i * 2], l[start + i], "L differs at {}", start + i);
             assert_eq!(out[i * 2 + 1], r[start + i], "R differs at {}", start + i);
         }
-        // and muting vocals subtracts the vocal stem
-        let mut deck = Deck::new(44100);
-        deck.set_keylock(false);
-        let st = Arc::new(StemTrack::from_planar("test", &stems));
-        let audio = Arc::new(clubcraft_audio::AudioBuffer::new(44100, l.clone(), r.clone()));
-        deck.load(Arc::new(LoadedTrack::new("t", audio).with_stems(st)));
-        deck.seek(0.0);
-        deck.set_stem_mute(StemKind::Vocals, true);
-        deck.play();
-        let _ = render(&mut deck, 8192);
-        let start = (deck.position() * 44100.0).round() as usize;
-        let out = render(&mut deck, 1000);
+        // muting vocals: the other stems, plus 3/4 of what no stem holds
+        let muted = |mute: &[StemKind]| {
+            let mut deck = Deck::new(44100);
+            deck.set_keylock(false);
+            let st = Arc::new(StemTrack::from_planar("test", &stems));
+            let audio = Arc::new(clubcraft_audio::AudioBuffer::new(44100, l.clone(), r.clone()));
+            deck.load(Arc::new(LoadedTrack::new("t", audio).with_stems(st)));
+            deck.seek(0.0);
+            for k in mute {
+                deck.set_stem_mute(*k, true);
+            }
+            deck.play();
+            let _ = render(&mut deck, 8192);
+            let start = (deck.position() * 44100.0).round() as usize;
+            (start, render(&mut deck, 1000))
+        };
+        let (start, out) = muted(&[StemKind::Vocals]);
         for i in 0..1000 {
-            let e = l[start + i] - stems[3].0[start + i];
+            let f = start + i;
+            let sum: f32 = (0..4).map(|k| stems[k].0[f]).sum();
+            let e = stems[0].0[f] + stems[1].0[f] + stems[2].0[f] + 0.75 * (l[f] - sum);
             // stems are held as 16-bit with a per-stem scale: error ≤ peak / 32767
-            assert!((out[i * 2] - e).abs() < 1e-4);
+            assert!((out[i * 2] - e).abs() < 1e-4, "{} vs {e}", out[i * 2]);
         }
+        // all stems off is silence, although these stems don't add up to the track
+        let (_, out) = muted(&StemKind::ALL);
+        assert!(out.iter().all(|v| v.abs() < 1e-4), "max {}", out.iter().fold(0f32, |m, v| m.max(v.abs())));
     }
 
     #[test]

@@ -30,8 +30,10 @@ Dependency direction: `core` ← `audio` ← (`stems`, `analysis`, `engine`) ←
 * Internal audio: **44 100 Hz, stereo, f32**. Positions in **seconds** of the original track
   unless stated otherwise. Beat grids are constant-tempo (`BeatGrid { bpm, downbeat }`).
 * Stem order everywhere: **drums, bass, other ("Melody"), vocals** (`StemKind`), matching Demucs.
-* Stem playback uses the *residual trick*: `out = original + Σ (gain_s − 1) · stem_s`.
-  With all gains at 1 the output is bit-exact the original; muting vocals subtracts the vocal stem.
+* Stem playback uses the *residual trick*: `out = r·original + Σ (gain_s − r) · stem_s` with `r`
+  the mean of the four gains, i.e. the stems plus `r` times the part no stem holds
+  (`original − Σ stems`, 21–34 dB below the track with HTDemucs). With all gains at 1 the output is
+  bit-exact the original; with all at 0 it's silence.
 * Cached data lives in `~/Music/ClubCraft/` (`library.db`, `Stems/<hash>.stems.*`,
   `Waveforms/<hash>.ccwf`, `Exports/`, `Recordings/`). Track identity across renames is the
   content hash in `Track::hash`.
