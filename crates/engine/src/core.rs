@@ -411,6 +411,7 @@ impl EngineCore {
                 if self.conductor.sched.is_some() {
                     self.conductor.time = t.max(0.0);
                     self.conductor.finished = false;
+                    self.conductor.held = 0.0;
                 }
             }
             MixPause => self.conductor.pause(&mut self.decks),

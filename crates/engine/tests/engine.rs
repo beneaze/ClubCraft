@@ -944,6 +944,44 @@ fn quick_successive_edits_all_reach_the_engine() {
 }
 
 #[test]
+fn mix_clock_waits_for_the_first_audio() {
+    let mut core = EngineCore::new(SR, 2);
+    let mut player = MixPlayer::lazy(&six_track_mix(), &meta, [0, 1]);
+    player.play(&mut core, 0.0).unwrap();
+    // no track delivered yet: the playhead must not run ahead in silence
+    run_blocks(&mut core, 40);
+    let st = core.snapshot();
+    assert!(st.mix.playing && st.mix.waiting);
+    assert_eq!(st.mix.time, 0.0, "the clock waits for the audio");
+    // once the tracks arrive it runs
+    let loader: TrackLoader = Arc::new(|id| Some(synth_track(id)));
+    let (mut m, mut c) = (vec![0f32; 512 * 2], vec![0f32; 512 * 2]);
+    for _ in 0..2000 {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        core.process(&mut m, &mut c);
+        let st = core.snapshot();
+        player.poll(&mut core, &st, &loader).unwrap();
+        if st.mix.time > 0.2 {
+            break;
+        }
+    }
+    let st = core.snapshot();
+    assert!(st.mix.time > 0.2 && !st.mix.waiting, "plays once the audio is there (t = {})", st.mix.time);
+    assert!(st.decks[0].playing);
+}
+
+#[test]
+fn mix_clock_gives_up_waiting_for_audio_that_never_comes() {
+    let mut core = EngineCore::new(SR, 2);
+    let mut player = MixPlayer::lazy(&six_track_mix(), &meta, [0, 1]);
+    player.play(&mut core, 0.0).unwrap();
+    // 6 s of blocks without any track: after the 5 s limit the mix plays on in silence
+    run_blocks(&mut core, (6 * SR as usize) / 512);
+    let st = core.snapshot();
+    assert!(st.mix.time > 0.5, "the clock moves on (t = {})", st.mix.time);
+}
+
+#[test]
 fn track_stem_lanes_play_without_stems() {
     // track 1 has no stems; its own lane mutes everything but the vocals from 5 to 10 s
     let a = click_track(120.0, 30.0, 0.0);

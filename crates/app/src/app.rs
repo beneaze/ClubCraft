@@ -283,6 +283,12 @@ impl App {
                 self.studio.playing = false;
             }
         }
+        // the track a preview would start on, loaded ahead so Space plays at once
+        if self.view == View::Studio && self.eng.studio_player.is_none() {
+            if let Some(t) = self.studio.track_at_playhead().and_then(|i| self.studio.mix.tracks.get(i)) {
+                self.eng.cache.warm(t.track_id);
+            }
+        }
         let key = (self.studio.mix.id, self.studio.mix.tracks.len());
         if key != self.prepared {
             self.prepared = key;

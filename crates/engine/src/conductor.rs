@@ -256,8 +256,16 @@ pub(crate) struct Conductor {
     /// Crossfader assignment of the schedule's decks before it started (the mix plays them
     /// through, with its own volume automation); given back when it stops.
     saved_assign: [Option<(DeckId, CrossfaderAssign)>; 2],
+    /// How long the clock has been held because nothing audible had its audio yet (s).
+    pub held: f64,
+    /// The clock is held this block.
+    holding: bool,
     state: MixPlaybackState,
 }
+
+/// The clock waits at most this long for audio that is still loading, then plays on in silence
+/// (a file that fails to load must not stop the mix).
+const MAX_HOLD_SECS: f64 = 5.0;
 
 fn unload_if_holding(deck: &mut Deck, t: &Arc<LoadedTrack>, drop_track: &mut dyn FnMut(Arc<LoadedTrack>)) {
     if deck.track().is_some_and(|x| Arc::ptr_eq(x, t)) {
@@ -319,6 +327,8 @@ impl Conductor {
             }
         }
         self.time = start.max(0.0);
+        self.held = 0.0;
+        self.holding = false;
         self.playing = true;
         self.finished = false;
         self.serial += 1;
@@ -404,7 +414,8 @@ impl Conductor {
     /// anything was written to `out`.
     pub fn render_samples(&self, n: usize, sr: f64, out: &mut [f32]) -> bool {
         match (&self.sched, self.playing) {
-            (Some(s), true) if !s.samples.is_empty() => {
+            // while the clock is held the same block would repeat
+            (Some(s), true) if !s.samples.is_empty() && !self.holding => {
                 out[..n * 2].fill(0.0);
                 crate::samples::render(&s.samples, self.time, n, sr, &mut out[..n * 2])
             }
@@ -426,6 +437,8 @@ impl Conductor {
         let mut on_air = 0usize;
         let mut cur_transition = None;
         let mut waiting = false;
+        // some track that should sound has its audio
+        let mut audible = false;
         if self.playing && t0 >= s.timeline.total_secs {
             self.playing = false;
             self.finished = true;
@@ -484,6 +497,7 @@ impl Conductor {
                     self.slot_track[slot] = None;
                     continue;
                 };
+                audible = true;
                 // load if needed
                 if !deck.track().is_some_and(|t| Arc::ptr_eq(t, track)) {
                     if let Some(old) = deck.load(track.clone()) {
@@ -616,7 +630,18 @@ impl Conductor {
                 }
                 break;
             }
-            self.time = t1;
+            // Nothing that should sound has its audio yet (right after play or a seek, while the
+            // tracks load): hold the clock, so the mix doesn't start in silence with the
+            // playhead running ahead. A late track during the mix doesn't stop the others.
+            self.holding = waiting && !audible && self.held < MAX_HOLD_SECS;
+            if self.holding {
+                self.held += dt;
+            } else {
+                if audible {
+                    self.held = 0.0;
+                }
+                self.time = t1;
+            }
         }
         self.state = MixPlaybackState {
             active: true,

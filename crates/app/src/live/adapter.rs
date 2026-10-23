@@ -35,6 +35,8 @@ pub fn track_bytes(t: &LoadedTrack) -> usize {
 #[derive(Clone, Default)]
 pub struct TrackCache {
     inner: Arc<Mutex<HashMap<TrackId, Arc<LoadedTrack>>>>,
+    /// Tracks [`Self::warm`] is loading, or failed to load (not tried again).
+    warming: Arc<Mutex<std::collections::HashSet<TrackId>>>,
 }
 
 impl TrackCache {
@@ -77,6 +79,26 @@ impl TrackCache {
                 std::thread::sleep(std::time::Duration::from_millis(250));
             }
         });
+    }
+
+    /// Load a track in the background unless it's cached, so a studio preview that starts on
+    /// it has its audio at once instead of after the decode (a second or more with stems).
+    pub fn warm(&self, id: TrackId) {
+        if self.inner.lock().contains_key(&id) || !self.warming.lock().insert(id) {
+            return;
+        }
+        let me = self.clone();
+        let spawned = std::thread::Builder::new().name("track-warm".into()).spawn(move || match me.load(id, None) {
+            Ok(_) => {
+                me.warming.lock().remove(&id);
+            }
+            // stays in `warming`, so a broken file isn't decoded again every frame
+            Err(e) => log::warn!("preload track {id}: {e:#}"),
+        });
+        if let Err(e) = spawned {
+            log::warn!("preload track {id}: {e}");
+            self.warming.lock().remove(&id);
+        }
     }
 
     pub fn invalidate(&self, id: TrackId) {
