@@ -624,9 +624,6 @@ fn studio_ui(ui: &mut Ui, p: &mut Prefs) {
         }
     });
     hint(ui, "Auto picks the length from the outro of the outgoing and the intro of the incoming track. Stem transitions fall back to a bass swap for tracks without stems.");
-    row(ui, "Harmonic mixing", |ui| {
-        check(ui, &mut p.allow_key_shift, "Shift keys by ±1 semitone to avoid clashes");
-    });
     row(ui, "Keylock in mixes", |ui| {
         check(ui, &mut p.mix_keylock, "Keep the original key when the tempo changes");
     });

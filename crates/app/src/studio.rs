@@ -655,7 +655,6 @@ impl StudioView {
                 ui.add(egui::Slider::new(&mut self.order_opts.energy_weight, 0.0..=1.0).text("Energy arc"));
                 ui.checkbox(&mut self.order_opts.lock_first, "Keep first track");
                 ui.checkbox(&mut self.order_opts.lock_last, "Keep last track");
-                ui.checkbox(&mut self.order_opts.allow_key_shift, "Allow ±1 semitone key shifts");
             });
             if ui.add_enabled(self.mix.tracks.len() > 1, egui::Button::new("Auto mix points")).on_hover_text("Recompute mix-in/out points and transition lengths from the analysed structure (locked transitions stay)").clicked() {
                 let order: Vec<TrackId> = self.mix.tracks.iter().map(|t| t.track_id).collect();

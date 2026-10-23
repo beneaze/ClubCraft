@@ -175,7 +175,6 @@ pub struct Prefs {
     pub transition_style: TransitionStyle,
     /// Transition length in bars; `None` = choose from the track structure.
     pub transition_bars: Option<u32>,
-    pub allow_key_shift: bool,
     pub mix_keylock: bool,
     // ------------------------------------------------------------ export & recording
     pub export_format: AudioFormat,
@@ -220,7 +219,6 @@ impl Default for Prefs {
             bpm_max: 180.0,
             transition_style: TransitionStyle::StemBlend,
             transition_bars: None,
-            allow_key_shift: true,
             mix_keylock: true,
             export_format: AudioFormat::Wav24,
             export_cue_sheet: true,

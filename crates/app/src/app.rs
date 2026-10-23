@@ -455,8 +455,7 @@ impl App {
         self.studio.plan_opts = clubcraft_core::planner::PlanOptions {
             transition_beats: p.transition_bars.map(|b| b * 4),
             style: Some(p.transition_style),
-            allow_key_shift: p.allow_key_shift,
-            has_stems: true,
+            ..Default::default()
         };
         self.eng.prefs = p.clone();
         *self.eng.sep.quality.lock() = p.stem_quality.clone();

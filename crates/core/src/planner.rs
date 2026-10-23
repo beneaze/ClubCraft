@@ -13,7 +13,8 @@ pub struct OrderOptions {
     pub key_weight: f32,
     /// Weight of a smooth, rising energy arc.
     pub energy_weight: f32,
-    /// Allow ±1 semitone key shifts to fix clashes (small penalty).
+    /// Allow ±1 semitone key shifts to fix clashes (small penalty). Off by default: tracks keep
+    /// their own key unless the user shifts them.
     pub allow_key_shift: bool,
     pub lock_first: bool,
     pub lock_last: bool,
@@ -26,7 +27,7 @@ impl Default for OrderOptions {
         OrderOptions {
             key_weight: 0.5,
             energy_weight: 0.3,
-            allow_key_shift: true,
+            allow_key_shift: false,
             lock_first: false,
             lock_last: false,
             iterations: 200_000,
@@ -236,13 +237,14 @@ pub struct PlanOptions {
     /// Preferred transition length in beats (default 32 = 8 bars, shortened to fit).
     pub transition_beats: Option<u32>,
     pub style: Option<TransitionStyle>,
+    /// Shift tracks by ±1 semitone to fix key clashes. Off by default (see [`OrderOptions`]).
     pub allow_key_shift: bool,
     pub has_stems: bool,
 }
 
 impl Default for PlanOptions {
     fn default() -> Self {
-        PlanOptions { transition_beats: None, style: None, allow_key_shift: true, has_stems: true }
+        PlanOptions { transition_beats: None, style: None, allow_key_shift: false, has_stems: true }
     }
 }
 
@@ -351,6 +353,19 @@ mod tests {
             .sum();
         // 8A-9A-10A and 1B-2B-3B chains joined by one bad edge
         assert!(cost <= 2.0 * (1.0 - 0.0) + 4.0 * 2.0 * 0.1 + 0.01, "order {order:?} cost {cost}");
+    }
+
+    #[test]
+    fn plans_without_key_shifts_by_default() {
+        // 8A then 3A clash; the planner may only shift keys when asked to
+        let an = |id: TrackId| {
+            let key = Key::from_camelot(if id == 1 { "8A" } else { "3A" });
+            Some(Analysis { version: 1, duration: 240.0, key, grid: Some(crate::BeatGrid::new(124.0, 0.0)), ..Default::default() })
+        };
+        let mix = plan_mix("m", &[1, 2], &an, &PlanOptions::default());
+        assert!(mix.tracks.iter().all(|t| t.key_shift == 0), "{:?}", mix.tracks.iter().map(|t| t.key_shift).collect::<Vec<_>>());
+        let shifted = plan_mix("m", &[1, 2], &an, &PlanOptions { allow_key_shift: true, ..Default::default() });
+        assert_ne!(shifted.tracks[1].key_shift, 0, "with the option on, the clash is shifted away");
     }
 
     #[test]
