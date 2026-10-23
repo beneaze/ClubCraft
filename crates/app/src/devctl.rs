@@ -2,7 +2,8 @@
 //! polls that file; each line is a command: `shot <png path>`, `view <library|studio|live>`,
 //! `drop <path>` (as if dropped from Finder at the pointer), `key <name>` (a key press, egui's key
 //! names, e.g. `Backspace`), `drag <x0> <y0> <x1> <y1> [steps] [shift]` (a mouse drag in points,
-//! one move per frame), `quit`. The file is deleted after it has been read.
+//! one move per frame), `wheel <x> <y> <dy>` (scroll at a point, in points), `quit`. The file is
+//! deleted after it has been read.
 
 use crate::app::View;
 use eframe::egui;
@@ -122,6 +123,13 @@ impl DevCtl {
                     ctx.input_mut(|i| i.raw.dropped_files.push(file));
                 }
                 "drag" => self.queue_drag(arg),
+                "wheel" => {
+                    let v: Vec<f32> = arg.split_whitespace().filter_map(|s| s.parse().ok()).collect();
+                    if let [x, y, dy] = v[..] {
+                        let wheel = egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, dy), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE };
+                        self.frames.push_back(vec![egui::Event::PointerMoved(egui::pos2(x, y)), wheel]);
+                    }
+                }
                 "key" => match egui::Key::from_name(arg.trim()) {
                     Some(key) => ctx.input_mut(|i| {
                         for pressed in [true, false] {

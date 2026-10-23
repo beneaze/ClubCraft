@@ -19,7 +19,7 @@
 
 use crate::dsp;
 use crate::StemsRef;
-use clubcraft_core::{BeatGrid, StemKind};
+use clubcraft_core::{BeatGrid, Section, SectionKind, StemKind};
 
 /// Bumped when the features change.
 pub const FEATURE_VERSION: u32 = 1;
@@ -57,6 +57,9 @@ pub struct MashupFeatures {
     /// Bars where an analysed section starts (phrase boundaries).
     pub section_bars: Vec<i32>,
     pub bars: Vec<BarFeatures>,
+    /// The track's analysed sections (not stored in the feature file: they come from the
+    /// analysis, see [`MashupFeatures::set_sections`]).
+    pub sections: Vec<Section>,
 }
 
 const MAGIC: &[u8; 4] = b"CCMF";
@@ -78,6 +81,14 @@ impl MashupFeatures {
     /// Time (s) where `bar` starts.
     pub fn bar_time(&self, bar: i32) -> f64 {
         self.grid().time_of_bar(bar as f64)
+    }
+
+    /// Take the sections (and the phrase boundaries) from the track's analysis, which may be
+    /// newer than the feature file.
+    pub fn set_sections(&mut self, sections: &[Section]) {
+        self.sections = sections.to_vec();
+        self.section_bars = sections.iter().map(|s| s.start_bar).collect();
+        self.section_bars.dedup();
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -136,7 +147,7 @@ impl MashupFeatures {
             (f.vocal_db, f.bass_db, f.other_db, f.drums_db, f.other_vband_db) = (v[36], v[37], v[38], v[39], v[40]);
             bars.push(f);
         }
-        Some(MashupFeatures { version, bpm, downbeat, beats_per_bar, first_bar, gain_db, section_bars, bars })
+        Some(MashupFeatures { version, bpm, downbeat, beats_per_bar, first_bar, gain_db, section_bars, bars, sections: Vec::new() })
     }
 }
 
@@ -269,7 +280,7 @@ pub fn compute(stems: &StemsRef, grid: BeatGrid, duration: f64, gain_db: f32, se
         .collect();
     let mut section_bars: Vec<i32> = section_starts.iter().map(|&t| grid.bar_at(t).round() as i32).collect();
     section_bars.dedup();
-    MashupFeatures { version: FEATURE_VERSION, bpm: grid.bpm, downbeat: grid.downbeat, beats_per_bar: grid.beats_per_bar, first_bar, gain_db, section_bars, bars }
+    MashupFeatures { version: FEATURE_VERSION, bpm: grid.bpm, downbeat: grid.downbeat, beats_per_bar: grid.beats_per_bar, first_bar, gain_db, section_bars, bars, sections: Vec::new() }
 }
 
 // ------------------------------------------------------------------ matching
@@ -389,6 +400,8 @@ pub struct Match {
     pub harmony_min: f32,
     pub masking: f32,
     pub residual_vocals: f32,
+    /// How well the spot in the instrumental carries a vocal (0..1).
+    pub placement: f32,
     /// Harmony per bar (for display; NaN where the vocals are silent).
     pub per_bar: Vec<f32>,
     /// Optional learned score (COCOLA re-ranking), 0..1.
@@ -517,6 +530,7 @@ fn score_with(v: &MashupFeatures, vbar: i32, i: &MashupFeatures, ibar: i32, key_
         harmony_min: hmin,
         masking,
         residual_vocals: residual,
+        placement: 0.0,
         per_bar,
         learned: None,
     })

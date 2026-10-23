@@ -276,6 +276,16 @@ fn playing_bars(ui: &mut Ui) -> egui::Response {
     resp
 }
 
+/// A playlist cell with the spacing around it, so row tints and link lines join up between cells
+/// and rows, except on the side where the list's edge cuts the cell (a row scrolled under the
+/// header): nothing is painted past the visible list.
+fn cell_area(ui: &Ui) -> egui::Rect {
+    let (cell, clip, gap) = (ui.max_rect(), ui.clip_rect(), ui.spacing().item_spacing * 0.5);
+    let top = if clip.top() > cell.top() + 0.5 { clip.top() } else { cell.top() - gap.y };
+    let bottom = if clip.bottom() < cell.bottom() - 0.5 { clip.bottom() } else { cell.bottom() + gap.y };
+    egui::Rect::from_x_y_ranges((cell.left() - gap.x)..=(cell.right() + gap.x), top..=bottom.max(top))
+}
+
 /// Runs of tracks joined by locked transitions (only runs of two or more).
 fn link_groups(mix: &Mix) -> Vec<std::ops::RangeInclusive<usize>> {
     let mut out = Vec::new();
@@ -766,10 +776,8 @@ impl StudioView {
                             let tint_color = if playing_row == Some(i) { Some(theme::accent().linear_multiply(0.18)) } else { linked.map(|c| c.linear_multiply(0.2)) };
                             let tint = |ui: &Ui| {
                                 if let Some(c) = tint_color {
-                                    let gap = ui.spacing().item_spacing * 0.5;
-                                    let r = ui.max_rect().expand2(gap);
-                                    // into the spacing between cells, but not over the header row
-                                    egui::Painter::new(ui.ctx().clone(), ui.layer_id(), r.intersect(ui.clip_rect().expand2(gap))).rect_filled(r, 0.0, c);
+                                    let r = cell_area(ui);
+                                    egui::Painter::new(ui.ctx().clone(), ui.layer_id(), r).rect_filled(r, 0.0, c);
                                 }
                             };
                             row.col(|ui| {
@@ -787,11 +795,9 @@ impl StudioView {
                                 let up = i > 0 && self.mix.transitions.get(i - 1).is_some_and(|t| t.locked);
                                 let down = self.mix.transitions.get(i).is_some_and(|t| t.locked);
                                 let Some(color) = linked else { return };
-                                let gap = vec2(0.0, ui.spacing().item_spacing.y * 0.5 + 1.0);
-                                let r = ui.max_rect().expand2(gap);
-                                // the cell clips at its own edges: reach into the spacing between rows
-                                let p = egui::Painter::new(ui.ctx().clone(), ui.layer_id(), ui.clip_rect().expand2(gap));
-                                let (x, cy) = (r.center().x, r.center().y);
+                                let r = cell_area(ui);
+                                let p = egui::Painter::new(ui.ctx().clone(), ui.layer_id(), r);
+                                let (x, cy) = (r.center().x, ui.max_rect().center().y);
                                 let stroke = Stroke::new(2.0, color);
                                 if up {
                                     p.line_segment([pos2(x, r.top()), pos2(x, cy)], stroke);
