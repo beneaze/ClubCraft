@@ -19,6 +19,8 @@ pub const TEXT_DIM: Color32 = Color32::from_rgb(130, 136, 148);
 pub const SELECT: Color32 = Color32::from_rgb(66, 71, 83);
 pub const OK: Color32 = Color32::from_rgb(90, 220, 130);
 pub const WARN: Color32 = Color32::from_rgb(255, 190, 60);
+/// Tracks linked by a locked transition (playlist).
+pub const LINKED: Color32 = Color32::from_rgb(130, 170, 255);
 /// Stem rows of a selected transition: the waveform over the stem's colour where it plays, the
 /// waveform and the hatching where the transition turns it down.
 pub const STEM_WAVE_ON: Color32 = Color32::from_black_alpha(175);

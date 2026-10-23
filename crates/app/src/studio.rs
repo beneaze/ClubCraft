@@ -6,7 +6,7 @@ use crate::theme;
 
 use clubcraft_core::planner::{self, OrderItem, OrderOptions, PlanOptions};
 use clubcraft_core::{Analysis, Mix, MixTimeline, MixTrack, Param, Side, TempoMode, TrackId, Transition, TransitionStyle};
-use eframe::egui::{self, vec2, Align, Color32, Layout, RichText, Sense, Stroke, StrokeKind, Ui};
+use eframe::egui::{self, pos2, vec2, Align, Color32, Layout, RichText, Sense, Stroke, StrokeKind, Ui};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StudioAction {
@@ -665,6 +665,7 @@ impl StudioView {
                     .sense(Sense::click())
                     .cell_layout(Layout::left_to_right(Align::Center))
                     .column(egui_extras::Column::exact(22.0))
+                    .column(egui_extras::Column::exact(14.0))
                     .column(egui_extras::Column::exact(30.0))
                     .column(egui_extras::Column::remainder().at_least(180.0).clip(true))
                     .column(egui_extras::Column::initial(150.0).clip(true))
@@ -677,7 +678,7 @@ impl StudioView {
                     .column(egui_extras::Column::exact(70.0))
                     .column(egui_extras::Column::exact(28.0))
                     .header(20.0, |mut h| {
-                        for t in ["", "#", "TITLE", "ARTIST", "GENRE", "TRANSITION IN", "TIME", "KEY", "MATCH", "NRG", "BPM", ""] {
+                        for t in ["", "", "#", "TITLE", "ARTIST", "GENRE", "TRANSITION IN", "TIME", "KEY", "MATCH", "NRG", "BPM", ""] {
                             h.col(|ui| {
                                 ui.label(RichText::new(t).size(10.5).color(theme::TEXT_DIM));
                             });
@@ -696,6 +697,33 @@ impl StudioView {
                                     ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
                                 }
                                 h.dnd_set_drag_payload(RowDrag(i));
+                            });
+                            // a line through tracks linked by locked transitions (they stay together)
+                            row.col(|ui| {
+                                let up = i > 0 && self.mix.transitions.get(i - 1).is_some_and(|t| t.locked);
+                                let down = self.mix.transitions.get(i).is_some_and(|t| t.locked);
+                                if !(up || down) {
+                                    return;
+                                }
+                                let gap = vec2(0.0, ui.spacing().item_spacing.y * 0.5 + 1.0);
+                                let r = ui.max_rect().expand2(gap);
+                                // the cell clips at its own edges: reach into the spacing between rows
+                                let p = egui::Painter::new(ui.ctx().clone(), ui.layer_id(), ui.clip_rect().expand2(gap));
+                                let (x, cy) = (r.center().x, r.center().y);
+                                let stroke = Stroke::new(2.0, theme::LINKED);
+                                if up {
+                                    p.line_segment([pos2(x, r.top()), pos2(x, cy)], stroke);
+                                }
+                                if down {
+                                    p.line_segment([pos2(x, cy), pos2(x, r.bottom())], stroke);
+                                }
+                                p.circle_filled(pos2(x, cy), 3.5, theme::LINKED);
+                                let tip = match (up, down) {
+                                    (true, true) => "Linked to the tracks before and after it by locked transitions",
+                                    (true, false) => "Linked to the track before it by a locked transition",
+                                    _ => "Linked to the track after it by a locked transition",
+                                };
+                                ui.allocate_exact_size(ui.available_size(), Sense::hover()).1.on_hover_text(format!("{tip}: they stay together when you harmonize or re-plan the mix"));
                             });
                             row.col(|ui| {
                                 ui.label(RichText::new(format!("{}", i + 1)).color(theme::TEXT_DIM));
