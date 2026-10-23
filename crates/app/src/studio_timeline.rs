@@ -1533,6 +1533,11 @@ impl StudioView {
         out
     }
 
+    /// Tracks of the mix that play stem automation (stem transitions or their own stem lanes).
+    pub(crate) fn tracks_with_stem_automation(&self) -> Vec<clubcraft_core::TrackId> {
+        (0..self.mix.tracks.len()).filter(|&i| !self.stem_regions_needed(i).is_empty()).map(|i| self.mix.tracks[i].track_id).collect()
+    }
+
     /// Tracks of the mix whose stem automation still lacks stems, in mix order, with the parts
     /// (track seconds) that need them.
     pub(crate) fn missing_stem_regions(&self, sh: &Shared) -> Vec<(clubcraft_core::TrackId, Vec<(f64, f64)>)> {

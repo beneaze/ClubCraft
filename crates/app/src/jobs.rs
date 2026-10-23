@@ -125,6 +125,11 @@ impl Jobs {
         self.gpu.push(Job::SeparateRegions(id, regions), true);
     }
 
+    /// Separate the whole track after the jobs already queued.
+    pub fn separate_later(&self, id: TrackId) {
+        self.gpu.push(Job::Separate(id, None), false);
+    }
+
     pub fn separate_now(&self, id: TrackId) {
         self.gpu.push(Job::Separate(id, None), true);
     }

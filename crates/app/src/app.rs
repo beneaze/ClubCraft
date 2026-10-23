@@ -143,6 +143,8 @@ pub struct App {
     /// Parts of tracks queued for separation because stem automation plays in them (see
     /// [`region_key`]).
     stems_queued: std::collections::HashSet<(TrackId, Vec<(i64, i64)>)>,
+    /// Tracks with stem automation queued for complete stems.
+    full_stems_queued: std::collections::HashSet<TrackId>,
     /// Export waiting for stem separation.
     pending_export: Option<PendingExport>,
     /// Last seen change from `clubcraft mcp` (marker mtime) and when it was checked.
@@ -179,7 +181,7 @@ impl App {
         }
         let audio_cfg: clubcraft_engine::AudioConfig = cc.storage.and_then(|s| eframe::get_value(s, "audio")).unwrap_or_default();
         let midi_port: Option<String> = cc.storage.and_then(|s| eframe::get_value(s, "midi_port"));
-        let mut app = App { lib, sh, jobs, view, library: LibraryView::default(), status: String::new(), devctl: crate::devctl::DevCtl::from_env(), live: Default::default(), decks: vec![Default::default(); 2], mixer: Default::default(), browser: LibraryView::default(), studio: Default::default(), mixes: Vec::new(), eng: crate::live::adapter::LiveEngine::start(audio_cfg.clone()), settings: crate::settings::Settings::new(audio_cfg, midi_port), home: Default::default(), prefs, applied_prefs: None, menu: crate::menu::AppMenu::install(&cc.egui_ctx), ui_ctx_cmd: None, mix_summaries: Vec::new(), prepared: (-1, 0), preview_serial: 0, stems_queued: Default::default(), pending_export: None, queued: Default::default(), external: (std::fs::metadata(crate::mcp::change_marker()).and_then(|m| m.modified()).ok(), 0.0) };
+        let mut app = App { lib, sh, jobs, view, library: LibraryView::default(), status: String::new(), devctl: crate::devctl::DevCtl::from_env(), live: Default::default(), decks: vec![Default::default(); 2], mixer: Default::default(), browser: LibraryView::default(), studio: Default::default(), mixes: Vec::new(), eng: crate::live::adapter::LiveEngine::start(audio_cfg.clone()), settings: crate::settings::Settings::new(audio_cfg, midi_port), home: Default::default(), prefs, applied_prefs: None, menu: crate::menu::AppMenu::install(&cc.egui_ctx), ui_ctx_cmd: None, mix_summaries: Vec::new(), prepared: (-1, 0), preview_serial: 0, stems_queued: Default::default(), full_stems_queued: Default::default(), pending_export: None, queued: Default::default(), external: (std::fs::metadata(crate::mcp::change_marker()).and_then(|m| m.modified()).ok(), 0.0) };
         app.settings.connect_midi(app.eng.handle.as_ref());
         if let Some(e) = &app.eng.error {
             app.status = e.clone();
@@ -299,6 +301,13 @@ impl App {
                 }
                 self.stems_queued.extend(fresh.iter().map(|(id, r)| region_key(*id, r)));
                 self.status = format!("Separating stems for the stem transitions of {} track(s)", fresh.len());
+            }
+            // Then the whole tracks, also without "Separate in the background": stem automation
+            // needs stems, and the stem rows, the library and the decks need complete ones.
+            for id in self.studio.tracks_with_stem_automation() {
+                if !self.sh.analyses.get(&id).is_some_and(|a| a.stems_model.is_some()) && self.full_stems_queued.insert(id) {
+                    self.jobs.separate_later(id);
+                }
             }
         }
         let st = self.eng.state();
