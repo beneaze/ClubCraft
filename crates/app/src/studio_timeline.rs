@@ -1001,11 +1001,16 @@ impl StudioView {
         }
         if r.height() >= 128.0 {
             let mut show = self.lane_show[l];
-            egui::ComboBox::from_id_salt(("show", l)).width(150.0).selected_text(show.label()).show_ui(ui, |ui| {
-                for m in ShowMode::ALL {
-                    ui.selectable_value(&mut show, m, m.label());
-                }
-            });
+            egui::ComboBox::from_id_salt(("show", l))
+                .width(150.0)
+                .selected_text(show.label())
+                .show_ui(ui, |ui| {
+                    for m in ShowMode::ALL {
+                        ui.selectable_value(&mut show, m, m.label());
+                    }
+                })
+                .response
+                .on_hover_text("Which automation the clips show inside their transitions (zoom in to see it). It doesn't change the sound.");
             self.lane_show[l] = show;
         }
         if ls != before {
@@ -1142,8 +1147,10 @@ impl StudioView {
                 if r0 > b {
                     paint_own(b, r0);
                 }
-                // the selected transition shows one row per stem (like DJ.Studio)
-                if self.selection == Selection::Transition(*k) && self.curve_target == CurveTarget::Stems && wf.stems.is_some() && audible {
+                // one row per stem (like DJ.Studio): in the selected transition while its stems are
+                // edited, in the others when the lane shows stems
+                let rows = if self.selection == Selection::Transition(*k) { self.curve_target == CurveTarget::Stems } else { matches!(self.lane_show[l], ShowMode::All | ShowMode::Stems) };
+                if rows && wf.stems.is_some() && audible {
                     let (x0, x1) = (x_of(self.timeline.sec_at_beat(r0)), x_of(self.timeline.sec_at_beat(r1)));
                     self.paint_stem_rows(p, Rect::from_x_y_ranges(x0..=x1, wrect.y_range()), wf, i, tr, *side, start, x_of);
                     b = b.max(r1);
@@ -1220,16 +1227,18 @@ impl StudioView {
         }
         // inline transition automation
         let show = self.lane_show[l];
+        // tracks with stems show them as rows in the waveform; the others get strips
+        let strips = !(audible && sh.waveforms.get(&tt.track_id).is_some_and(|w| w.stems.is_some()));
         // the selected transition's curves are drawn (and edited) by `edit_transition_curves`
         let show_for = |k: usize| -> Option<ShowMode> { (self.selection != Selection::Transition(k)).then_some(show) };
         if show != ShowMode::None {
             if i > 0 {
                 if let (Some(x), Some(tr), Some(sm)) = (self.timeline.transitions.get(i - 1), self.effective_transition(sh, i - 1), show_for(i - 1)) {
-                    self.draw_automation(p, body, &tr, Side::In, x.start_beat, x.beats, sm, x_of);
+                    self.draw_automation(p, body, &tr, Side::In, x.start_beat, x.beats, sm, strips, x_of);
                 }
             }
             if let (Some(x), Some(tr), Some(sm)) = (self.timeline.transitions.get(i), self.effective_transition(sh, i), show_for(i)) {
-                self.draw_automation(p, body, &tr, Side::Out, x.start_beat, x.beats, sm, x_of);
+                self.draw_automation(p, body, &tr, Side::Out, x.start_beat, x.beats, sm, strips, x_of);
             }
         }
         if !audible {
@@ -1610,11 +1619,14 @@ impl StudioView {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn draw_automation(&self, p: &egui::Painter, body: Rect, tr: &Transition, side: Side, start_beat: f64, beats: f64, show: ShowMode, x_of: &dyn Fn(f64) -> f32) {
+    fn draw_automation(&self, p: &egui::Painter, body: Rect, tr: &Transition, side: Side, start_beat: f64, beats: f64, show: ShowMode, strips: bool, x_of: &dyn Fn(f64) -> f32) {
         let steps = 48;
         let xs = |f: f32| x_of(self.timeline.sec_at_beat(start_beat + f as f64 * beats));
         let has = |param: Param| tr.lanes.iter().any(|l| l.side == side && l.param == param && l.points.iter().any(|p| (p.1 - param.neutral()).abs() > 1e-3));
+        // A curve the transition leaves at its neutral value is drawn faintly: the chosen view
+        // then still shows that (and where) the transition doesn't touch it.
         let curve = |param: Param, col: Color32, centered: bool| {
+            let stroke = if has(param) { Stroke::new(2.0, col) } else { Stroke::new(1.5, col.linear_multiply(0.6)) };
             let mut pts = Vec::with_capacity(steps + 1);
             for s in 0..=steps {
                 let f = s as f32 / steps as f32;
@@ -1622,25 +1634,21 @@ impl StudioView {
                 let y = if centered { body.center().y - (v - 0.5) * (body.height() - 8.0) } else { body.bottom() - 3.0 - v * (body.height() - 8.0) };
                 pts.push(pos2(xs(f), y));
             }
-            p.add(egui::Shape::line(pts, Stroke::new(2.0, col)));
+            p.add(egui::Shape::line(pts, stroke));
         };
-        if matches!(show, ShowMode::All | ShowMode::Volume) && has(Param::Volume) {
+        if matches!(show, ShowMode::All | ShowMode::Volume) {
             curve(Param::Volume, Color32::from_white_alpha(235), false);
         }
         if matches!(show, ShowMode::Eq) {
             for (b, param) in [Param::EqLow, Param::EqMid, Param::EqHigh].into_iter().enumerate() {
-                if has(param) {
-                    curve(param, EQ_COLORS[b], true);
-                }
+                curve(param, EQ_COLORS[b], true);
             }
-            if has(Param::Filter) {
-                curve(Param::Filter, FILTER_COLOR, true);
-            }
+            curve(Param::Filter, FILTER_COLOR, true);
         }
-        if matches!(show, ShowMode::All | ShowMode::Stems) {
+        if strips && matches!(show, ShowMode::All | ShowMode::Stems) {
             let stems: Vec<StemKind> = [StemKind::Vocals, StemKind::Other, StemKind::Bass, StemKind::Drums].into_iter().filter(|k| tr.lanes.iter().any(|l| l.side == side && l.param == Param::Stem(*k))).collect();
             if !stems.is_empty() {
-                let sh = 7.0;
+                let sh = (body.height() * 0.1).clamp(7.0, 14.0);
                 let top = body.bottom() - sh * stems.len() as f32 - 2.0;
                 for (j, k) in stems.iter().enumerate() {
                     let y = top + j as f32 * sh;

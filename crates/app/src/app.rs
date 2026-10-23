@@ -1107,6 +1107,17 @@ impl App {
                     self.studio.zoom = z;
                 }
             }
+            "lane-show" => {
+                // `lane-show <lane> <mode>`, mode as the dropdown's label, e.g. `lane-show 0 EQ & filter`
+                use crate::studio_timeline::ShowMode;
+                if let Some((l, m)) = arg.trim().split_once(' ') {
+                    if let (Ok(l), Some(m)) = (l.parse::<usize>(), ShowMode::ALL.into_iter().find(|s| s.label().eq_ignore_ascii_case(m.trim()))) {
+                        if let Some(s) = self.studio.lane_show.get_mut(l) {
+                            *s = m;
+                        }
+                    }
+                }
+            }
             "scroll" => {
                 if let Ok(x) = arg.trim().parse::<f32>() {
                     self.studio.scroll = x;
