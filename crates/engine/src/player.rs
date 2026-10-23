@@ -126,7 +126,10 @@ pub struct MixPlayer {
     track_ids: Vec<TrackId>,
     analyses: Vec<(TrackId, Analysis)>,
     eager: Option<Vec<Arc<LoadedTrack>>>,
+    /// The schedule sent last (0 = none, or stopped).
     schedule_id: u64,
+    /// Paused with [`Self::pause`]; an edit keeps the preview paused.
+    paused: bool,
     target: Option<(f64, Instant)>,
     prefetch: Option<Prefetcher>,
     in_flight: Vec<TrackId>,
@@ -162,6 +165,7 @@ impl MixPlayer {
             analyses,
             eager,
             schedule_id: 0,
+            paused: false,
             target: None,
             prefetch: None,
             in_flight: Vec::new(),
@@ -200,6 +204,7 @@ impl MixPlayer {
     fn send_schedule(&mut self, sink: &mut dyn CommandSink, from: f64) -> Result<()> {
         let s = self.schedule();
         self.schedule_id = s.id;
+        self.paused = false;
         self.sent.clear();
         self.target = Some((from, Instant::now()));
         sink.submit(Command::PlayMix { schedule: Box::new(s), start: from })
@@ -217,16 +222,19 @@ impl MixPlayer {
         sink.submit(Command::MixSeek(t))
     }
 
-    pub fn pause(&self, sink: &mut dyn CommandSink) -> Result<()> {
+    pub fn pause(&mut self, sink: &mut dyn CommandSink) -> Result<()> {
+        self.paused = true;
         sink.submit(Command::MixPause)
     }
 
-    pub fn resume(&self, sink: &mut dyn CommandSink) -> Result<()> {
+    pub fn resume(&mut self, sink: &mut dyn CommandSink) -> Result<()> {
+        self.paused = false;
         sink.submit(Command::MixResume)
     }
 
     /// Stop; the audio thread hands every resident track back for dropping.
     pub fn stop(&mut self, sink: &mut dyn CommandSink) -> Result<()> {
+        self.schedule_id = 0;
         self.target = None;
         self.sent.clear();
         sink.submit(Command::MixStop)
@@ -251,12 +259,20 @@ impl MixPlayer {
         let s = self.schedule();
         self.timeline = s.timeline.clone();
         self.track_ids = s.track_ids.clone();
-        if state.mix.active && state.mix.playing && state.mix.schedule_id == self.schedule_id {
+        // Replace the running schedule, also while paused (resuming would play the old one) and
+        // whatever `state` says: the snapshot lags the audio thread, so right after an edit it
+        // still shows the schedule before it, and the next edit would be dropped.
+        if self.schedule_id != 0 && !state.mix.finished {
+            // a seek or edit not yet reflected in `state` is where the mix really is
+            let at = self.target.map_or(state.mix.time, |(t, _)| t);
             // resident tracks are carried over to the new schedule by the audio thread
             self.schedule_id = s.id;
             self.sent.clear();
-            self.target = Some((state.mix.time, Instant::now()));
-            sink.submit(Command::PlayMix { schedule: Box::new(s), start: state.mix.time })?;
+            self.target = Some((at, Instant::now()));
+            sink.submit(Command::PlayMix { schedule: Box::new(s), start: at })?;
+            if self.paused {
+                sink.submit(Command::MixPause)?;
+            }
         }
         Ok(())
     }

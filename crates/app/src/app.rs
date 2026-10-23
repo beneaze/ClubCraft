@@ -1027,7 +1027,7 @@ impl App {
             }
             "engine-state" => {
                 let st = self.eng.state();
-                log::info!("engine: mix active {} playing {} time {:.2} | decks {:?}", st.mix.active, st.mix.playing, st.mix.time, st.decks.iter().map(|d| (d.loaded, d.playing, (d.position * 10.0).round() / 10.0, d.track_id)).collect::<Vec<_>>());
+                log::info!("engine: mix active {} playing {} time {:.2} duration {:.2} (studio {:.2}) schedule {} | decks {:?}", st.mix.active, st.mix.playing, st.mix.time, st.mix.duration, self.studio.timeline.total_secs, st.mix.schedule_id, st.decks.iter().map(|d| (d.loaded, d.playing, (d.position * 10.0).round() / 10.0, d.track_id)).collect::<Vec<_>>());
                 log::info!("audio: buffer {} frames, load {:.2} (peak {:.2}, last 2 s {:.2}), overruns {}, late callbacks {}, stream errors {}, page faults in {} callbacks ({} overran)", st.audio.buffer_frames, st.cpu_load, st.audio.peak_load, st.audio.recent_peak, st.audio.overruns, st.audio.late, st.stream_errors, st.audio.faulted, st.audio.faulted_overruns);
                 log::info!("audio peaks µs: commands {} conductor {} decks {:?} mixer {} publish {}", st.audio.section_peak_us[0], st.audio.section_peak_us[1], &st.audio.section_peak_us[2..6], st.audio.section_peak_us[6], st.audio.section_peak_us[7]);
                 log::info!("track memory locked in RAM: {} MB", clubcraft_engine::pin::PINNED_BYTES.load(std::sync::atomic::Ordering::Relaxed) / (1 << 20));

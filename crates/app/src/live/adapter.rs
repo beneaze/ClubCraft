@@ -413,7 +413,7 @@ impl LiveEngine {
     }
 
     pub fn studio_pause(&mut self, pause: bool) {
-        if let (Some(p), Some(h)) = (self.studio_player.as_ref(), self.handle.as_mut()) {
+        if let (Some(p), Some(h)) = (self.studio_player.as_mut(), self.handle.as_mut()) {
             let _ = if pause { p.pause(h) } else { p.resume(h) };
         }
     }

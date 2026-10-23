@@ -876,6 +876,73 @@ fn structural_edit_during_lazy_preview_reuses_resident_tracks() {
     assert!(st.decks[0].playing && !st.mix.waiting);
 }
 
+/// A lazy preview playing `six_track_mix` with its first tracks resident.
+fn running_lazy_preview(core: &mut EngineCore) -> MixPlayer {
+    let loader: TrackLoader = Arc::new(|id| Some(synth_track(id)));
+    let mut player = MixPlayer::lazy(&six_track_mix(), &meta, [0, 1]);
+    let (mut m, mut c) = (vec![0f32; 512 * 2], vec![0f32; 512 * 2]);
+    player.play(core, 0.0).unwrap();
+    for _ in 0..2000 {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        core.process(&mut m, &mut c);
+        let st = core.snapshot();
+        player.poll(core, &st, &loader).unwrap();
+        if st.mix.resident_count() == 3 {
+            break;
+        }
+    }
+    player
+}
+
+fn run_blocks(core: &mut EngineCore, n: usize) {
+    let (mut m, mut c) = (vec![0f32; 512 * 2], vec![0f32; 512 * 2]);
+    for _ in 0..n {
+        core.process(&mut m, &mut c);
+    }
+}
+
+#[test]
+fn edit_while_paused_plays_after_resume() {
+    let mut core = EngineCore::new(SR, 2);
+    let mut player = running_lazy_preview(&mut core);
+    player.pause(&mut core).unwrap();
+    run_blocks(&mut core, 4);
+    let mut edited = six_track_mix();
+    edited.tracks[2].mix_out = 12.0;
+    let st = core.snapshot();
+    assert!(!st.mix.playing);
+    let before = st.mix.duration;
+    player.update_lazy(&edited, &meta, &mut core, &st).unwrap();
+    assert!((player.timeline().total_secs - before).abs() > 1.0, "the edit changes the mix length ({before} s → {} s)", player.timeline().total_secs);
+    run_blocks(&mut core, 4);
+    assert!(!core.snapshot().mix.playing, "an edit keeps a paused preview paused");
+    player.resume(&mut core).unwrap();
+    run_blocks(&mut core, 4);
+    let st = core.snapshot();
+    assert!(st.mix.playing);
+    assert!((st.mix.duration - player.timeline().total_secs).abs() < 1e-6, "plays the edited mix ({} s), not the old one ({} s)", player.timeline().total_secs, st.mix.duration);
+}
+
+#[test]
+fn quick_successive_edits_all_reach_the_engine() {
+    let mut core = EngineCore::new(SR, 2);
+    let mut player = running_lazy_preview(&mut core);
+    // the UI's snapshot lags the audio thread: both edits see the schedule that ran before them
+    let st = core.snapshot();
+    let mut first = six_track_mix();
+    first.tracks[2].mix_out = 15.0;
+    player.update_lazy(&first, &meta, &mut core, &st).unwrap();
+    let after_first = player.timeline().total_secs;
+    let mut second = six_track_mix();
+    second.tracks[2].mix_out = 10.0;
+    player.update_lazy(&second, &meta, &mut core, &st).unwrap();
+    assert!((player.timeline().total_secs - after_first).abs() > 1.0, "the edits give different mix lengths");
+    run_blocks(&mut core, 4);
+    let st = core.snapshot();
+    assert!(st.mix.playing);
+    assert!((st.mix.duration - player.timeline().total_secs).abs() < 1e-6, "plays the last edit ({} s), not an earlier one ({} s)", player.timeline().total_secs, st.mix.duration);
+}
+
 #[test]
 fn track_stem_lanes_play_without_stems() {
     // track 1 has no stems; its own lane mutes everything but the vocals from 5 to 10 s
