@@ -103,6 +103,8 @@ pub enum Drag {
     Range(usize),
     /// Moving sample clip `j`, grabbed this many beats after its start.
     Sample(usize, f64),
+    /// Box selection from this point (on empty lane space).
+    Box(egui::Pos2),
 }
 
 /// The snap grid (beats) for dragging at `px_per_beat`: the finest of 1/16 to 1 beat that is
@@ -251,6 +253,17 @@ impl StudioView {
         if let Some(p) = resp.dnd_release_payload::<crate::library_view::DraggedTracks>() {
             self.add_tracks(sh, &p.0);
         }
+        // a drag on empty lane space draws a selection box (Shift adds to the selection); on the
+        // ruler and the tempo lane it scrubs
+        if resp.drag_started() {
+            if let Some(q) = ui.input(|i| i.pointer.press_origin()).filter(|q| lanes.iter().chain(slanes.iter()).any(|r| r.contains(*q))) {
+                self.multi_base = if ui.input(|i| i.modifiers.shift) { self.multi.clone() } else { Default::default() };
+                self.drag = Some(Drag::Box(q));
+            }
+        }
+        if resp.drag_stopped() && matches!(self.drag, Some(Drag::Box(_))) {
+            self.drag = None;
+        }
         let total = self.timeline.total_secs.max(1.0) as f32;
         if self.fit_request && self.timeline.total_secs > 0.0 {
             self.zoom = (canvas.width() / total).clamp(MIN_ZOOM, MAX_ZOOM);
@@ -335,6 +348,9 @@ impl StudioView {
             }
             self.draw_ghost(&p, r, i, sh, &x_of);
             self.draw_clip(&p, r, i, sh, &x_of);
+            if self.multi.tracks.contains(&i) {
+                p.rect_stroke(r, 4.0, Stroke::new(2.0, theme::accent()), StrokeKind::Inside);
+            }
             // selected range (yellow, like DJ.Studio)
             if let Some(rs) = self.range.filter(|rs| rs.track == i) {
                 let (x0, x1) = (x_of(self.timeline.sec_at_beat(rs.b0)), x_of(self.timeline.sec_at_beat(rs.b1)));
@@ -361,8 +377,12 @@ impl StudioView {
             };
             let keeps_transition = matches!(self.selection, Selection::Transition(k) if k == i || k + 1 == i);
             if cr.clicked() {
-                if !in_sel_transition {
+                if ui.input(|inp| inp.modifiers.shift) {
+                    // Shift-click adds the track to the multi-selection (or takes it out)
+                    self.toggle_multi(Some(i), None);
+                } else if !in_sel_transition {
                     clicked_track = Some(i);
+                    self.multi = Default::default();
                 }
                 self.range = None;
             }
@@ -668,6 +688,31 @@ impl StudioView {
 
         // ----- sample lanes
         self.sample_lanes_ui(ui, &p, &slanes, canvas, &x_of);
+        if let (Some(Drag::Box(a)), Some(b)) = (self.drag, ui.input(|i| i.pointer.latest_pos())) {
+            let bx = Rect::from_two_pos(a, b);
+            let mut sel = self.multi_base.clone();
+            for i in 0..self.timeline.tracks.len() {
+                let (tt, lane) = (&self.timeline.tracks[i], lanes[i % MIX_LANES]);
+                let r = Rect::from_min_max(pos2(x_of(tt.start_sec), lane.top() + 2.0), pos2(x_of(tt.end_sec), lane.bottom() - 2.0));
+                if r.intersects(bx) {
+                    sel.tracks.insert(i);
+                }
+            }
+            for j in 0..self.mix.samples.len() {
+                let c = self.mix.samples[j].clone();
+                let Some(lane) = slanes.get(c.lane as usize).copied() else { continue };
+                let dur = self.sample_info(&c.path).map_or(2.0, |s| s.0);
+                let t0 = self.timeline.sec_at_beat(c.start_beat);
+                let r = Rect::from_min_max(pos2(x_of(t0), lane.top() + 2.0), pos2(x_of(t0 + dur).max(x_of(t0) + 6.0), lane.bottom() - 2.0));
+                if r.intersects(bx) {
+                    sel.samples.insert(j);
+                }
+            }
+            self.multi = sel;
+            self.selection = Selection::None;
+            p.rect_filled(bx, 2.0, theme::accent().linear_multiply(0.08));
+            p.rect_stroke(bx, 2.0, Stroke::new(1.0, theme::accent().linear_multiply(0.7)), StrokeKind::Inside);
+        }
 
         // ----- playhead
         let xp = x_of(self.position);
@@ -1435,12 +1480,18 @@ impl StudioView {
                 }
                 pc.add(egui::Shape::mesh(mesh));
             }
-            let sel = self.selection == Selection::Sample(j);
+            let sel = self.selection == Selection::Sample(j) || self.multi.samples.contains(&j);
             pc.rect_stroke(r, 4.0, if sel { Stroke::new(2.0, theme::accent()) } else { Stroke::new(1.0, SAMPLE_COLOR) }, StrokeKind::Inside);
             let resp = ui.interact(r.intersect(canvas), Id::new(("sample-clip", j)), Sense::click_and_drag());
-            // a click selects the clip (Backspace / Delete then removes it, not a track)
-            if resp.clicked() || resp.drag_started() || resp.secondary_clicked() {
+            // a click selects the clip (Backspace / Delete then removes it, not a track); Shift-click
+            // adds it to the multi-selection, and dragging a clip of it moves them all
+            let shift = ui.input(|i| i.modifiers.shift);
+            let in_multi = self.multi.samples.contains(&j);
+            if resp.clicked() && shift {
+                self.toggle_multi(None, Some(j));
+            } else if resp.clicked() || resp.secondary_clicked() || (resp.drag_started() && !in_multi) {
                 self.selection = Selection::Sample(j);
+                self.multi = Default::default();
             }
             if resp.hovered() {
                 ui.ctx().set_cursor_icon(if resp.dragged() { CursorIcon::Grabbing } else { CursorIcon::Grab });
@@ -1450,6 +1501,7 @@ impl StudioView {
                 // deltas (each rounded to the grid, slow drags never moved)
                 let grab = ui.input(|i| i.pointer.press_origin()).map_or(0.0, |q| beat_at_x(&self.timeline, q.x) - c.start_beat);
                 self.drag = Some(Drag::Sample(j, grab));
+                self.drag_origins = if in_multi { self.multi.samples.iter().filter_map(|&k| self.mix.samples.get(k).map(|s| (k, s.start_beat))).collect() } else { Vec::new() };
             }
             if resp.drag_stopped() {
                 self.drag = None;
@@ -1467,9 +1519,20 @@ impl StudioView {
                     if (snapped - c.start_beat).abs() > 1e-6 {
                         self.mix.samples[j].start_beat = snapped;
                         edited = true;
+                        // the rest of a multi-selection moves by the same amount
+                        if let Some(&(_, o)) = self.drag_origins.iter().find(|(k, _)| *k == j) {
+                            let delta = snapped - o;
+                            for &(k, ok) in &self.drag_origins {
+                                if k != j {
+                                    if let Some(s) = self.mix.samples.get_mut(k) {
+                                        s.start_beat = (ok + delta).max(0.0);
+                                    }
+                                }
+                            }
+                        }
                     }
-                    // move between lanes
-                    if let Some(nl) = slanes.iter().position(|lr| lr.contains(q)) {
+                    // move between lanes (one clip at a time)
+                    if let Some(nl) = slanes.iter().position(|lr| lr.contains(q)).filter(|_| self.drag_origins.len() < 2) {
                         if nl != c.lane as usize {
                             self.mix.samples[j].lane = nl as u8;
                             edited = true;
@@ -1506,6 +1569,32 @@ impl StudioView {
         }
         if let Some(j) = remove {
             self.remove_sample(j);
+        }
+    }
+
+    /// Shift-click: put a track or sample clip into the multi-selection, or take it out. A single
+    /// selection joins it first.
+    fn toggle_multi(&mut self, track: Option<usize>, sample: Option<usize>) {
+        match self.selection {
+            Selection::Track(i) => {
+                self.multi.tracks.insert(i);
+            }
+            Selection::Sample(j) => {
+                self.multi.samples.insert(j);
+            }
+            _ => {}
+        }
+        self.selection = Selection::None;
+        let flip = |set: &mut std::collections::BTreeSet<usize>, x: usize| {
+            if !set.remove(&x) {
+                set.insert(x);
+            }
+        };
+        if let Some(i) = track {
+            flip(&mut self.multi.tracks, i);
+        }
+        if let Some(j) = sample {
+            flip(&mut self.multi.samples, j);
         }
     }
 

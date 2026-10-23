@@ -63,6 +63,19 @@ impl Tab {
     }
 }
 
+/// Several tracks and sample clips selected at once (box selection, Shift-click in the timeline).
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
+pub struct MultiSel {
+    pub tracks: std::collections::BTreeSet<usize>,
+    pub samples: std::collections::BTreeSet<usize>,
+}
+
+impl MultiSel {
+    pub fn is_empty(&self) -> bool {
+        self.tracks.is_empty() && self.samples.is_empty()
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Selection {
     None,
@@ -138,6 +151,12 @@ pub struct StudioView {
     pub tempo_open: bool,
     pub drag: Option<crate::studio_timeline::Drag>,
     pub drag_acc: f32,
+    /// Tracks and samples selected together (alongside `selection`, which is then `None`).
+    pub multi: MultiSel,
+    /// The multi-selection a box selection adds to (Shift), and the starts of the samples a
+    /// group drag moves (index, start beat).
+    pub(crate) multi_base: MultiSel,
+    pub(crate) drag_origins: Vec<(usize, f64)>,
     pub tgroup: crate::studio_transition::ParamGroup,
     pub tcat: crate::studio_transition::TCategory,
     /// Zoom to fit the whole mix on the next frame.
@@ -211,6 +230,9 @@ impl Default for StudioView {
             tempo_open: true,
             drag: None,
             drag_acc: 0.0,
+            multi: MultiSel::default(),
+            multi_base: MultiSel::default(),
+            drag_origins: Vec::new(),
             tgroup: Default::default(),
             tcat: Default::default(),
             fit_request: true,
@@ -294,6 +316,7 @@ impl StudioView {
         self.last_change = None;
         self.mix = mix;
         self.selection = Selection::None;
+        self.multi = MultiSel::default();
         self.position = 0.0;
         self.scroll = 0.0;
         self.timeline_dirty = true;
@@ -330,6 +353,7 @@ impl StudioView {
 
     fn restore(&mut self, m: Mix) {
         self.mix = m;
+        self.multi = MultiSel::default();
         self.committed = self.mix.clone();
         self.last_change = None;
         self.timeline_dirty = true;
@@ -554,6 +578,7 @@ impl StudioView {
                     self.range = None;
                 } else {
                     self.selection = Selection::None;
+                    self.multi = MultiSel::default();
                 }
             }
             if self.range.is_some() && cmd {
@@ -590,6 +615,7 @@ impl StudioView {
             self.redo();
         }
         match remove {
+            Some(_) if !self.multi.is_empty() => self.remove_multi(sh),
             Some(Selection::Track(t)) => self.remove_track(sh, t),
             Some(Selection::Sample(j)) => self.remove_sample(j),
             _ => {}
@@ -644,6 +670,8 @@ impl StudioView {
             }
         }
         self.mix = planned;
+        // indices into the old order
+        self.multi = MultiSel::default();
         self.changed();
     }
 
@@ -921,12 +949,31 @@ impl StudioView {
         }
     }
 
+    /// Delete everything in the multi-selection: its sample clips, and its tracks (the
+    /// transitions around them are planned again).
+    pub fn remove_multi(&mut self, sh: &Shared) {
+        let multi = std::mem::take(&mut self.multi);
+        self.selection = Selection::None;
+        for j in multi.samples.iter().rev() {
+            if *j < self.mix.samples.len() {
+                self.mix.samples.remove(*j);
+            }
+        }
+        if multi.tracks.is_empty() {
+            self.changed();
+            return;
+        }
+        let order: Vec<TrackId> = self.mix.tracks.iter().enumerate().filter(|(i, _)| !multi.tracks.contains(i)).map(|(_, t)| t.track_id).collect();
+        self.replan_keep(sh, &order, true);
+    }
+
     /// Delete sample clip `j`.
     pub fn remove_sample(&mut self, j: usize) {
         if j >= self.mix.samples.len() {
             return;
         }
         self.mix.samples.remove(j);
+        self.multi = MultiSel::default();
         self.selection = match self.selection {
             Selection::Sample(s) if s == j => Selection::None,
             Selection::Sample(s) if s > j => Selection::Sample(s - 1),
