@@ -27,8 +27,9 @@ enum Job {
     Import(Vec<PathBuf>, bool),
     /// Separate stems; `Some(quality)` overrides the playback quality (export).
     Separate(TrackId, Option<String>),
-    /// Fast stems for parts of a track only (track seconds): its stem transitions.
-    SeparateRegions(TrackId, Vec<(f64, f64)>),
+    /// Stems for parts of a track only (track seconds): its stem transitions. Fast for playback;
+    /// `Some(quality)` for an export.
+    SeparateRegions(TrackId, Vec<(f64, f64)>, Option<String>),
     Analyze(TrackId),
 }
 
@@ -122,7 +123,13 @@ impl Jobs {
     /// Separate stems now (front of the queue), then re-analyse.
     /// Fast stems for the parts `regions` (track seconds) of a track, ahead of other separation.
     pub fn separate_regions(&self, id: TrackId, regions: Vec<(f64, f64)>) {
-        self.gpu.push(Job::SeparateRegions(id, regions), true);
+        self.gpu.push(Job::SeparateRegions(id, regions, None), true);
+    }
+
+    /// Stems at `quality` (the export quality) for the parts `regions` of a track, now, unless
+    /// its complete stems are as good.
+    pub fn separate_regions_at(&self, id: TrackId, regions: Vec<(f64, f64)>, quality: &str) {
+        self.gpu.push(Job::SeparateRegions(id, regions, Some(quality.to_string())), true);
     }
 
     /// Separate the whole track after the jobs already queued.
@@ -296,9 +303,10 @@ fn worker(q: Arc<Queue>, other: Arc<Queue>, tx: Sender<Event>, settings: Arc<Mut
                 // analysis always follows separation
                 other_or_self(&q, &other, gpu, false).push(Job::Analyze(id), true);
             }
-            Job::SeparateRegions(id, regions) => {
+            Job::SeparateRegions(id, regions, quality) => {
                 let _heavy = heavy();
-                let r = pipeline::separate_regions(&lib, &mut ctx, id, &regions, &cancel, &mut |frac, label| {
+                let quality = quality.map(|q| clubcraft_stems::Quality::parse(&q).unwrap_or(clubcraft_stems::Quality::Best));
+                let r = pipeline::separate_regions(&lib, &mut ctx, id, &regions, quality, &cancel, &mut |frac, label| {
                     let _ = tx.send(Event::Progress { track: Some(id), frac, label: label.to_string() });
                 });
                 match r {

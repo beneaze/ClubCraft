@@ -186,8 +186,12 @@ pub struct StudioView {
     /// Extractions asked for this frame: (part, save to a file instead of a sample lane).
     pub extract_requests: Vec<(crate::extract::Part, bool)>,
     extract_tx: crossbeam_channel::Sender<ExtractDone>,
-    /// Sample files being cut again from their track (see [`StudioView::recut_sample`]).
+    /// Sample files being cut again from their track (see [`StudioView::recut_sample`]), and
+    /// those that couldn't be (not tried again this session).
     recutting: std::collections::HashSet<std::path::PathBuf>,
+    recut_failed: std::collections::HashSet<std::path::PathBuf>,
+    /// When the linked sample clips were last checked for better stems.
+    linked_checked: Option<std::time::Instant>,
     extract_rx: crossbeam_channel::Receiver<ExtractDone>,
     pub extracting: usize,
 }
@@ -257,6 +261,8 @@ impl Default for StudioView {
             extract_requests: Vec::new(),
             extract_tx,
             recutting: Default::default(),
+            recut_failed: Default::default(),
+            linked_checked: None,
             extract_rx,
             extracting: 0,
         }
@@ -265,7 +271,8 @@ impl Default for StudioView {
 
 /// A finished extraction: the WAV and its length, and what to do with it.
 struct ExtractDone {
-    result: Result<(std::path::PathBuf, f64), String>,
+    /// The file, its length (s) and the model of the stems it was cut from.
+    result: Result<(std::path::PathBuf, f64, Option<String>), String>,
     then: ExtractThen,
     label: String,
 }
@@ -273,11 +280,12 @@ struct ExtractDone {
 enum ExtractThen {
     /// It was saved as a file.
     Saved,
-    /// Put it on a sample lane at this mix beat.
-    Place(f64, clubcraft_core::SampleSource),
+    /// Put it on a sample lane at this mix beat, locked to its track.
+    Place(f64, clubcraft_core::SampleSource, Option<clubcraft_core::SampleLock>),
     /// It replaces the file `old` of the clips cut from the same part of a track, reaching
     /// `s0` seconds (of the old file) further back.
-    Recut { old: std::path::PathBuf, s0: f64, source: clubcraft_core::SampleSource },
+    /// `better`: cut for better stems (when they don't come out, it isn't tried again).
+    Recut { old: std::path::PathBuf, s0: f64, source: clubcraft_core::SampleSource, better: bool },
 }
 
 /// A drop indicator line along the top of a hovered playlist row.
@@ -411,6 +419,7 @@ impl StudioView {
     pub fn refresh_timeline(&mut self, sh: &Shared) {
         self.timeline = MixTimeline::build(&self.mix, &|id| analysis_of(sh, id));
         self.timeline_dirty = false;
+        self.apply_sample_locks();
     }
 
     fn picker_ui(&mut self, ctx: &egui::Context, sh: &Shared, out: &mut Vec<StudioAction>) {
@@ -513,7 +522,7 @@ impl StudioView {
         }
         self.follow_playhead_into_transitions(ui.ctx());
         self.keyboard(ui.ctx(), sh, out);
-        self.run_extractions(sh);
+        self.tick_samples(sh);
         // the finder was opened from elsewhere (library, menu, inspector button)
         if self.mashup.take_opened() {
             self.tab = Some(Tab::Mashups);
@@ -1044,15 +1053,22 @@ impl StudioView {
                 clubcraft_core::paths::data_dir().join("Samples").join(format!("{name}.wav"))
             };
             let req = crate::extract::Request { audio_path: t.path.clone(), hash: t.hash.clone(), t0, t1, rate, semis, weights: part.weights(), out };
-            let source = clubcraft_core::SampleSource { audio_path: t.path.clone(), hash: t.hash.clone(), stems: part.weights(), t0, track_secs: t.duration, rate, semis };
-            let then = if save { ExtractThen::Saved } else { ExtractThen::Place(rs.b0, source) };
+            let source = clubcraft_core::SampleSource { audio_path: t.path.clone(), hash: t.hash.clone(), stems: part.weights(), t0, track_secs: t.duration, rate, semis, model: None };
+            // a copy starts at the spot it was cut from, so it stays there when the track moves
+            let lock = clubcraft_core::SampleLock { track_id: mt.track_id, pos: t0 };
+            let then = if save { ExtractThen::Saved } else { ExtractThen::Place(rs.b0, source, Some(lock)) };
             self.start_extraction(req, then, format!("{} of {}", part.label(), title));
         }
         while let Ok(d) = self.extract_rx.try_recv() {
             self.extracting = self.extracting.saturating_sub(1);
             match (d.result, d.then) {
-                (Ok((path, secs)), ExtractThen::Recut { old, s0, source }) => {
+                (Ok((path, secs, model)), ExtractThen::Recut { old, s0, source, better }) => {
                     self.recutting.remove(&old);
+                    let rank = |m: &Option<String>| m.as_deref().map_or(0, crate::pipeline::model_rank);
+                    if better && rank(&model) <= rank(&source.model) {
+                        self.recut_failed.insert(path.clone());
+                    }
+                    let source = clubcraft_core::SampleSource { model, ..source };
                     for c in self.mix.samples.iter_mut().filter(|c| c.path == old) {
                         c.path = path.clone();
                         c.source = Some(source.clone());
@@ -1064,7 +1080,7 @@ impl StudioView {
                     // dragged further while it was being cut
                     for j in 0..self.mix.samples.len() {
                         if self.mix.samples[j].path == path {
-                            self.recut_sample(j, secs);
+                            self.recut_sample(j, secs, false);
                         }
                     }
                     self.message = format!("{} extended", d.label);
@@ -1072,9 +1088,10 @@ impl StudioView {
                 }
                 (Err(e), ExtractThen::Recut { old, .. }) => {
                     self.recutting.remove(&old);
+                    self.recut_failed.insert(old);
                     self.message = format!("Couldn't extend {}: {e}", d.label);
                 }
-                (Ok((path, secs)), ExtractThen::Place(beat, source)) => {
+                (Ok((path, secs, model)), ExtractThen::Place(beat, source, lock)) => {
                     // first sample lane that is free over the clip's span
                     let end = self.timeline.beat_at_sec(self.timeline.sec_at_beat(beat) + secs);
                     let busy = |l: u8, s: &StudioView| {
@@ -1085,12 +1102,13 @@ impl StudioView {
                         })
                     };
                     let lane = (0..clubcraft_core::SAMPLE_LANES as u8).find(|&l| !busy(l, self)).unwrap_or(0);
-                    self.mix.samples.push(clubcraft_core::SampleClip { source: Some(source), ..clubcraft_core::SampleClip::new(lane, path, beat) });
+                    let source = clubcraft_core::SampleSource { model, ..source };
+                    self.mix.samples.push(clubcraft_core::SampleClip { source: Some(source), lock, ..clubcraft_core::SampleClip::new(lane, path, beat) });
                     self.sample_open[lane as usize] = true;
                     self.message = format!("{} copied to Sample {}", d.label, lane + 1);
                     self.changed();
                 }
-                (Ok((path, _)), ExtractThen::Saved) => self.message = format!("Saved {}", path.display()),
+                (Ok((path, _, _)), ExtractThen::Saved) => self.message = format!("Saved {}", path.display()),
                 (Err(e), _) => self.message = format!("Extract failed: {e}"),
             }
         }
@@ -1101,31 +1119,127 @@ impl StudioView {
         self.extracting += 1;
         self.message = format!("Extracting {label}…");
         std::thread::spawn(move || {
-            let result = crate::extract::run(&req).map(|d| (req.out.clone(), d)).map_err(|e| format!("{e:#}"));
+            let result = crate::extract::run(&req).map(|(secs, model)| (req.out.clone(), secs, model)).map_err(|e| format!("{e:#}"));
             let _ = tx.send(ExtractDone { result, then, label });
         });
     }
 
-    /// Sample clip `j` (its file `file_secs` long) was dragged past its file: cut the part of the
-    /// track it now covers again, so it continues the track instead of falling silent.
-    pub(crate) fn recut_sample(&mut self, j: usize, file_secs: f64) {
+    /// Cut sample clip `j` (its file `file_secs` long) again from its track: when it was dragged
+    /// past its file, so it continues the track instead of falling silent, or (`force`) to take
+    /// better stems.
+    pub(crate) fn recut_sample(&mut self, j: usize, file_secs: f64, force: bool) {
         let Some(c) = self.mix.samples.get(j) else { return };
         let Some(src) = c.source.clone() else { return };
         let (lo, hi) = src.file_bounds();
         let (s0, s1) = (c.offset.max(lo), (c.offset + c.secs(file_secs)).min(hi));
-        if (s0 > -1e-4 && s1 < file_secs + 1e-4) || s1 <= s0 || self.recutting.contains(&c.path) {
+        let inside = s0 > -1e-4 && s1 < file_secs + 1e-4;
+        if (inside && !force) || s1 <= s0 || self.recutting.contains(&c.path) {
             return;
         }
-        let (t0, t1) = (src.t0 + s0 * src.rate, src.t0 + s1 * src.rate);
+        let (t0, t1) = src.track_range(c.offset, c.secs(file_secs));
         // a new name: the engine and the timeline cache files by path
         let stem = c.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
         let base = stem.split(" @").next().unwrap_or(&stem).to_string();
-        let out = c.path.with_file_name(format!("{base} @{t0:.2}-{t1:.2}s.wav"));
+        let name = |n: u32| c.path.with_file_name(format!("{base} @{t0:.2}-{t1:.2}s{}.wav", if n > 0 { format!(" ({n})") } else { String::new() }));
+        let Some(out) = (0..1000).map(name).find(|p| !p.exists()) else { return };
         let req = crate::extract::Request { audio_path: src.audio_path.clone(), hash: src.hash.clone(), t0, t1, rate: src.rate, semis: src.semis, weights: src.stems, out };
         let old = c.path.clone();
         self.recutting.insert(old.clone());
         let source = clubcraft_core::SampleSource { t0, ..src };
-        self.start_extraction(req, ExtractThen::Recut { old, s0, source }, base);
+        self.start_extraction(req, ExtractThen::Recut { old, s0, source, better: force }, base);
+    }
+
+    /// The parts of tracks (track seconds) that sample clips were cut from as stems.
+    pub(crate) fn sample_stem_regions(&self, sh: &Shared) -> Vec<(TrackId, Vec<(f64, f64)>)> {
+        let mut out: Vec<(TrackId, Vec<(f64, f64)>)> = Vec::new();
+        for c in &self.mix.samples {
+            let Some(src) = c.source.as_ref().filter(|s| s.stems.is_some()) else { continue };
+            let Some(id) = sh.tracks.iter().find(|t| t.hash == src.hash).map(|t| t.id) else { continue };
+            let file_secs = self.sample_cache.get(&c.path).and_then(|x| x.as_ref().map(|x| x.0)).unwrap_or(0.0);
+            let r = src.track_range(c.offset, c.secs(file_secs));
+            match out.iter_mut().find(|e| e.0 == id) {
+                Some(e) => e.1.push(r),
+                None => out.push((id, vec![r])),
+            }
+        }
+        out
+    }
+
+    /// Model of better stems than sample clip `c` was cut from, now there for its part of the
+    /// track (complete stems, or parts separated for the mix or an export).
+    fn better_stems_for(&self, sh: &Shared, c: &clubcraft_core::SampleClip) -> Option<String> {
+        let src = c.source.as_ref().filter(|s| s.stems.is_some())?;
+        let id = sh.tracks.iter().find(|t| t.hash == src.hash)?.id;
+        let have = src.model.as_deref().map_or(0, crate::pipeline::model_rank);
+        let full = sh.analyses.get(&id).and_then(|a| a.stems_model.clone());
+        let file_secs = self.sample_cache.get(&c.path).and_then(|x| x.as_ref().map(|x| x.0)).unwrap_or(0.0);
+        let (a, b) = src.track_range(c.offset, c.secs(file_secs));
+        let covered = sh.stem_regions.get(&id).is_some_and(|r| r.iter().any(|&(x, y)| x <= a + 1e-6 && y >= b - 1e-6));
+        let parts = covered.then(|| sh.stem_regions_model.get(&id).cloned()).flatten();
+        let model = [full, parts].into_iter().flatten().max_by_key(|m| crate::pipeline::model_rank(m))?;
+        (crate::pipeline::model_rank(&model) > have).then_some(model)
+    }
+
+    /// Cut clips again whose track has better stems by now (checked about once a second).
+    fn refresh_linked_samples(&mut self, sh: &Shared) {
+        let now = std::time::Instant::now();
+        if self.linked_checked.is_some_and(|t| now.duration_since(t).as_secs_f32() < 1.0) {
+            return;
+        }
+        self.linked_checked = Some(now);
+        for j in 0..self.mix.samples.len() {
+            let c = &self.mix.samples[j];
+            if self.recut_failed.contains(&c.path) || self.better_stems_for(sh, c).is_none() {
+                continue;
+            }
+            let file_secs = self.sample_cache.get(&c.path).and_then(|x| x.as_ref().map(|x| x.0));
+            if let Some(f) = file_secs {
+                self.recut_sample(j, f, true);
+            }
+        }
+    }
+
+    /// Extractions and the clips linked to their tracks' stems, also while the studio isn't shown.
+    pub(crate) fn tick_samples(&mut self, sh: &Shared) {
+        self.run_extractions(sh);
+        self.refresh_linked_samples(sh);
+    }
+
+    /// Whether linked clips are still being cut again (or have better stems waiting): an export
+    /// waits for them.
+    pub(crate) fn linked_samples_waiting(&self, sh: &Shared) -> bool {
+        !self.recutting.is_empty() || self.mix.samples.iter().any(|c| !self.recut_failed.contains(&c.path) && self.sample_cache.get(&c.path).is_some_and(|x| x.is_some()) && self.better_stems_for(sh, c).is_some())
+    }
+
+    /// Put the clips locked to a track back at their place in it, after the timeline changed.
+    fn apply_sample_locks(&mut self) {
+        let mut moved = false;
+        for c in &mut self.mix.samples {
+            let Some(lock) = c.lock else { continue };
+            let Some(i) = self.mix.tracks.iter().position(|t| t.track_id == lock.track_id).filter(|&i| i < self.timeline.tracks.len()) else { continue };
+            let b = self.timeline.beat_of_track_pos(i, lock.pos);
+            if b.is_finite() && (b - c.start_beat).abs() > 1e-6 {
+                c.start_beat = b.max(0.0);
+                moved = true;
+            }
+        }
+        if moved {
+            // part of the edit that moved the track: no undo step of its own
+            self.committed = self.mix.clone();
+            self.dirty = true;
+            self.edited = true;
+        }
+    }
+
+    /// Sample clip `j` moved: a locked one keeps its new place in its track.
+    pub(crate) fn relock_sample(&mut self, j: usize) {
+        let Some(c) = self.mix.samples.get(j) else { return };
+        let Some(lock) = c.lock else { return };
+        let Some(i) = self.mix.tracks.iter().position(|t| t.track_id == lock.track_id).filter(|&i| i < self.timeline.tracks.len()) else { return };
+        let pos = self.timeline.track_pos(i, c.start_beat);
+        if let Some(l) = self.mix.samples[j].lock.as_mut() {
+            l.pos = pos;
+        }
     }
 
     pub(crate) fn track_at_playhead(&self) -> Option<usize> {
@@ -1703,5 +1817,35 @@ mod tests {
         // move a bar earlier
         s.move_transition(0, -4.0);
         assert!((s.mix.tracks[0].mix_out - 56.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn locked_samples_move_with_their_track() {
+        let sh = Shared::default();
+        let mut s = StudioView::default();
+        let mut m = mix();
+        // locked to track 2, 20 s in; another clip stays where it is
+        let mut locked = clubcraft_core::SampleClip::new(0, "/tmp/a.wav".into(), 0.0);
+        locked.lock = Some(clubcraft_core::SampleLock { track_id: 2, pos: 20.0 });
+        m.samples = vec![locked, clubcraft_core::SampleClip::new(1, "/tmp/b.wav".into(), 10.0)];
+        s.set_mix(m);
+        s.refresh_timeline(&sh);
+        let at = |s: &StudioView| s.timeline.beat_of_track_pos(1, 20.0);
+        assert!((s.mix.samples[0].start_beat - at(&s)).abs() < 1e-9);
+        // the second track comes in 8 s (16 beats) later: the locked clip goes along
+        let before = s.mix.samples[0].start_beat;
+        s.mix.tracks[0].mix_out += 8.0;
+        s.changed();
+        s.refresh_timeline(&sh);
+        assert!((s.mix.samples[0].start_beat - before - 16.0).abs() < 1e-6, "{} vs {before}", s.mix.samples[0].start_beat);
+        assert_eq!(s.mix.samples[1].start_beat, 10.0);
+        // moved by hand it keeps the new place in its track
+        s.mix.samples[0].start_beat += 4.0;
+        s.relock_sample(0);
+        assert!((s.mix.samples[0].lock.unwrap().pos - 22.0).abs() < 1e-6);
+        // undoing the track move puts the clip back too
+        s.undo();
+        s.refresh_timeline(&sh);
+        assert!((s.mix.samples[0].start_beat - before).abs() < 1e-6);
     }
 }

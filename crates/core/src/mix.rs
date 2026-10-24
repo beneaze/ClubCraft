@@ -740,6 +740,18 @@ pub struct SampleClip {
     /// `side` of each lane is unused).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub curves: Vec<Lane>,
+    /// Locked to a track of the mix: the clip keeps its place in that track when the track
+    /// moves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock: Option<SampleLock>,
+}
+
+/// Where a locked sample clip starts, in the track it is locked to.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SampleLock {
+    pub track_id: TrackId,
+    /// Position in the track (s) at the clip's start.
+    pub pos: f64,
 }
 
 /// Value of `param` on a sample clip with `curves`, `x` beats into it (allocation free).
@@ -763,9 +775,19 @@ pub struct SampleSource {
     pub rate: f64,
     /// Transposition (semitones) it was cut with.
     pub semis: f32,
+    /// Model of the stems it was cut from (`None` for the full sound): better stems of the track
+    /// replace it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 impl SampleSource {
+    /// The part of the track (s) under a clip `offset..offset + secs` (file seconds) of it.
+    pub fn track_range(&self, offset: f64, secs: f64) -> (f64, f64) {
+        let (lo, hi) = self.file_bounds();
+        (self.t0 + offset.max(lo) * self.rate, self.t0 + (offset + secs).min(hi) * self.rate)
+    }
+
     /// The file positions (s) that lie inside the track.
     pub fn file_bounds(&self) -> (f64, f64) {
         let rate = self.rate.max(1e-3);
@@ -780,7 +802,7 @@ fn is_zero(x: &f64) -> bool {
 impl SampleClip {
     /// The whole file once, from `start_beat`.
     pub fn new(lane: u8, path: std::path::PathBuf, start_beat: f64) -> Self {
-        SampleClip { lane, path, start_beat, gain_db: 0.0, offset: 0.0, length: None, source: None, curves: Vec::new() }
+        SampleClip { lane, path, start_beat, gain_db: 0.0, offset: 0.0, length: None, source: None, curves: Vec::new(), lock: None }
     }
 
     /// Value of `param` `x` beats into the clip (neutral without a curve).

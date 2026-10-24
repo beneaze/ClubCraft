@@ -740,7 +740,7 @@ impl StudioView {
         }
 
         // ----- sample lanes
-        self.sample_lanes_ui(ui, &p, &slanes, canvas, &x_of);
+        self.sample_lanes_ui(ui, sh, &p, &slanes, canvas, &x_of);
         if let (Some(Drag::Box(a)), Some(b)) = (self.drag, ui.input(|i| i.pointer.latest_pos())) {
             let bx = Rect::from_two_pos(a, b);
             let mut sel = self.multi_base.clone();
@@ -1546,7 +1546,7 @@ impl StudioView {
 
     /// Sample clips: draw, drag (snaps to beats), context menu; files dropped from Finder land on
     /// the lane under the pointer.
-    fn sample_lanes_ui(&mut self, ui: &mut Ui, p: &egui::Painter, slanes: &[Rect], canvas: Rect, x_of: &dyn Fn(f64) -> f32) {
+    fn sample_lanes_ui(&mut self, ui: &mut Ui, sh: &Shared, p: &egui::Painter, slanes: &[Rect], canvas: Rect, x_of: &dyn Fn(f64) -> f32) {
         let origin = x_of(0.0);
         let zoom = self.zoom;
         let beat_at_x = move |tl: &clubcraft_core::MixTimeline, x: f32| tl.beat_at_sec((((x - origin) / zoom) as f64).max(0.0));
@@ -1577,6 +1577,9 @@ impl StudioView {
         let mut dup: Option<usize> = None;
         let mut recut: Option<(usize, f64)> = None;
         let mut edited = false;
+        // clips moved by hand: a locked one takes its new place in its track
+        let mut moved: Vec<usize> = Vec::new();
+        let title_of = |id: clubcraft_core::TrackId| sh.track(id).map(|t| if t.title.is_empty() { t.display_name() } else { t.title.clone() }).unwrap_or_else(|| "its track".into());
         for j in 0..self.mix.samples.len() {
             let c = self.mix.samples[j].clone();
             let Some(lane) = slanes.get(c.lane as usize).copied() else { continue };
@@ -1590,7 +1593,7 @@ impl StudioView {
             let pc = p.with_clip_rect(r.intersect(canvas));
             pc.rect_filled(r, 4.0, theme::blend(theme::PANEL, SAMPLE_COLOR, 0.35));
             let name = c.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-            pc.text(r.left_top() + vec2(5.0, 2.0), egui::Align2::LEFT_TOP, &name, egui::FontId::proportional(11.0), Color32::WHITE);
+            pc.text(r.left_top() + vec2(5.0, 2.0), egui::Align2::LEFT_TOP, if c.lock.is_some() { format!("🔒 {name}") } else { name.clone() }, egui::FontId::proportional(11.0), Color32::WHITE);
             if r.height() > 24.0 && !peaks.is_empty() {
                 let cy = r.center().y + 6.0;
                 let hmax = (r.height() - 18.0) * 0.5;
@@ -1651,6 +1654,8 @@ impl StudioView {
                     if (snapped - c.start_beat).abs() > 1e-6 {
                         self.mix.samples[j].start_beat = snapped;
                         edited = true;
+                        moved.push(j);
+                        moved.extend(self.drag_origins.iter().map(|(k, _)| *k));
                         // the rest of a multi-selection moves by the same amount
                         if let Some(&(_, o)) = self.drag_origins.iter().find(|(k, _)| *k == j) {
                             let delta = snapped - o;
@@ -1718,6 +1723,7 @@ impl StudioView {
                             }
                             (clip.start_beat, clip.offset, clip.length) = (start, offset, len);
                             edited = true;
+                            moved.push(j);
                         }
                     }
                 }
@@ -1736,6 +1742,31 @@ impl StudioView {
                     self.mix.samples[j].gain_db = g;
                     edited = true;
                 }
+                // locked to a track: moves with it
+                match c.lock {
+                    Some(l) => {
+                        if ui.button(format!("Unlock from {}", title_of(l.track_id))).on_hover_text("The clip stays where it is in the mix when the track moves").clicked() {
+                            self.mix.samples[j].lock = None;
+                            edited = true;
+                            ui.close();
+                        }
+                    }
+                    None => {
+                        // the tracks playing where the clip starts, the one it was cut from first
+                        let src = c.source.as_ref().map(|s| s.hash.clone());
+                        let mut under: Vec<usize> = (0..self.timeline.tracks.len()).filter(|&i| self.timeline.tracks[i].start_sec <= t0 + 1e-6 && t0 < self.timeline.tracks[i].end_sec).collect();
+                        under.sort_by_key(|&i| sh.track(self.timeline.tracks[i].track_id).is_none_or(|t| Some(&t.hash) != src.as_ref()));
+                        for i in under {
+                            let id = self.timeline.tracks[i].track_id;
+                            if ui.button(format!("Lock to {}", title_of(id))).on_hover_text("The clip keeps its place in this track when the track moves").clicked() {
+                                let pos = self.timeline.track_pos(i, c.start_beat);
+                                self.mix.samples[j].lock = Some(clubcraft_core::SampleLock { track_id: id, pos });
+                                edited = true;
+                                ui.close();
+                            }
+                        }
+                    }
+                }
                 if (c.length.is_some() || c.offset != 0.0) && ui.button("Play the whole file once").clicked() {
                     self.mix.samples[j].offset = 0.0;
                     self.mix.samples[j].length = None;
@@ -1753,8 +1784,13 @@ impl StudioView {
             });
             resp.on_hover_text(format!("{name} · {:.1} s · drag to move (snaps to the beat grid, finer when zoomed in; Shift: free) · drag an edge to cut it or, if cut from a track, extend it · Backspace deletes it · right-click for more", dur));
         }
+        moved.sort_unstable();
+        moved.dedup();
+        for j in moved {
+            self.relock_sample(j);
+        }
         if let Some((j, file_dur)) = recut {
-            self.recut_sample(j, file_dur);
+            self.recut_sample(j, file_dur, false);
         }
         if let Some(j) = dup {
             let mut c = self.mix.samples[j].clone();

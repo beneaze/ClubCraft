@@ -172,7 +172,7 @@ impl TrackCache {
         let audio = Arc::new(clubcraft_audio::decode_file(&t.path, clubcraft_core::SAMPLE_RATE)?);
         let sp = stems_path(&t.hash);
         let stems = match clubcraft_stems::load_stem_track(&sp) {
-            Ok(st) if st.frames.abs_diff(audio.frames()) < 4096 => Some(Arc::new(st)),
+            Ok(st) if st.frames.abs_diff(audio.frames()) < 4096 => Some(Arc::new(with_better_regions(st, &t.hash))),
             other => {
                 // the UI shows stems for this track: say why they don't play
                 if let Ok(st) = &other {
@@ -203,7 +203,11 @@ pub(crate) fn load_uncached(id: TrackId) -> Result<Arc<LoadedTrack>> {
     let t = lib.track(id)?.context("unknown track")?;
     let analysis = lib.analysis(id)?.unwrap_or_default();
     let audio = Arc::new(clubcraft_audio::decode_file(&t.path, clubcraft_core::SAMPLE_RATE)?);
-    let stems = clubcraft_stems::load_stem_track(&stems_path(&t.hash)).ok().filter(|st| st.frames.abs_diff(audio.frames()) < 4096).map(Arc::new).or_else(|| load_region_stems(&t.hash, audio.frames()));
+    let stems = clubcraft_stems::load_stem_track(&stems_path(&t.hash))
+        .ok()
+        .filter(|st| st.frames.abs_diff(audio.frames()) < 4096)
+        .map(|st| Arc::new(with_better_regions(st, &t.hash)))
+        .or_else(|| load_region_stems(&t.hash, audio.frames()));
     Ok(Arc::new(LoadedTrack::from_parts(&t, &analysis, stems, audio).with_user_cues(&lib.cues(id)?)))
 }
 
@@ -226,6 +230,32 @@ fn load_region_stems(hash: &str, frames: usize) -> Option<Arc<StemTrack>> {
     }
     st.model.push_str(REGION_STEMS);
     Some(Arc::new(st))
+}
+
+/// Complete stems with the parts an export separated in a better model (its transitions, see
+/// `pipeline::separate_regions`) laid over them. The models change at chunk edges in the margin
+/// around the stem automation, where every stem plays at 1 and the output is the original.
+fn with_better_regions(st: StemTrack, hash: &str) -> StemTrack {
+    let p = clubcraft_core::library::region_stems_path(hash);
+    let better = clubcraft_stems::read_model_name(&p).ok().flatten().is_some_and(|m| crate::pipeline::model_rank(&m) > crate::pipeline::model_rank(&st.model));
+    if !better {
+        return st;
+    }
+    let mut regions = match clubcraft_stems::load_stem_track(&p) {
+        Ok(r) if r.frames == st.frames => r,
+        Ok(_) => return st,
+        Err(e) => {
+            log::warn!("{}: {e:#}", p.display());
+            return st;
+        }
+    };
+    for c in 0..st.num_chunks() {
+        if let (false, Some(ch)) = (regions.is_chunk_ready(c), st.chunk(c)) {
+            regions.set_stem_chunk(c, clubcraft_core::stems::StemChunk { data: ch.data.clone(), scale: ch.scale });
+        }
+    }
+    regions.model = st.model;
+    regions
 }
 
 /// Background separation of tracks loaded on a deck before their stems were cached.

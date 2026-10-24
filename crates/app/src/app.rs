@@ -31,6 +31,8 @@ pub struct Shared {
     /// Parts of tracks without complete stems that have stems for mix playback (track seconds,
     /// see `pipeline::separate_regions`).
     pub stem_regions: HashMap<TrackId, Vec<(f64, f64)>>,
+    /// Model of those parts (Fast for playback, the export quality after an export).
+    pub stem_regions_model: HashMap<TrackId, String>,
 }
 
 /// Identity of a region separation job: the track and its parts to 0.1 s.
@@ -87,6 +89,10 @@ impl Shared {
                 Some(r) => self.stem_regions.insert(id, r),
                 None => self.stem_regions.remove(&id),
             };
+            match clubcraft_stems::read_model_name(&clubcraft_core::library::region_stems_path(&hash)).ok().flatten() {
+                Some(m) => self.stem_regions_model.insert(id, m),
+                None => self.stem_regions_model.remove(&id),
+            };
         }
         let cues = lib.cues(id).unwrap_or_default();
         self.cue_counts.insert(id, cues.len());
@@ -109,6 +115,7 @@ impl Shared {
 
 struct PendingExport {
     out: std::path::PathBuf,
+    /// Tracks whose stem transitions are being separated for it.
     tracks: Vec<TrackId>,
     total: usize,
     /// Stem quality the export waits for.
@@ -296,8 +303,8 @@ impl App {
         }
         // Stem automation (stem transitions, a track's own stem lanes) on tracks without stems is
         // only imitated with volume and EQ, so the parts it plays in are separated right away, at
-        // the Fast quality (seconds per track; complete Best stems are made for export), whatever
-        // the background setting. Mix order (front of the queue, so pushed in reverse); each part
+        // the Fast quality (seconds per track; an export separates them again in its quality),
+        // whatever the background setting. Mix order (front of the queue, so pushed in reverse); each part
         // once per session; not while the timeline is stale or being dragged.
         if !self.studio.timeline_dirty && !ctx.input(|i| i.pointer.any_down()) {
             let fresh: Vec<(TrackId, Vec<(f64, f64)>)> = self.studio.missing_stem_regions(&self.sh).into_iter().filter(|(id, r)| !self.stems_queued.contains(&region_key(*id, r))).collect();
@@ -593,13 +600,53 @@ impl App {
         })
     }
 
+    /// Parts of the open mix's tracks (track seconds) whose stem automation lacks stems of the
+    /// export `quality`: neither complete stems that good, nor that good parts separated there.
+    fn export_stem_regions(&self, quality: &str) -> Vec<(TrackId, Vec<(f64, f64)>)> {
+        let mut out: Vec<(TrackId, Vec<(f64, f64)>)> = Vec::new();
+        let mut wanted: Vec<(TrackId, Vec<(f64, f64)>)> = self.studio.mix.tracks.iter().enumerate().map(|(i, t)| (t.track_id, self.studio.stem_regions_needed(i))).collect();
+        // and the parts sample clips were cut from: they are cut again from the better stems
+        wanted.extend(self.studio.sample_stem_regions(&self.sh));
+        for (id, regions) in wanted {
+            let an = self.sh.analyses.get(&id);
+            if crate::pipeline::stems_meet(an.and_then(|a| a.stems_model.as_deref()), quality) {
+                continue;
+            }
+            let parts_ok = crate::pipeline::stems_meet(self.sh.stem_regions_model.get(&id).map(|m| m.as_str()), quality);
+            let cover = self.sh.stem_regions.get(&id).filter(|_| parts_ok);
+            let end = an.map_or(f64::INFINITY, |a| a.duration);
+            let missing: Vec<(f64, f64)> = regions
+                .into_iter()
+                .filter(|&(a, b)| {
+                    let (a, b) = (a.max(0.0), b.min(end));
+                    b > a && !cover.is_some_and(|c| c.iter().any(|&(x, y)| x <= a + 1e-6 && y >= b - 1e-6))
+                })
+                .collect();
+            if missing.is_empty() {
+                continue;
+            }
+            match out.iter_mut().find(|e| e.0 == id) {
+                Some(e) => e.1.extend(missing),
+                None => out.push((id, missing)),
+            }
+        }
+        out
+    }
+
     /// Start a waiting export once its stems are separated (or the jobs ended / were stopped).
     fn tick_pending_export(&mut self) {
         let Some(pe) = &self.pending_export else { return };
-        let missing = pe.tracks.iter().filter(|id| !crate::pipeline::stems_meet(self.sh.analyses.get(id).and_then(|a| a.stems_model.as_deref()), &pe.quality)).count();
+        let need = self.export_stem_regions(&pe.quality);
+        let missing = pe.tracks.iter().filter(|id| need.iter().any(|e| e.0 == **id)).count();
         self.studio.render_progress = Some((pe.total - missing) as f32 / pe.total.max(1) as f32);
         self.studio.render_label = format!("Stems {}/{}", pe.total - missing, pe.total);
-        if missing == 0 || self.jobs.pending() == 0 {
+        // sample clips cut from those stems are cut again first
+        self.studio.tick_samples(&self.sh);
+        let samples_wait = self.studio.linked_samples_waiting(&self.sh);
+        if samples_wait && (missing == 0 || self.jobs.pending() == 0) {
+            self.studio.render_label = "Cutting samples again".into();
+        }
+        if (missing == 0 || self.jobs.pending() == 0) && !samples_wait {
             let Some(pe) = self.pending_export.take() else { return };
             self.studio.render_label.clear();
             self.eng.export_mix(&self.studio.mix, pe.out, &self.sh);
@@ -822,18 +869,21 @@ impl App {
                 let _ = std::fs::create_dir_all(&dir);
                 let name: String = self.studio.mix.name.chars().map(|c| if c == '/' || c == ':' { '-' } else { c }).collect();
                 if let Some(out) = rfd::FileDialog::new().set_directory(&dir).set_file_name(format!("{name}.wav")).add_filter("WAV", &["wav"]).save_file() {
-                    // the heavy part happens here: stems for the tracks whose stem automation lacks them
+                    // The heavy part happens here: stems in the export quality where the stem
+                    // automation plays, and only there (a fraction of each track).
                     let quality = self.prefs.export_stem_quality.clone();
-                    let need = self.studio.tracks_needing_stems(&self.sh, Some(&quality));
-                    if need.is_empty() {
+                    let need = self.export_stem_regions(&quality);
+                    if need.is_empty() && !self.studio.linked_samples_waiting(&self.sh) {
                         self.eng.export_mix(&self.studio.mix, out, &self.sh);
                         self.status = "Rendering mix…".into();
                     } else {
-                        for id in &need {
-                            self.jobs.separate_at(*id, &quality);
+                        // mix order: front of the queue, so pushed in reverse
+                        for (id, r) in need.iter().rev() {
+                            self.jobs.separate_regions_at(*id, r.clone(), &quality);
                         }
-                        self.status = format!("Separating stems ({quality}) for {} track(s), then rendering…", need.len());
-                        self.pending_export = Some(PendingExport { out, total: need.len(), tracks: need, quality });
+                        self.status = format!("Separating the stem transitions of {} track(s) ({quality}), then rendering…", need.len());
+                        let tracks: Vec<TrackId> = need.into_iter().map(|e| e.0).collect();
+                        self.pending_export = Some(PendingExport { out, total: tracks.len(), tracks, quality });
                     }
                 }
             }

@@ -92,7 +92,7 @@ Every screenshot here is the real app at work on a mix imported from DJ.Studio. 
       <br>
       <sub>The library: BPM, key, energy and cues for every analysed track.</sub>
       <h3>A library that analyses itself</h3>
-      Drop a folder in and every track is analysed within about a second. Stems are separated on demand: the parts of a track that a stem transition plays in, in seconds at the Fast quality, as soon as a mix needs them; whole tracks at your export quality before an export; or the whole library in the background if you switch that on. Sort and search by artist, title, BPM, key or energy, and drag tracks onto a deck or into a mix.
+      Drop a folder in and every track is analysed within about a second. Stems are separated on demand: the parts of a track that a stem transition plays in, in seconds at the Fast quality, as soon as a mix needs them; the same parts again at your export quality before an export; or the whole library in the background if you switch that on. Sort and search by artist, title, BPM, key or energy, and drag tracks onto a deck or into a mix.
       <br><br>
       Imports your <b>DJ.Studio</b> projects: mix points, cues, transitions with their curves, stem automation and DJ.Studio's timing. The importer is built clean-room, from DJ.Studio's own files and exports only ([how it works](docs/interop/djstudio.md)). Exports beat grids, keys, hot cues and automix points to <b>VirtualDJ</b>.
     </td>
@@ -110,7 +110,7 @@ Every screenshot here is the real app at work on a mix imported from DJ.Studio. 
       <br>
       <sub>Settings ▸ Decks, one of nine tabs (⌘, from the menu bar).</sub>
       <h3>Behaves the way you play</h3>
-      Cue modes (CDJ, hold, cue-up-play), hot cue behaviour, load position, pitch ranges, crossfader and fader curves, auto gain and limiter, key notation (Camelot, Open Key or musical), waveform colours, BPM range, stem quality for playback and for export (an export separates weaker stems again first), default transitions and export formats. <b>Audio</b> shows the output, buffer size and a dropout counter, so you can see whether a buffer is too small.
+      Cue modes (CDJ, hold, cue-up-play), hot cue behaviour, load position, pitch ranges, crossfader and fader curves, auto gain and limiter, key notation (Camelot, Open Key or musical), waveform colours, BPM range, stem quality for playback and for export (an export separates the stem transitions again first if their stems are weaker), default transitions and export formats. <b>Audio</b> shows the output, buffer size and a dropout counter, so you can see whether a buffer is too small.
     </td>
     <td width="50%" valign="top">
       <h3>Transitions you can read</h3>
@@ -118,7 +118,7 @@ Every screenshot here is the real app at work on a mix imported from DJ.Studio. 
       <br><br>
       To switch stems off in any part of a song, drag across the waveform and right-click: mute drums, bass, melody or vocals there, or make that part an acapella or an instrumental.
       <br><br>
-      Stems for a mix's stem transitions are separated automatically, only for the transition windows and at the Fast quality, so they are ready in seconds per transition. Until then the stem curves are imitated with volume and EQ: each transition keeps its own shape, and the timeline shows it marked "no stems". An export separates the whole tracks at the export quality first. The editor also warns when the outgoing track fades out before its transition ends, or when the incoming track comes in much quieter.
+      Stems for a mix's stem transitions are separated automatically, only for the transition windows and at the Fast quality, so they are ready in seconds per transition. Until then the stem curves are imitated with volume and EQ: each transition keeps its own shape, and the timeline shows it marked "no stems". An export separates those windows again at the export quality first, not the whole tracks, so a Best export takes a fraction of the time. The editor also warns when the outgoing track fades out before its transition ends, or when the incoming track comes in much quieter.
       <h3>Keyboard first</h3>
       <b>Studio:</b> Space play · ← → bar (⇧ 8 bars) · [ ] transitions · F follow · + − zoom · ⌘Z / ⇧⌘Z undo / redo · ⌘S save.<br>
       <b>Live:</b> Z X C and M , . cue/play/sync · 1–8 hot cues (⇧ deck B) · ← → crossfader.<br>

@@ -592,7 +592,7 @@ fn analysis_ui(ui: &mut Ui, p: &mut Prefs, actions: &mut Vec<SettingsAction>) {
             ui.selectable_value(&mut p.export_stem_quality, q.to_string(), l).on_hover_text(h);
         }
     });
-    hint(ui, "Before a mix is rendered, tracks whose stems are weaker than this are separated again. The better stems are kept for playback too.");
+    hint(ui, "Before a mix is rendered, the parts of its tracks that play stem automation (the stem transitions, ±3 s) are separated in this quality if their stems are weaker; the rest of each track needs no stems. The better parts are kept for playback too.");
     ui.add_space(6.0);
     section(ui, "Library");
     ui.horizontal(|ui| {

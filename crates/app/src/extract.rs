@@ -62,8 +62,8 @@ pub struct Request {
 
 const SR: f64 = clubcraft_core::SAMPLE_RATE as f64;
 
-/// Write the WAV; returns its length in seconds.
-pub fn run(r: &Request) -> Result<f64> {
+/// Write the WAV; returns its length in seconds and the model of the stems it was cut from.
+pub fn run(r: &Request) -> Result<(f64, Option<String>)> {
     if r.t1 <= r.t0 {
         bail!("empty range");
     }
@@ -73,6 +73,7 @@ pub fn run(r: &Request) -> Result<f64> {
     let pre_frames = (r.t0 * SR) as usize - a;
     let b = (r.t1 * SR) as usize;
     let (mut l, mut rr) = (Vec::with_capacity(b - a), Vec::with_capacity(b - a));
+    let mut model = None;
     match r.weights {
         None => {
             let audio = clubcraft_audio::decode_file(&r.audio_path, clubcraft_core::SAMPLE_RATE)?;
@@ -81,11 +82,25 @@ pub fn run(r: &Request) -> Result<f64> {
             rr.extend_from_slice(&audio.right[a.min(b)..b]);
         }
         Some(w) => {
-            let p = clubcraft_core::library::stems_path(&r.hash);
-            if !p.exists() {
-                bail!("this track has no stems yet");
-            }
-            let st = clubcraft_stems::load_stem_track(&p).context("load stems")?;
+            // complete stems, or the parts separated for the mix or an export where they cover
+            // the range: whichever are better
+            let full = clubcraft_core::library::stems_path(&r.hash);
+            let full = if full.exists() { Some(clubcraft_stems::load_stem_track(&full).context("load stems")?) } else { None };
+            let parts = clubcraft_core::library::region_stems_path(&r.hash);
+            let chunk = clubcraft_core::STEM_CHUNK_FRAMES;
+            let parts = parts
+                .exists()
+                .then(|| clubcraft_stems::load_stem_track(&parts).ok())
+                .flatten()
+                .filter(|st| (a / chunk..=(b.min(st.frames).saturating_sub(1)) / chunk).all(|c| st.is_chunk_ready(c)));
+            let rank = |st: &Option<clubcraft_core::StemTrack>| st.as_ref().map_or(0, |s| crate::pipeline::model_rank(&s.model) + 1);
+            let st = match (rank(&parts) > rank(&full), full, parts) {
+                (true, _, Some(p)) => p,
+                (_, Some(f), _) => f,
+                (_, None, Some(p)) => p,
+                (_, None, None) => bail!("this track has no stems yet"),
+            };
+            model = Some(st.model.clone());
             for j in a..b.min(st.frames) {
                 let f = st.frame(j).unwrap_or([0.0; 8]);
                 l.push((0..4).map(|k| w[k] * f[2 * k]).sum());
@@ -129,5 +144,5 @@ pub fn run(r: &Request) -> Result<f64> {
     let mut w = clubcraft_engine::wav::WavSink::create(&r.out, clubcraft_core::SAMPLE_RATE, clubcraft_engine::WavFormat::Pcm24)?;
     w.write(&inter)?;
     w.finish()?;
-    Ok(frames as f64 / SR)
+    Ok((frames as f64 / SR, model))
 }

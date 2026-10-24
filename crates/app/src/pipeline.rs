@@ -71,10 +71,28 @@ pub fn model_rank(model: &str) -> u8 {
     }
 }
 
+/// Model name of the stems a quality makes.
+pub fn quality_model(q: Quality) -> String {
+    if q == Quality::Best {
+        "melroformer+htdemucs_ft".to_string()
+    } else {
+        q.options().model
+    }
+}
+
+/// The quality that makes stems of `model` (the cheapest one, for `htdemucs_ft`).
+fn model_quality(model: &str) -> Option<Quality> {
+    match model {
+        "melroformer+htdemucs_ft" => Some(Quality::Best),
+        "htdemucs_ft" => Some(Quality::High),
+        "htdemucs" => Some(Quality::Fast),
+        _ => None,
+    }
+}
+
 /// Whether stems from `model` are at least as good as `quality` ("fast" | "high" | "best" …).
 pub fn stems_meet(model: Option<&str>, quality: &str) -> bool {
-    let want = Quality::parse(quality).unwrap_or(Quality::Best).options().model;
-    let want = if Quality::parse(quality) == Some(Quality::Best) { "melroformer+htdemucs_ft".to_string() } else { want };
+    let want = quality_model(Quality::parse(quality).unwrap_or(Quality::Best));
     model.is_some_and(|m| model_rank(m) >= model_rank(&want))
 }
 
@@ -97,7 +115,7 @@ pub fn separate(
 ) -> Result<()> {
     let t = lib.track(id)?.context("unknown track")?;
     let q = s.quality();
-    let want = if q == Quality::Best { "melroformer+htdemucs_ft".to_string() } else { q.options().model };
+    let want = quality_model(q);
     let path = stems_path(&t.hash);
     if let Some(m) = cached_stems_model(&t.hash) {
         // Keep existing stems unless they came from a weaker model than requested.
@@ -119,33 +137,51 @@ pub fn separate(
     }
     progress(1.0, "Saving stems");
     clubcraft_stems::save_stems_with_model(&path, &stems, sep.model_name())?;
-    // complete stems replace the parts separated for mix playback
-    let _ = std::fs::remove_file(clubcraft_core::library::region_stems_path(&t.hash));
+    // complete stems replace the parts separated for mix playback, unless those are better (an
+    // export's transitions in Best, the whole track in the playback quality)
+    let regions = clubcraft_core::library::region_stems_path(&t.hash);
+    let region_model = clubcraft_stems::read_model_name(&regions).ok().flatten();
+    if region_model.is_none_or(|m| model_rank(&m) <= model_rank(sep.model_name())) {
+        let _ = std::fs::remove_file(regions);
+    }
     Ok(())
 }
 
 /// Margin around each region (s): the stretcher reads ahead, and curves are edited at the edges.
 const REGION_MARGIN: f64 = 3.0;
 
-/// Stems for parts of a track only (`regions` in track seconds), at the Fast quality: what mix
-/// playback needs for stem transitions, ready in seconds instead of minutes (complete, Best stems
-/// are separated for export). Added to the track's partial stem file
-/// ([`clubcraft_core::library::region_stems_path`]); a track with complete stems is left alone.
-/// Returns whether new stems were saved.
+/// Stems for parts of a track only (`regions` in track seconds): what its stem transitions need.
+/// `quality` `None` is for mix playback: the Fast quality, ready in seconds instead of minutes,
+/// and nothing to do when the track has complete stems. `Some` is for an export: only the
+/// transitions are separated in the export quality, not whole tracks (a Best export of a mix
+/// with 16-bar transitions separates a fraction of each track), and complete stems are only
+/// enough when they are that good. Added to the track's partial stem file
+/// ([`clubcraft_core::library::region_stems_path`]); never replaced by weaker stems, so a
+/// playback request on a track with Best parts separates in Best. Returns whether new stems
+/// were saved.
 pub fn separate_regions(
     lib: &Library,
     ctx: &mut WorkerContext,
     id: TrackId,
     regions: &[(f64, f64)],
+    quality: Option<Quality>,
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(f32, &str),
 ) -> Result<bool> {
     use clubcraft_core::STEM_CHUNK_FRAMES as CHUNK;
     let t = lib.track(id)?.context("unknown track")?;
-    if cached_stems_model(&t.hash).is_some() {
-        return Ok(false);
+    let q = quality.unwrap_or(Quality::Fast);
+    if let Some(m) = cached_stems_model(&t.hash) {
+        if quality.is_none() || model_rank(&m) >= model_rank(&quality_model(q)) {
+            return Ok(false);
+        }
     }
     let path = clubcraft_core::library::region_stems_path(&t.hash);
+    let earlier = clubcraft_stems::read_model_name(&path).ok().flatten();
+    let q = match earlier.as_deref().and_then(model_quality) {
+        Some(e) if model_rank(&quality_model(e)) > model_rank(&quality_model(q)) => e,
+        _ => q,
+    };
     progress(0.0, "Decoding");
     let audio = clubcraft_audio::decode_file(&t.path, clubcraft_core::SAMPLE_RATE)?;
     let n = audio.frames();
@@ -156,8 +192,12 @@ pub fn separate_regions(
     let chunk_of = |sec: f64| ((sec.max(0.0) * clubcraft_core::SAMPLE_RATE as f64) as usize / CHUNK).min(last);
     let wanted: Vec<(usize, usize)> = regions.iter().map(|&(a, b)| (chunk_of(a - REGION_MARGIN), chunk_of(b + REGION_MARGIN))).filter(|(a, b)| a <= b).collect();
     progress(0.0, "Loading models");
-    let sep = ctx.separator(Quality::Fast)?;
+    let sep = ctx.separator(q)?;
     let model = sep.model_name().to_string();
+    // no GPU, so the Fast model: it must not replace better parts made elsewhere
+    if earlier.as_deref().is_some_and(|e| model_rank(e) > model_rank(&model)) {
+        return Ok(false);
+    }
     // extend an earlier partial file of the same model
     let st = match path.exists().then(|| clubcraft_stems::load_stem_track(&path).ok()).flatten() {
         Some(e) if e.frames == n && e.model == model => e,
