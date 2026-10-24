@@ -262,13 +262,13 @@ Your library, stems, waveforms, exports and recordings live in `~/Music/ClubCraf
 
 ## Downloads
 
-**[Latest release: v0.3.2](../../releases/tag/v0.3.2)**
+**[Latest release: v0.3.3](../../releases/tag/v0.3.3)**
 
 | Platform | File | Notes |
 |---|---|---|
-| macOS 13+ (Apple Silicon) | `ClubCraft-0.3.2-macos-arm64.dmg` | All CoreML stem models and the COCOLA mashup model bundled. Ad-hoc signed: right-click › Open the first time |
-| Windows 10/11 (x64) | `ClubCraft-0.3.2-windows-x64.zip` | `ClubCraft.exe`, `DirectML.dll`, the ONNX stem models and the COCOLA mashup model |
-| Linux (x64, glibc 2.35+) | `ClubCraft-0.3.2-linux-x64.tar.gz` | X11 or Wayland, ALSA (PipeWire and PulseAudio through their ALSA plugins), the ONNX stem models and the COCOLA mashup model. Separation runs on the CPU |
+| macOS 13+ (Apple Silicon) | `ClubCraft-0.3.3-macos-arm64.dmg` | All CoreML stem models and the COCOLA mashup model bundled. Ad-hoc signed: right-click › Open the first time |
+| Windows 10/11 (x64) | `ClubCraft-0.3.3-windows-x64.zip` | `ClubCraft.exe`, `DirectML.dll`, the ONNX stem models and the COCOLA mashup model |
+| Linux (x64, glibc 2.35+) | `ClubCraft-0.3.3-linux-x64.tar.gz` | X11 or Wayland, ALSA (PipeWire and PulseAudio through their ALSA plugins), the ONNX stem models and the COCOLA mashup model. Separation runs on the CPU |
 
 Development builds: `tools/bundle-macos.sh` (macOS), and the `ClubCraft-windows-x64` and `ClubCraft-linux-x64` artifacts of every [CI run](../../actions) (without models).
 
