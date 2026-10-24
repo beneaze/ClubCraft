@@ -84,7 +84,12 @@ pub fn paint_wave(p: &Painter, rect: Rect, w: &WaveParams, t0: f64, t1: f64, mir
     let mut mesh = Mesh::default();
     let stems = if w.style == WaveStyle::Stems { wf.stems.as_ref() } else { None };
     let wp_gains = w.stem_gains;
-    for c in 0..cols {
+    // only the columns the painter shows: zoomed in, a clip is many screens wide (on the same
+    // column grid as the whole rect, so scrolling doesn't make the columns shimmer)
+    let clip = p.clip_rect();
+    let first = ((clip.left() - rect.left()) / col_w).floor().max(0.0) as usize;
+    let last = (((clip.right() - rect.left()) / col_w).ceil().max(0.0) as usize + 1).min(cols);
+    for c in first..last {
         let ta = t0 + c as f64 * spp;
         let tb = ta + spp;
         if tb < 0.0 || ta > wf.duration() {

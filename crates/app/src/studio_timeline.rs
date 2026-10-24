@@ -140,6 +140,11 @@ fn snap_step(px_per_beat: f32) -> f64 {
     [0.0625, 0.125, 0.25, 0.5].into_iter().find(|s| *s as f32 * px_per_beat >= 8.0).unwrap_or(1.0)
 }
 
+/// The same, for sliding a track: bars when zoomed out.
+fn track_snap_step(px_per_beat: f32) -> f64 {
+    [0.0625, 0.125, 0.25, 0.5, 1.0, 2.0].into_iter().find(|s| *s as f32 * px_per_beat >= 8.0).unwrap_or(4.0)
+}
+
 /// A selected time range of one track (mix beats), for extracting stems / samples.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct RangeSel {
@@ -554,9 +559,13 @@ impl StudioView {
             }
             if cr.dragged() && self.drag == Some(Drag::Clip(i)) {
                 self.drag_acc += cr.drag_delta().x;
-                if let Some(bars) = self.take_bars(i) {
+                // bars when zoomed out, down to 1/16 beats when zoomed in; Shift: free
+                let free = ui.input(|inp| inp.modifiers.shift);
+                let beat_px = self.timeline.tracks[i].grid.beat_len() as f32 * self.zoom;
+                if let Some(beats) = self.take_beats(i, if free { 0.0 } else { track_snap_step(beat_px) as f32 }) {
+                    let beat_len = self.timeline.tracks[i].grid.beat_len();
                     let mt = &mut self.mix.tracks[i];
-                    let new_in = (mt.mix_in - bars as f64 * bar_len).max(0.0);
+                    let new_in = (mt.mix_in - beats as f64 * beat_len).max(0.0);
                     if new_in < mt.mix_out - bar_len * 2.0 {
                         mt.mix_in = new_in;
                         self.changed();
@@ -569,7 +578,7 @@ impl StudioView {
             cr.on_hover_text(if in_locked {
                 "Click to edit · drag on the waveform to select a range (right-click to extract) · the transition into this track is locked"
             } else {
-                "Drag the title bar to slide the track · drag on the waveform to select a range, then right-click to switch stems off in it or extract them · click to edit"
+                "Drag the title bar to slide the track (by bars, finer when zoomed in; Shift: free) · drag on the waveform to select a range, then right-click to switch stems off in it or extract them · click to edit"
             });
         }
 
@@ -630,9 +639,10 @@ impl StudioView {
             }
             if chip_r.dragged() && self.drag == Some(Drag::TransitionMove(k)) {
                 self.drag_acc += chip_r.drag_delta().x;
-                // a beat (a quarter bar) per step; Shift: quarter beats
-                let fine = ui.input(|i| i.modifiers.shift);
-                if let Some(n) = self.take_beats(k, if fine { 0.25 } else { 1.0 }) {
+                // by beats, finer when zoomed in (down to 1/16 beats); Shift: free
+                let free = ui.input(|i| i.modifiers.shift);
+                let beat_px = self.timeline.tracks.get(k).map_or(1.0, |t| t.grid.beat_len() as f32 * self.zoom);
+                if let Some(n) = self.take_beats(k, if free { 0.0 } else { snap_step(beat_px) as f32 }) {
                     self.move_transition(k, n);
                 }
             }
@@ -658,9 +668,9 @@ impl StudioView {
             chip_r.on_hover_text(if locked {
                 "Locked: unlock it in the transition editor to move it"
             } else if imitated {
-                "Drag to move by beats (Shift: quarter beats) · drag an edge to change the length · click to edit. One of the tracks has no stems yet: its stem curves are imitated with volume and EQ."
+                "Drag to move by beats, finer when zoomed in (Shift: free) · drag an edge to change the length · click to edit. One of the tracks has no stems yet: its stem curves are imitated with volume and EQ."
             } else {
-                "Drag to move by beats (Shift: quarter beats) · drag an edge to change the length · click to edit"
+                "Drag to move by beats, finer when zoomed in (Shift: free) · drag an edge to change the length · click to edit"
             });
             // edges
             for (end, xx) in [(false, xs), (true, xe)] {
@@ -1053,11 +1063,17 @@ impl StudioView {
         }
     }
 
-    /// Convert accumulated drag pixels into steps of `per` beats at the tempo of track `i`;
-    /// returns the number of beats.
+    /// Convert accumulated drag pixels into steps of `per` beats at the tempo of track `i`
+    /// (`per` 0: as far as the pointer went); returns the number of beats.
     fn take_beats(&mut self, i: usize, per: f32) -> Option<f32> {
         let tt = self.timeline.tracks.get(i)?;
-        let px = (tt.grid.beat_len() as f32 * per * self.zoom).max(1.0);
+        let beat_px = (tt.grid.beat_len() as f32 * self.zoom).max(1e-3);
+        if per <= 0.0 {
+            let b = self.drag_acc / beat_px;
+            self.drag_acc = 0.0;
+            return (b != 0.0).then_some(b);
+        }
+        let px = (beat_px * per).max(1.0);
         let steps = (self.drag_acc / px).trunc();
         if steps != 0.0 {
             self.drag_acc -= steps * px;
@@ -1115,19 +1131,6 @@ impl StudioView {
         }
         t.beats = nb as u32;
         self.changed();
-    }
-
-    /// Convert accumulated drag pixels into whole bars at the tempo of track `i`.
-    fn take_bars(&mut self, i: usize) -> Option<i32> {
-        let tt = self.timeline.tracks.get(i)?;
-        let px_per_bar = (tt.grid.bar_len() as f32 * self.zoom).max(1.0);
-        let bars = (self.drag_acc / px_per_bar).trunc() as i32;
-        if bars != 0 {
-            self.drag_acc -= bars as f32 * px_per_bar;
-            Some(bars)
-        } else {
-            None
-        }
     }
 
     /// Lane header with a small mixer. Returns true if the lane settings changed.
@@ -2199,6 +2202,28 @@ fn eq_db_text(v: f32) -> String {
 mod tests {
     use super::*;
     use clubcraft_core::{Mode, TransitionStyle};
+
+    #[test]
+    fn drags_snap_finer_when_zoomed_in() {
+        let t = |id| clubcraft_core::MixTrack { track_id: id, mix_in: 0.0, mix_out: 60.0, key_shift: 0, gain_db: 0.0, stems: Vec::new() };
+        let mut s = StudioView::default();
+        s.set_mix(clubcraft_core::Mix { tracks: vec![t(1), t(2)], transitions: vec![Transition::new(TransitionStyle::StemBlend, 32)], ..Default::default() });
+        s.timeline = clubcraft_core::MixTimeline::build(&s.mix, &|_| None); // 120 BPM: a beat = 0.5 s
+        // 200 px/s: a beat is 100 px, the grid an eighth beat (12.5 px)
+        s.zoom = 200.0;
+        assert_eq!(snap_step(100.0), 0.125);
+        s.drag_acc = 30.0;
+        assert_eq!(s.take_beats(0, 0.125), Some(0.25));
+        assert!((s.drag_acc - 5.0).abs() < 1e-4, "the rest waits for the next step");
+        // free: as far as the pointer went
+        s.drag_acc = 30.0;
+        assert!((s.take_beats(0, 0.0).unwrap() - 0.3).abs() < 1e-6);
+        // zoomed out a track slides by bars
+        assert_eq!(track_snap_step(1.0), 4.0);
+        let before = s.mix.tracks[0].mix_out;
+        s.move_transition(0, 0.25);
+        assert!((s.mix.tracks[0].mix_out - before - 0.125).abs() < 1e-9);
+    }
 
     #[test]
     fn a_swap_moves_on_both_tracks() {
