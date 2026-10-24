@@ -4,7 +4,7 @@
 //! * **eager** ([`MixPlayer::new`]): every track is loaded up front and stays resident. Simple,
 //!   fine for short mixes or when the caller holds the tracks anyway.
 //! * **lazy** ([`MixPlayer::lazy`]): only metadata is held. Call [`MixPlayer::poll`] every UI
-//!   frame with a loader; it prefetches, on a background thread, the tracks of the residency
+//!   frame with a loader; it prefetches, on background threads, the tracks of the residency
 //!   window (the current track(s) plus the next, by mix time — see
 //!   [`crate::conductor::window_at`]) and hands them to the audio thread with
 //!   [`Command::MixTrackReady`]. The audio thread releases tracks that left the window (the
@@ -49,7 +49,8 @@ impl CommandSink for EngineCore {
     }
 }
 
-/// Loads a track's audio + stems (decode, stem cache ...). Called on the prefetch thread.
+/// Loads a track's audio + stems (decode, stem cache ...). Called on the prefetch threads,
+/// possibly for several tracks at once.
 pub type TrackLoader = Arc<dyn Fn(TrackId) -> Option<Arc<LoadedTrack>> + Send + Sync>;
 
 /// What [`MixPlayer::poll`] did / sees.
@@ -57,7 +58,7 @@ pub type TrackLoader = Arc<dyn Fn(TrackId) -> Option<Arc<LoadedTrack>> + Send + 
 pub struct PrefetchStatus {
     /// Mix tracks that should be resident now.
     pub wanted: Range<usize>,
-    /// Mix tracks being loaded on the prefetch thread.
+    /// Mix tracks being loaded on the prefetch threads.
     pub loading: Vec<usize>,
     /// Mix tracks handed to the audio thread during this poll.
     pub delivered: Vec<usize>,
@@ -83,37 +84,42 @@ struct Prefetcher {
     done: crossbeam_channel::Receiver<Done>,
     /// Track ids still wanted (jobs for others are skipped).
     want: Arc<Mutex<Vec<TrackId>>>,
-    thread: Option<std::thread::JoinHandle<()>>,
 }
+
+/// Loads that run at once. A load can't be cancelled: after a seek the tracks of the old
+/// position may still be loading, and the new one must not wait behind them (a second or more).
+const PREFETCH_WORKERS: usize = crate::conductor::MIX_WINDOW + 1;
 
 impl Prefetcher {
     fn new() -> Result<Self> {
         let (jt, jr) = crossbeam_channel::unbounded::<Job>();
         let (dt, dr) = crossbeam_channel::unbounded::<Done>();
         let want: Arc<Mutex<Vec<TrackId>>> = Arc::new(Mutex::new(Vec::new()));
-        let w = want.clone();
-        let thread = std::thread::Builder::new().name("clubcraft-mix-prefetch".into()).spawn(move || {
-            while let Ok(job) = jr.recv() {
-                if !w.lock().contains(&job.id) {
-                    let _ = dt.send(Done { id: job.id, track: None, skipped: true });
-                    continue;
+        for n in 0..PREFETCH_WORKERS {
+            let (jr, dt, w) = (jr.clone(), dt.clone(), want.clone());
+            // the threads end when the player drops the job channel, after their current job
+            let spawned = std::thread::Builder::new().name("clubcraft-mix-prefetch".into()).spawn(move || {
+                while let Ok(job) = jr.recv() {
+                    if !w.lock().contains(&job.id) {
+                        let _ = dt.send(Done { id: job.id, track: None, skipped: true });
+                        continue;
+                    }
+                    let track = (job.loader)(job.id);
+                    if dt.send(Done { id: job.id, track, skipped: false }).is_err() {
+                        break;
+                    }
                 }
-                let track = (job.loader)(job.id);
-                if dt.send(Done { id: job.id, track, skipped: false }).is_err() {
-                    break;
+            });
+            // fewer workers only make loads wait longer; without any nothing would load
+            if let Err(e) = spawned {
+                if n == 0 {
+                    return Err(e.into());
                 }
+                log::warn!("mix prefetch thread: {e}");
+                break;
             }
-        })?;
-        Ok(Prefetcher { jobs: jt, done: dr, want, thread: Some(thread) })
-    }
-}
-
-impl Drop for Prefetcher {
-    fn drop(&mut self) {
-        // closing the job channel ends the thread after its current job; don't block the UI
-        let (dummy, _) = crossbeam_channel::unbounded();
-        drop(std::mem::replace(&mut self.jobs, dummy));
-        drop(self.thread.take());
+        }
+        Ok(Prefetcher { jobs: jt, done: dr, want })
     }
 }
 

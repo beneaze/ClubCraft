@@ -789,7 +789,10 @@ fn mix_player_prefetches_lazily_and_seeks() {
     let st = core.snapshot();
     assert_eq!(st.mix.resident_count(), 3);
     assert!((0..3).all(|i| st.mix.is_resident(i)));
-    assert_eq!(*calls.lock(), vec![1, 2, 3]);
+    // loaded side by side, so in any order
+    let mut loaded = calls.lock().clone();
+    loaded.sort();
+    assert_eq!(loaded, vec![1, 2, 3]);
     // seek into track 5 (index 4): the old window is released, the new one prefetched
     let x = &player.timeline().transitions[3];
     let target = x.end_sec + 2.0; // track index 4 alone
@@ -819,7 +822,9 @@ fn mix_player_prefetches_lazily_and_seeks() {
     }
     let calls_now = calls.lock().clone();
     eprintln!("prefetch calls {calls_now:?}, max alive {max_alive}");
-    assert_eq!(&calls_now[..3], &[1, 2, 3]);
+    let mut head = calls_now[..3].to_vec();
+    head.sort();
+    assert_eq!(head, vec![1, 2, 3]);
     let mut tail = calls_now[3..].to_vec();
     tail.sort();
     assert_eq!(tail, vec![5, 6], "only the new window was loaded");
@@ -979,6 +984,43 @@ fn mix_clock_gives_up_waiting_for_audio_that_never_comes() {
     run_blocks(&mut core, (6 * SR as usize) / 512);
     let st = core.snapshot();
     assert!(st.mix.time > 0.5, "the clock moves on (t = {})", st.mix.time);
+}
+
+#[test]
+fn seek_target_loads_while_the_old_position_is_still_loading() {
+    let mut core = EngineCore::new(SR, 2);
+    let mut player = MixPlayer::lazy(&six_track_mix(), &meta, [0, 1]);
+    // the tracks at the start are slow to load (a long decode), the others quick
+    let loader: TrackLoader = Arc::new(|id| {
+        if id <= 3 {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+        }
+        Some(synth_track(id))
+    });
+    let step = |core: &mut EngineCore, player: &mut MixPlayer| {
+        let (mut m, mut c) = (vec![0f32; 512 * 2], vec![0f32; 512 * 2]);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        core.process(&mut m, &mut c);
+        let st = core.snapshot();
+        player.poll(core, &st, &loader).unwrap();
+        st
+    };
+    player.play(&mut core, 0.0).unwrap();
+    for _ in 0..50 {
+        step(&mut core, &mut player);
+    }
+    // jump to where the fifth track plays alone, while the first ones are still loading
+    let tl = player.timeline().clone();
+    let t = (tl.tracks[4].start_sec + tl.tracks[5].start_sec) / 2.0;
+    assert_eq!(player.wanted(t).start, 4);
+    player.seek(&mut core, t).unwrap();
+    let started = std::time::Instant::now();
+    while !core.snapshot().mix.is_resident(4) && started.elapsed() < std::time::Duration::from_secs(3) {
+        step(&mut core, &mut player);
+    }
+    let waited = started.elapsed();
+    assert!(core.snapshot().mix.is_resident(4), "the target track arrives");
+    assert!(waited < std::time::Duration::from_millis(700), "it doesn't wait for the old position's loads ({waited:?})");
 }
 
 #[test]

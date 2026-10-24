@@ -37,6 +37,18 @@ pub struct TrackCache {
     inner: Arc<Mutex<HashMap<TrackId, Arc<LoadedTrack>>>>,
     /// Tracks [`Self::warm`] is loading, or failed to load (not tried again).
     warming: Arc<Mutex<std::collections::HashSet<TrackId>>>,
+    /// Tracks [`Self::load`] is decoding; another load of the same track waits for that one.
+    loading: Arc<(Mutex<std::collections::HashSet<TrackId>>, parking_lot::Condvar)>,
+}
+
+/// Marks a track as being loaded until dropped.
+struct Loading<'a>(&'a (Mutex<std::collections::HashSet<TrackId>>, parking_lot::Condvar), TrackId);
+
+impl Drop for Loading<'_> {
+    fn drop(&mut self) {
+        self.0 .0.lock().remove(&self.1);
+        self.0 .1.notify_all();
+    }
 }
 
 impl TrackCache {
@@ -107,11 +119,26 @@ impl TrackCache {
 
     /// Load (decode, stems, analysis) a track; cached. Analyses the track first if needed.
     pub fn load(&self, id: TrackId, live_sep: Option<&LiveSeparator>) -> Result<Arc<LoadedTrack>> {
-        if let Some(t) = self.get(id) {
+        let cached = || {
             // a deck separates the whole track: stems for a mix's transitions only don't do
-            if t.stems.as_ref().is_some_and(|s| !is_region_stems(s)) || live_sep.is_none() {
-                return Ok(t);
+            self.get(id).filter(|t| t.stems.as_ref().is_some_and(|s| !is_region_stems(s)) || live_sep.is_none())
+        };
+        if let Some(t) = cached() {
+            return Ok(t);
+        }
+        // One decode per track: the studio's warm-up, the preview's prefetch and a deck can ask
+        // for it at the same time, and two decodes would each take longer than one.
+        let _loading = {
+            let (set, done) = &*self.loading;
+            let mut set = set.lock();
+            while set.contains(&id) {
+                done.wait(&mut set);
             }
+            set.insert(id);
+            Loading(&self.loading, id)
+        };
+        if let Some(t) = cached() {
+            return Ok(t);
         }
         let lib = Library::open_default()?;
         let t = lib.track(id)?.context("unknown track")?;
