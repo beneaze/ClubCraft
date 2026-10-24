@@ -145,6 +145,8 @@ pub struct StudioView {
     pub lane_show: [crate::studio_timeline::ShowMode; clubcraft_core::MIX_LANES],
     /// What the timeline draws and edits inside the selected transition.
     pub curve_target: crate::studio_timeline::CurveTarget,
+    /// What it draws and edits on the selected sample clip (never the stems).
+    pub sample_target: crate::studio_timeline::CurveTarget,
     /// Curves of stem rows switched off in the timeline, to bring back when switched on again:
     /// (transition, incoming side, stem index).
     pub stem_stash: std::collections::HashMap<(usize, bool, usize), clubcraft_core::Lane>,
@@ -232,6 +234,7 @@ impl Default for StudioView {
             edited: false,
             lane_show: Default::default(),
             curve_target: Default::default(),
+            sample_target: crate::studio_timeline::CurveTarget::Volume,
             stem_stash: Default::default(),
             fx_shown: Default::default(),
             fx_expanded: false,

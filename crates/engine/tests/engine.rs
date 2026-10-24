@@ -1250,3 +1250,37 @@ fn transition_effects_fall_silent_on_pause() {
         assert!(peak < 1e-3, "{param:?} {mode:?} still sounds at {peak} while paused");
     }
 }
+
+#[test]
+fn sample_clip_curves_shape_its_lane() {
+    // a 4 s, 1 kHz sample on sample lane 1 at mix beat 8 (4 s at 120 BPM); the decks are muted
+    let dir = std::env::temp_dir().join(format!("clubcraft-sample-curves-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("tone.wav");
+    let tone = sine(1000.0, 4.0, 0.3);
+    let mut w = wav::WavSink::create(&path, SR, WavFormat::Float32).unwrap();
+    w.write(&tone.iter().flat_map(|v| [*v, *v]).collect::<Vec<_>>()).unwrap();
+    w.finish().unwrap();
+    let a = sine(440.0, 40.0, 0.3);
+    let tr = |_id: i64| Some(track(&a, 120.0, 0.0));
+    let mut lanes = [clubcraft_core::LaneSettings::default(); 2];
+    lanes[0].mute = true;
+    lanes[1].mute = true;
+    let mut mix = lane_mix(TransitionStyle::Crossfade, lanes);
+    let mut clip = clubcraft_core::SampleClip::new(0, path.clone(), 8.0);
+    // full for 2 beats (1 s), then off from beat 4 (2 s in)
+    clip.curves.push(clubcraft_core::Lane::new(clubcraft_core::Side::Out, clubcraft_core::Param::Volume, &[(0.0, 1.0), (2.0, 1.0), (4.0, 0.0)]));
+    mix.samples.push(clip.clone());
+    let (out, _) = render_mix_to_vec(&mix, &|id| tr(id).map(|t| t.analysis()), &tr, &no_limiter()).unwrap();
+    let (full, gone) = (rms(&out, 4.1, 4.9), rms(&out, 6.2, 7.8));
+    // and a low-pass all the way down over the whole clip instead
+    clip.curves = vec![clubcraft_core::Lane::new(clubcraft_core::Side::Out, clubcraft_core::Param::Filter, &[(0.0, 0.0)])];
+    mix.samples = vec![clip];
+    let (out, _) = render_mix_to_vec(&mix, &|id| tr(id).map(|t| t.analysis()), &tr, &no_limiter()).unwrap();
+    let filtered = rms(&out, 4.5, 7.5);
+    let _ = std::fs::remove_dir_all(&dir);
+    eprintln!("sample rms: full {full:.4}, after the volume curve {gone:.2e}, low-passed {filtered:.4}");
+    assert!(full > 0.18, "sample audible at full volume: {full}");
+    assert!(gone < 1e-4, "volume curve at 0 silences it: {gone}");
+    assert!(filtered < full * 0.3, "filter curve low-passes it: {filtered}");
+}

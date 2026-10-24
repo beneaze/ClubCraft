@@ -200,6 +200,12 @@ impl StudioView {
         // Collapsed lanes are a slim row (clip titles only); expanded lanes share the rest.
         const COLLAPSED_H: f32 = 30.0;
         const SAMPLE_H: f32 = 58.0;
+        // a selected clip shows its curves: room for the effect rows
+        const SAMPLE_EDIT_H: f32 = 150.0;
+        let edit_lane = match self.selection {
+            Selection::Sample(j) => self.mix.samples.get(j).map(|c| c.lane as usize),
+            _ => None,
+        };
         let n_open = (0..MIX_LANES).filter(|l| !self.lane_collapsed[*l]).count().max(1) as f32;
         let n_closed = MIX_LANES as f32 - (0..MIX_LANES).filter(|l| !self.lane_collapsed[*l]).count() as f32;
         // editing a transition's stems needs room for four rows per track: the tempo and sample
@@ -215,7 +221,11 @@ impl StudioView {
         let layout = |squeeze: bool| {
             let tempo_h = if self.tempo_open && !squeeze { 58.0 } else { 24.0 };
             // empty sample lanes stay slim (they still take dropped files)
-            let sample_hs: [f32; SAMPLE_LANES] = std::array::from_fn(|l| if self.sample_open[l] && !squeeze && self.mix.samples.iter().any(|c| c.lane as usize == l) { SAMPLE_H } else { COLLAPSED_H });
+            let sample_hs: [f32; SAMPLE_LANES] = std::array::from_fn(|l| match (self.sample_open[l] && self.mix.samples.iter().any(|c| c.lane as usize == l), squeeze) {
+                (true, _) if edit_lane == Some(l) => SAMPLE_EDIT_H,
+                (true, false) => SAMPLE_H,
+                _ => COLLAPSED_H,
+            });
             let samples_h: f32 = sample_hs.iter().map(|h| h + 2.0).sum();
             let open = (full.height() - ruler_h - 21.0 - tempo_h - 8.0 - samples_h - n_closed * (COLLAPSED_H + 2.0)) / n_open;
             (tempo_h, sample_hs, open)
@@ -885,8 +895,10 @@ impl StudioView {
                             fmt,
                             fmt_x: &fmt_x,
                         };
-                        if crate::curve_edit::curve_ui(ui, Id::new(("tfx", k, side == Side::In, param.label())), &c, &mut lane) {
+                        let e = crate::curve_edit::curve_ui(ui, Id::new(("tfx", k, side == Side::In, param.label())), &c, &mut lane);
+                        if e.changed {
                             set_lane(&mut self.mix.transitions[k], lane);
+                            follow_switch(&mut self.mix.transitions[k], side, param, e.slid);
                             changed = true;
                         }
                         if rr.height() >= 11.0 && area.width() > 60.0 {
@@ -920,8 +932,10 @@ impl StudioView {
                             fmt: &pct,
                             fmt_x: &fmt_x,
                         };
-                        if crate::curve_edit::curve_ui(ui, Id::new(("tcurve", k, side == Side::In, row)), &c, &mut lane) {
+                        let e = crate::curve_edit::curve_ui(ui, Id::new(("tcurve", k, side == Side::In, row)), &c, &mut lane);
+                        if e.changed {
                             set_lane(&mut self.mix.transitions[k], lane);
+                            follow_switch(&mut self.mix.transitions[k], side, Param::Stem(stem), e.slid);
                             changed = true;
                         }
                         // on / off per stem and side (DJ.Studio's stem toggles), outside the window
@@ -984,8 +998,10 @@ impl StudioView {
                         fmt,
                         fmt_x: &fmt_x,
                     };
-                    if crate::curve_edit::curve_ui(ui, Id::new(("tcurve", k, side == Side::In, 9)), &c, &mut lane) {
+                    let e = crate::curve_edit::curve_ui(ui, Id::new(("tcurve", k, side == Side::In, 9)), &c, &mut lane);
+                    if e.changed {
                         set_lane(&mut self.mix.transitions[k], lane);
+                        follow_switch(&mut self.mix.transitions[k], side, param, e.slid);
                         changed = true;
                     }
                 }
@@ -1656,8 +1672,11 @@ impl StudioView {
                     }
                 }
             }
-            // the edges trim the clip or extend it (looping the file); added after the body so
-            // they win the pointer where they overlap it
+            if self.selection == Selection::Sample(j) {
+                edited |= self.edit_sample_curves(ui, j, r, canvas, x_of);
+            }
+            // the edges cut the clip or extend it; added after the body and the curves so they
+            // win the pointer where they overlap them
             let hw = (r.width() / 3.0).min(6.0);
             for left in [true, false] {
                 let er = if left { Rect::from_min_max(r.min, pos2(r.left() + hw, r.bottom())) } else { Rect::from_min_max(pos2(r.right() - hw, r.top()), r.max) };
@@ -1690,6 +1709,13 @@ impl StudioView {
                         let clip = &mut self.mix.samples[j];
                         let (start, offset, len) = trim_sample(&self.timeline, clip, file_dur, left, snapped);
                         if (start - clip.start_beat).abs() > 1e-9 || (offset - clip.offset).abs() > 1e-9 || len != clip.length {
+                            // the curves stay with the music
+                            let shift = (clip.start_beat - start) as f32;
+                            for l in &mut clip.curves {
+                                for pt in &mut l.points {
+                                    pt.0 += shift;
+                                }
+                            }
                             (clip.start_beat, clip.offset, clip.length) = (start, offset, len);
                             edited = true;
                         }
@@ -1742,6 +1768,94 @@ impl StudioView {
         if let Some(j) = remove {
             self.remove_sample(j);
         }
+    }
+
+    /// The curves of selected sample clip `j` (drawn in `r`) and the selector of which ones, like a
+    /// transition's. Returns whether they changed.
+    fn edit_sample_curves(&mut self, ui: &mut Ui, j: usize, r: Rect, canvas: Rect, x_of: &dyn Fn(f64) -> f32) -> bool {
+        // under the clip's name
+        let area = Rect::from_min_max(pos2(r.left(), r.top() + 16.0), pos2(r.right(), r.bottom() - 2.0)).intersect(canvas);
+        if area.width() < 8.0 || area.height() < 40.0 {
+            return false;
+        }
+        let Some(c) = self.mix.samples.get(j).cloned() else { return false };
+        let tl = self.timeline.clone();
+        let (zoom, origin) = (self.zoom, x_of(0.0));
+        let beats = (tl.beat_at_sec(tl.sec_at_beat(c.start_beat) + ((r.right() - r.left()) / zoom) as f64) - c.start_beat).max(0.01) as f32;
+        let to_x = |b: f32| x_of(tl.sec_at_beat(c.start_beat + b as f64));
+        let from_x = |px: f32| (tl.beat_at_sec((((px - origin) / zoom) as f64).max(0.0)) - c.start_beat) as f32;
+        let beat_px = ((tl.sec_at_beat(c.start_beat + 1.0) - tl.sec_at_beat(c.start_beat)) as f32 * zoom).max(0.1);
+        let grid = if beat_px > 48.0 { 0.25 } else if beat_px > 12.0 { 1.0 } else { 4.0 };
+        let fmt_x = |b: f32| format!("beat {:.2}", b + 1.0);
+        let target = if self.sample_target == CurveTarget::Stems { CurveTarget::Volume } else { self.sample_target };
+        let rows: Vec<(Param, &str, Color32)> = match target.param() {
+            Some(p) => vec![(p, target.label(), target.color())],
+            None => FX_ROWS.to_vec(),
+        };
+        let painter = ui.painter_at(canvas);
+        let mut changed = false;
+        let rh = area.height() / rows.len() as f32;
+        for (row, (param, name, col)) in rows.iter().copied().enumerate() {
+            let rr = Rect::from_min_size(pos2(area.left(), area.top() + row as f32 * rh), vec2(area.width(), rh - 1.0));
+            let mut lane = c.curves.iter().find(|l| l.param == param).cloned().unwrap_or_else(|| Lane::new(Side::Out, param, &[]));
+            let used = lane.points.iter().any(|q| (q.1 - param.neutral()).abs() > 1e-3);
+            if rows.len() > 1 {
+                painter.rect_filled(rr, 0.0, theme::blend(theme::PANEL, col, if used { 0.22 } else { 0.08 }).gamma_multiply(0.85));
+            }
+            let fmt: &dyn Fn(f32) -> String = match param {
+                Param::Filter => &filter_text,
+                Param::EqLow | Param::EqMid | Param::EqHigh => &eq_knob_text,
+                Param::Loop => &loop_text,
+                _ => &pct_text,
+            };
+            let cv = crate::curve_edit::Curve {
+                rect: rr.shrink2(vec2(0.0, 2.0)),
+                x0: 0.0,
+                x1: beats,
+                to_x: &to_x,
+                from_x: &from_x,
+                grid,
+                neutral: param.neutral(),
+                centered: matches!(param, Param::EqLow | Param::EqMid | Param::EqHigh | Param::Filter),
+                color: col,
+                editable: true,
+                fmt,
+                fmt_x: &fmt_x,
+            };
+            if crate::curve_edit::curve_ui(ui, Id::new(("scurve", j, param.label())), &cv, &mut lane).changed {
+                let curves = &mut self.mix.samples[j].curves;
+                match curves.iter_mut().find(|l| l.param == param) {
+                    Some(l) => *l = lane,
+                    None => curves.push(lane),
+                }
+                changed = true;
+            }
+            if rows.len() > 1 && rr.height() >= 11.0 && area.width() > 60.0 {
+                painter.text(pos2(rr.left() + 4.0, rr.center().y), egui::Align2::LEFT_CENTER, name, egui::FontId::proportional((rr.height() * 0.6).clamp(8.0, 11.0)), if used { col } else { col.gamma_multiply(0.55) });
+            }
+        }
+        // the selector, in the clip's title row at its right end (kept on screen)
+        let targets = [CurveTarget::Volume, CurveTarget::EqLow, CurveTarget::EqMid, CurveTarget::EqHigh, CurveTarget::Effects];
+        let seg = 44.0;
+        let w = seg * targets.len() as f32;
+        let right = r.right().min(canvas.right()) - 4.0;
+        let bar = Rect::from_min_max(pos2((right - w).max(canvas.left() + 2.0), r.top() + 1.0), pos2((right - w).max(canvas.left() + 2.0) + w, r.top() + 16.0));
+        painter.rect_filled(bar, 5.0, Color32::from_black_alpha(215));
+        for (k, t) in targets.into_iter().enumerate() {
+            let sr = Rect::from_min_size(pos2(bar.left() + k as f32 * seg, bar.top()), vec2(seg, bar.height())).shrink(1.0);
+            let resp = ui.interact(sr, Id::new(("starget", k)), Sense::click());
+            let on = target == t;
+            if on {
+                painter.rect_filled(sr, 4.0, theme::SEG_ON);
+            } else if resp.hovered() {
+                painter.rect_filled(sr, 4.0, theme::SEG_HOVER);
+            }
+            painter.text(sr.center(), egui::Align2::CENTER_CENTER, t.label(), egui::FontId::proportional(10.5), if on { t.color() } else { theme::TEXT_DIM });
+            if resp.on_hover_text(format!("Draw the clip's {} curves", t.label().to_lowercase())).clicked() {
+                self.sample_target = t;
+            }
+        }
+        changed
     }
 
     /// Shift-click: put a track or sample clip into the multi-selection, or take it out. A single
@@ -1958,6 +2072,38 @@ impl StudioView {
     }
 }
 
+fn pct_text(v: f32) -> String {
+    format!("{:.0} %", v * 100.0)
+}
+
+fn eq_knob_text(v: f32) -> String {
+    if v < 0.02 {
+        "kill".to_string()
+    } else {
+        let g = if v <= 0.5 { (2.0 * v).powi(2) } else { 10f32.powf(12.0 * (v - 0.5) / 20.0) };
+        format!("{:+.1} dB", 20.0 * g.log10())
+    }
+}
+
+fn filter_text(v: f32) -> String {
+    if (v - 0.5).abs() < 0.01 {
+        "off".to_string()
+    } else if v < 0.5 {
+        format!("low-pass {:.0} %", (0.5 - v) * 200.0)
+    } else {
+        format!("high-pass {:.0} %", (v - 0.5) * 200.0)
+    }
+}
+
+fn loop_text(v: f32) -> String {
+    match clubcraft_core::loop_beats(v) {
+        None => "off".to_string(),
+        Some(b) if b >= 4.0 => "1 bar".to_string(),
+        Some(b) if b >= 1.0 => format!("{b:.0} beat{}", if b > 1.0 { "s" } else { "" }),
+        Some(b) => format!("1/{:.0} beat", 1.0 / b),
+    }
+}
+
 /// Start beat, file offset and length of sample clip `c` (its file `file_secs` long) with its
 /// left or right edge moved to mix beat `beat`. The other edge stays put, and so does the music:
 /// the left edge moves the offset with it. A clip cut from a track can reach past its file as far
@@ -1993,6 +2139,17 @@ pub(crate) fn set_lane(t: &mut Transition, lane: Lane) {
     }
 }
 
+/// A swap stays a swap: when a hard switch of `param` on `side` slid (`slid`: from, to), the
+/// other track's switch of the same parameter at that time goes along.
+fn follow_switch(t: &mut Transition, side: Side, param: Param, slid: Option<(f32, f32)>) {
+    let Some((from, to)) = slid else { return };
+    let other = if side == Side::Out { Side::In } else { Side::Out };
+    let mut l = lane_of(t, other, param);
+    if l.switch_at(from).is_some_and(|i| l.slide_switch(i, to)) {
+        set_lane(t, l);
+    }
+}
+
 /// Lane EQ knob as dB on the mixer's curve; "kill" at the bottom.
 fn eq_db_text(v: f32) -> String {
     if v < 0.02 {
@@ -2000,4 +2157,30 @@ fn eq_db_text(v: f32) -> String {
     }
     let db = 20.0 * clubcraft_engine::dsp::eq_knob_gain(v).log10();
     format!("{:.1}", if db.abs() < 0.05 { 0.0 } else { db })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clubcraft_core::{Mode, TransitionStyle};
+
+    #[test]
+    fn a_swap_moves_on_both_tracks() {
+        let mut t = Transition::new(TransitionStyle::Crossfade, 32);
+        let bass = Param::Stem(StemKind::Bass);
+        t.set_mode(bass, Mode::Swap);
+        // the outgoing bass slid from 16 to 24: the incoming one comes in there too
+        let mut out = lane_of(&t, Side::Out, bass);
+        let i = out.switch_at(16.0).unwrap();
+        out.slide_switch(i, 24.0);
+        set_lane(&mut t, out);
+        follow_switch(&mut t, Side::Out, bass, Some((16.0, 24.0)));
+        for (x, o, n) in [(23.0, 1.0, 0.0), (25.0, 0.0, 1.0)] {
+            assert_eq!((t.value(Side::Out, bass, x), t.value(Side::In, bass, x)), (o, n));
+        }
+        // with nothing at that time on the other track nothing else moves
+        let before = t.clone();
+        follow_switch(&mut t, Side::In, bass, Some((10.0, 12.0)));
+        assert_eq!(t, before);
+    }
 }

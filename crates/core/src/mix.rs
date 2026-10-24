@@ -88,6 +88,10 @@ pub struct Lane {
 /// Steepness of a fully bent segment (see [`bend_shape`]).
 const BEND_K: f32 = 5.0;
 
+/// Two points closer than this (beats) make a hard switch. The presets put the two points of a
+/// switch 0.01 beat apart rather than at one time.
+pub const SWITCH_GAP: f32 = 0.05;
+
 impl Lane {
     pub fn new(side: Side, param: Param, points: &[(f32, f32)]) -> Self {
         Lane { side, param, points: points.to_vec(), bends: Vec::new() }
@@ -95,6 +99,34 @@ impl Lane {
 
     pub fn value_at(&self, x: f32) -> f32 {
         interpolate_bent(&self.points, &self.bends, x, self.param.neutral())
+    }
+
+    /// Whether points `i` and `i + 1` make a hard switch.
+    pub fn is_switch(&self, i: usize) -> bool {
+        self.points.get(i..=i + 1).is_some_and(|s| s[1].0 - s[0].0 < SWITCH_GAP)
+    }
+
+    /// The hard switch whose later point is at `x` (index of its first point).
+    pub fn switch_at(&self, x: f32) -> Option<usize> {
+        (0..self.points.len().saturating_sub(1)).find(|&i| self.is_switch(i) && (self.points[i + 1].0 - x).abs() < SWITCH_GAP)
+    }
+
+    /// Slide the hard switch starting at point `i` so that its later point is at `x`, between
+    /// its neighbours; the gap between its two points stays. Returns true when it moved.
+    pub fn slide_switch(&mut self, i: usize, x: f32) -> bool {
+        if !self.is_switch(i) {
+            return false;
+        }
+        let gap = self.points[i + 1].0 - self.points[i].0;
+        let lo = if i > 0 { self.points[i - 1].0 } else { 0.0 } + gap;
+        let hi = self.points.get(i + 2).map_or(f32::MAX, |p| p.0);
+        let x = x.clamp(lo, hi.max(lo));
+        if (x - self.points[i + 1].0).abs() < 1e-6 {
+            return false;
+        }
+        self.points[i] = (x - gap, self.points[i].1);
+        self.points[i + 1] = (x, self.points[i + 1].1);
+        true
     }
 
     /// Bend of the segment from point `i` to `i + 1`.
@@ -704,6 +736,15 @@ pub struct SampleClip {
     /// The track part the file was cut from, if it was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<SampleSource>,
+    /// Volume, EQ, filter and effect curves over the clip, `x` in mix beats from its start (the
+    /// `side` of each lane is unused).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub curves: Vec<Lane>,
+}
+
+/// Value of `param` on a sample clip with `curves`, `x` beats into it (allocation free).
+pub fn sample_curve_value(curves: &[Lane], param: Param, x: f32) -> f32 {
+    curves.iter().find(|l| l.param == param).map_or(param.neutral(), |l| l.value_at(x))
 }
 
 /// Where a sample file was cut from: a range of a track, as the mix played it.
@@ -739,7 +780,12 @@ fn is_zero(x: &f64) -> bool {
 impl SampleClip {
     /// The whole file once, from `start_beat`.
     pub fn new(lane: u8, path: std::path::PathBuf, start_beat: f64) -> Self {
-        SampleClip { lane, path, start_beat, gain_db: 0.0, offset: 0.0, length: None, source: None }
+        SampleClip { lane, path, start_beat, gain_db: 0.0, offset: 0.0, length: None, source: None, curves: Vec::new() }
+    }
+
+    /// Value of `param` `x` beats into the clip (neutral without a curve).
+    pub fn value(&self, param: Param, x: f32) -> f32 {
+        sample_curve_value(&self.curves, param, x)
     }
 
     /// Length (s) of the clip when its file is `file_secs` long.
@@ -875,6 +921,24 @@ mod tests {
         assert_eq!((l.points.len(), l.bends.clone()), (3, vec![-0.5, -0.5]));
         l.retain_points(|p| p.0 != 6.0);
         assert_eq!((l.points, l.bends), (vec![(4.0, 1.0), (8.0, 0.0)], vec![-0.5]));
+    }
+
+    #[test]
+    fn swaps_are_switches_and_slide_as_one() {
+        let mut t = Transition::new(TransitionStyle::Crossfade, 32);
+        t.set_mode(Param::Stem(StemKind::Bass), Mode::Swap);
+        let mut out = t.lanes.iter().find(|l| l.side == Side::Out && l.param == Param::Stem(StemKind::Bass)).unwrap().clone();
+        let i = out.switch_at(16.0).unwrap();
+        assert!(out.is_switch(i) && !out.is_switch(0));
+        assert!(out.slide_switch(i, 20.0));
+        assert_eq!((out.value_at(19.0), out.value_at(20.0)), (1.0, 0.0));
+        assert!(out.switch_at(16.0).is_none() && out.switch_at(20.0) == Some(i));
+        // between its neighbours only (the editor gives every lane a point at both ends)
+        out.points.push((32.0, 0.0));
+        out.slide_switch(i, 40.0);
+        assert_eq!(out.points[i + 1].0, 32.0);
+        out.slide_switch(i, -3.0);
+        assert!(out.points[i].0 >= 0.0);
     }
 
     #[test]

@@ -4,7 +4,9 @@
 //!   Double-click or right-click it to remove it.
 //! - Drag the line anywhere else to add a point there and move it.
 //! - A hard switch (the vertical line of two points at one time) slides sideways as one: drag the
-//!   vertical line or either of its points. Double-click a slope to turn it into a hard switch.
+//!   vertical line or either of its points. The caller can move the other track's switch at the
+//!   same time along (a swap), unless ⌥ is held. Double-click a slope to turn it into a hard
+//!   switch.
 //! - ⌘-drag draws like a pencil: flat steps on the grid, with hard switches between them.
 //! - The round handle in the middle of a slope bends it (⌥-drag on the slope does too);
 //!   double-click the handle to make it straight again.
@@ -12,7 +14,7 @@
 //! Times snap to the grid (hold Shift for free placement), values snap to 0, 100 % and (for EQ /
 //! filter) the centre.
 
-use clubcraft_core::{bend_through, Lane};
+use clubcraft_core::{bend_through, Lane, SWITCH_GAP};
 use eframe::egui::{self, pos2, vec2, Color32, CursorIcon, Id, Modifiers, Pos2, Rect, Sense, Stroke, Ui};
 
 /// How to map and draw one curve.
@@ -102,8 +104,17 @@ const POINT_R: f32 = 3.5;
 const HIT: f32 = 9.0;
 const EPS: f32 = 1e-4;
 
-/// Draw `lane` and edit it. Returns true when it changed.
-pub fn curve_ui(ui: &mut Ui, id: Id, c: &Curve, lane: &mut Lane) -> bool {
+/// What an edit did.
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct Edit {
+    pub changed: bool,
+    /// A hard switch slid from one time to another (of its later point). The other track's
+    /// switch at that time goes along, so a swap stays a swap. None while ⌥ is held.
+    pub slid: Option<(f32, f32)>,
+}
+
+/// Draw `lane` and edit it.
+pub fn curve_ui(ui: &mut Ui, id: Id, c: &Curve, lane: &mut Lane) -> Edit {
     let p = ui.painter().with_clip_rect(c.rect.expand(POINT_R + 2.0).intersect(ui.clip_rect()));
     let mut work = normalized(lane, c);
     let pointer = ui.input(|i| i.pointer.hover_pos());
@@ -111,7 +122,12 @@ pub fn curve_ui(ui: &mut Ui, id: Id, c: &Curve, lane: &mut Lane) -> bool {
     let active = ui.data(|d| d.get_temp::<Active>(id));
     let hover = if c.editable { pointer.and_then(|q| target_at(&work, c, q, mods)) } else { None };
     let mut changed = false;
-    let engaged = c.editable && (active.is_some() || hover.is_some());
+    let mut slid = None;
+    // a press keeps the editor until it is let go: the pointer may leave a thin switch line
+    // before the press counts as a drag, and the clip below must not get it then
+    let held_id = id.with("held");
+    let held = ui.data(|d| d.get_temp::<bool>(held_id).unwrap_or(false)) && ui.input(|i| i.pointer.primary_down());
+    let engaged = c.editable && (active.is_some() || hover.is_some() || held);
     if engaged {
         // a small hit area under the pointer takes the press before the clip below it
         let at = pointer.unwrap_or(c.rect.center());
@@ -119,11 +135,16 @@ pub fn curve_ui(ui: &mut Ui, id: Id, c: &Curve, lane: &mut Lane) -> bool {
         ui.ctx().set_cursor_icon(cursor(active, hover));
         let free = mods.shift;
         let q = r.interact_pointer_pos().unwrap_or(at);
+        if r.is_pointer_button_down_on() {
+            ui.data_mut(|d| d.insert_temp(held_id, true));
+        } else {
+            ui.data_mut(|d| d.remove::<bool>(held_id));
+        }
         if r.drag_started() {
             // what was under the press, not where the pointer is once it counts as a drag
             let q0 = ui.input(|i| i.pointer.press_origin()).unwrap_or(q);
             let a = match target_at(&work, c, q0, mods).or(hover) {
-                Some(Target::Point(k)) => Some(Active::Point { k, step: twin(&work.points, k).is_some() }),
+                Some(Target::Point(k)) => Some(Active::Point { k, step: twin(&work, k).is_some() }),
                 Some(Target::Step(i)) => Some(Active::Step(i)),
                 Some(Target::Bend(i)) => Some(Active::Bend(i)),
                 Some(Target::Line(_)) => {
@@ -144,9 +165,17 @@ pub fn curve_ui(ui: &mut Ui, id: Id, c: &Curve, lane: &mut Lane) -> bool {
                 ui.data_mut(|d| d.insert_temp(id, a));
             }
         } else if r.dragged() {
-            match ui.data(|d| d.get_temp::<Active>(id)) {
+            let held = ui.data(|d| d.get_temp::<Active>(id));
+            // the later point of a switch being slid, and where it was
+            let later = match held {
+                Some(Active::Point { k, step: true }) => twin(&work, k).map(|t| k.max(t)),
+                Some(Active::Step(i)) => Some(i + 1),
+                _ => None,
+            };
+            let was = later.and_then(|j| work.points.get(j)).map(|p| p.0);
+            match held {
                 Some(Active::Point { k, step }) if k < work.points.len() => changed |= move_point(&mut work, k, step, q, c, free),
-                Some(Active::Step(i)) if i + 1 < work.points.len() => changed |= move_step(&mut work.points, i, q.x, c, free),
+                Some(Active::Step(i)) if i + 1 < work.points.len() => changed |= move_step(&mut work, i, q.x, c, free),
                 Some(Active::Bend(i)) if i + 1 < work.points.len() => {
                     let (a, b) = (work.points[i], work.points[i + 1]);
                     let bend = bend_through(a.1, b.1, c.value_of_y(q.y));
@@ -159,6 +188,11 @@ pub fn curve_ui(ui: &mut Ui, id: Id, c: &Curve, lane: &mut Lane) -> bool {
                     ui.data_mut(|d| d.insert_temp(id, Active::Paint { x, v }));
                 }
                 _ => {}
+            }
+            if let (Some(a), Some(b)) = (was, later.and_then(|j| work.points.get(j)).map(|p| p.0)) {
+                if (a - b).abs() > 1e-6 && !mods.alt {
+                    slid = Some((a, b));
+                }
             }
         }
         if r.drag_stopped() {
@@ -186,8 +220,11 @@ pub fn curve_ui(ui: &mut Ui, id: Id, c: &Curve, lane: &mut Lane) -> bool {
             Some(Target::Line(Some(i))) if r.double_clicked() => changed |= make_switch(&mut work, i, c.snap((c.from_x)(q.x), free)),
             _ => {}
         }
-    } else if active.is_some() {
-        ui.data_mut(|d| d.remove::<Active>(id));
+    } else {
+        ui.data_mut(|d| {
+            d.remove::<Active>(id);
+            d.remove::<bool>(held_id);
+        });
     }
     if changed {
         lane.points.clone_from(&work.points);
@@ -208,7 +245,7 @@ pub fn curve_ui(ui: &mut Ui, id: Id, c: &Curve, lane: &mut Lane) -> bool {
     let hot = engaged || ui.rect_contains_pointer(c.rect);
     p.add(egui::Shape::line(screen, Stroke::new(if hot { 2.2 } else { 1.6 }, c.color)));
     if !c.editable {
-        return changed;
+        return Edit { changed, slid };
     }
     let active = ui.data(|d| d.get_temp::<Active>(id));
     // what is under the pointer or held, highlighted
@@ -253,7 +290,9 @@ pub fn curve_ui(ui: &mut Ui, id: Id, c: &Curve, lane: &mut Lane) -> bool {
     }
     if let (true, Some(q)) = (engaged, pointer) {
         let (x, v) = match lit {
-            Some(Target::Point(k) | Target::Step(k)) => work.points.get(k).copied().unwrap_or_default(),
+            Some(Target::Point(k)) => work.points.get(k).copied().unwrap_or_default(),
+            // where it switches
+            Some(Target::Step(i)) => work.points.get(i + 1).copied().unwrap_or_default(),
             Some(Target::Bend(i)) => {
                 let x = work.points.get(i..=i + 1).map_or(0.0, |s| (s[0].0 + s[1].0) / 2.0);
                 (x, work.value_at(x))
@@ -266,7 +305,7 @@ pub fn curve_ui(ui: &mut Ui, id: Id, c: &Curve, lane: &mut Lane) -> bool {
         };
         let hint = match lit {
             Some(Target::Point(_)) => "drag to move · double-click removes",
-            Some(Target::Step(_)) => "drag to move the switch",
+            Some(Target::Step(_)) => "drag to move the switch · Option: this track only",
             Some(Target::Bend(_)) => "drag to bend · double-click: straight",
             Some(Target::Paint) => "draws steps on the grid",
             Some(Target::Line(Some(i))) if is_slope(&work, i) => "drag: new point · double-click: hard switch · ⌘-drag: draw",
@@ -284,7 +323,7 @@ pub fn curve_ui(ui: &mut Ui, id: Id, c: &Curve, lane: &mut Lane) -> bool {
         tp.galley(at, galley, Color32::WHITE);
         tp.galley(at + vec2(0.0, gh), hint, Color32::from_gray(170));
     }
-    changed
+    Edit { changed, slid }
 }
 
 fn cursor(active: Option<Active>, hover: Option<Target>) -> CursorIcon {
@@ -332,7 +371,7 @@ fn target_at(l: &Lane, c: &Curve, q: Pos2, m: Modifiers) -> Option<Target> {
     }
     let step = (0..pts.len().saturating_sub(1)).find(|&i| {
         let (a, b) = (c.at(pts[i]), c.at(pts[i + 1]));
-        (pts[i].0 - pts[i + 1].0).abs() < EPS && (a.x - q.x).abs() <= 6.0 && q.y >= a.y.min(b.y) - 3.0 && q.y <= a.y.max(b.y) + 3.0
+        l.is_switch(i) && ((a.x + b.x) / 2.0 - q.x).abs() <= 6.0 && q.y >= a.y.min(b.y) - 3.0 && q.y <= a.y.max(b.y) + 3.0
     });
     if let Some(i) = step {
         return Some(Target::Step(i));
@@ -353,7 +392,7 @@ fn target_at(l: &Lane, c: &Curve, q: Pos2, m: Modifiers) -> Option<Target> {
 
 /// Whether the segment from point `i` rises or falls (a ramp that can bend or become a switch).
 fn is_slope(l: &Lane, i: usize) -> bool {
-    l.points.get(i..=i + 1).is_some_and(|s| s[1].0 - s[0].0 > EPS && (s[1].1 - s[0].1).abs() > 1e-3)
+    l.points.get(i..=i + 1).is_some_and(|s| s[1].0 - s[0].0 >= SWITCH_GAP && (s[1].1 - s[0].1).abs() > 1e-3)
 }
 
 /// The bend handle of the segment from point `i`: at its middle, when the slope is big enough on
@@ -396,42 +435,34 @@ fn line_points(l: &Lane, c: &Curve) -> Vec<Pos2> {
     v
 }
 
-/// The other point of a hard switch (same time) that point `k` belongs to.
-fn twin(points: &[(f32, f32)], k: usize) -> Option<usize> {
-    if k > 0 && (points[k - 1].0 - points[k].0).abs() < EPS {
+/// The other point of the hard switch that point `k` belongs to.
+fn twin(l: &Lane, k: usize) -> Option<usize> {
+    if k > 0 && l.is_switch(k - 1) {
         Some(k - 1)
-    } else if k + 1 < points.len() && (points[k + 1].0 - points[k].0).abs() < EPS {
+    } else if l.is_switch(k) {
         Some(k + 1)
     } else {
         None
     }
 }
 
-/// Move the hard switch made of points `i` and `i + 1` sideways to screen x `px`, between its
-/// neighbours.
-fn move_step(points: &mut [(f32, f32)], i: usize, px: f32, c: &Curve, free: bool) -> bool {
-    let lo = if i > 0 { points[i - 1].0 } else { c.x0 };
-    let hi = if i + 2 < points.len() { points[i + 2].0 } else { c.x1 };
-    let x = c.snap((c.from_x)(px), free).clamp(lo, hi);
-    if (x - points[i].0).abs() < 1e-6 {
-        return false;
-    }
-    points[i].0 = x;
-    points[i + 1].0 = x;
-    true
+/// Slide the hard switch made of points `i` and `i + 1` to screen x `px` (its later point
+/// snaps there), between its neighbours.
+fn move_step(l: &mut Lane, i: usize, px: f32, c: &Curve, free: bool) -> bool {
+    l.slide_switch(i, c.snap((c.from_x)(px), free))
 }
 
 /// Move point `k` to the pointer, between its neighbours. A point grabbed as part of a hard
 /// switch (`step`) takes its twin along sideways.
 fn move_point(l: &mut Lane, k: usize, step: bool, q: Pos2, c: &Curve, free: bool) -> bool {
     let v = c.value_of_y(q.y);
-    let points = &mut l.points;
-    if let Some(t) = twin(points, k).filter(|_| step) {
-        let moved = move_step(points, k.min(t), q.x, c, free);
-        let same = (points[k].1 - v).abs() < 1e-6;
-        points[k].1 = v;
+    if let Some(t) = twin(l, k).filter(|_| step) {
+        let moved = move_step(l, k.min(t), q.x, c, free);
+        let same = (l.points[k].1 - v).abs() < 1e-6;
+        l.points[k].1 = v;
         return moved || !same;
     }
+    let points = &mut l.points;
     let (ox, ov) = points[k];
     // the first and last point stay at the edges
     let pinned = k == 0 || k + 1 == points.len();
@@ -522,15 +553,34 @@ mod tests {
             // off until 2, on from 2 (a step), down at 6
             let mut l = lane(&[(0.0, 0.0), (2.0, 0.0), (2.0, 1.0), (6.0, 1.0), (8.0, 0.0)]);
             // drag the edge to 3.8 → snaps to 4; both points move, values stay
-            assert!(move_step(&mut l.points, 1, 380.0, c, false));
+            assert!(move_step(&mut l, 1, 380.0, c, false));
             assert_eq!(&l.points[1..3], &[(4.0, 0.0), (4.0, 1.0)]);
             // not past its neighbours
-            move_step(&mut l.points, 1, 750.0, c, false);
+            move_step(&mut l, 1, 750.0, c, false);
             assert_eq!(l.points[1].0, 6.0);
-            move_step(&mut l.points, 1, 300.0, c, false);
+            move_step(&mut l, 1, 300.0, c, false);
             // dragging the upper point of the step: sideways together, vertically only itself
             move_point(&mut l, 2, true, pos2(100.0, 50.0), c, false);
             assert_eq!(&l.points[1..3], &[(1.0, 0.0), (1.0, 0.5)]);
+        });
+    }
+
+    #[test]
+    fn a_swap_slides_although_its_points_are_a_hair_apart() {
+        with_curve(|c| {
+            // as the presets make it: on until 4, off from 4, the switch 0.01 beat wide
+            let mut l = lane(&[(0.0, 1.0), (3.99, 1.0), (4.0, 0.0), (8.0, 0.0)]);
+            assert_eq!(target_at(&l, c, pos2(400.0, 50.0), Modifiers::NONE), Some(Target::Step(1)));
+            assert_eq!(twin(&l, 2), Some(1));
+            // grabbed by its lower point and dragged to 6: both go, the gap stays, values stay
+            assert!(move_point(&mut l, 2, true, pos2(610.0, 100.0), c, false));
+            assert!((l.points[1].0 - 5.99).abs() < 1e-5 && l.points[2] == (6.0, 0.0) && l.points[1].1 == 1.0);
+            // not past its neighbour
+            move_step(&mut l, 1, 790.0, c, false);
+            assert_eq!(l.points[2].0, 8.0);
+            // a slope is no switch
+            let ramp = lane(&[(0.0, 1.0), (4.0, 0.0)]);
+            assert_eq!(twin(&ramp, 1), None);
         });
     }
 

@@ -24,6 +24,7 @@
 use crate::command::DeckId;
 use crate::deck::Deck;
 use crate::dsp::eq_combine;
+use crate::fx::FxCtx;
 use crate::mixer::{CrossfaderAssign, Mixer};
 use crate::state::{MixPlaybackState, MIX_RESIDENT_WORDS};
 use crate::track::LoadedTrack;
@@ -128,6 +129,8 @@ impl MixSchedule {
                         gain: mix.sample_lane_gain(c.lane as usize) * 10f32.powf(c.gain_db / 20.0),
                         offset: c.offset,
                         length: c.secs(file_secs),
+                        start_beat: c.start_beat,
+                        curves: c.curves.clone(),
                         audio,
                     }
                 })
@@ -210,6 +213,23 @@ struct LaneValues {
 impl LaneValues {
     fn neutral() -> Self {
         LaneValues { volume: 1.0, stems: [1.0; 4], eq: [0.5; 3], filter: 0.5, echo: 0.0, reverb: 0.0, noise: 0.0, looping: 0.0, brake: 0.0, pump: 0.0 }
+    }
+
+    /// Values of a sample clip's `curves`, `x` beats into it.
+    fn from_curves(curves: &[clubcraft_core::Lane], x: f32) -> Self {
+        let v = |p| clubcraft_core::sample_curve_value(curves, p, x);
+        LaneValues {
+            volume: v(Param::Volume),
+            stems: [1.0; 4],
+            eq: [v(Param::EqLow), v(Param::EqMid), v(Param::EqHigh)],
+            filter: v(Param::Filter),
+            echo: v(Param::Echo),
+            reverb: v(Param::Reverb),
+            noise: v(Param::Noise),
+            looping: v(Param::Loop),
+            brake: v(Param::Brake),
+            pump: v(Param::Pump),
+        }
     }
 
     fn from_transition(t: &Transition, side: Side, x: f32) -> Self {
@@ -451,17 +471,46 @@ impl Conductor {
         self.state
     }
 
-    /// Mix the sample lanes for the next block (call before [`Self::step`]). Returns whether
-    /// anything was written to `out`.
-    pub fn render_samples(&self, n: usize, sr: f64, out: &mut [f32]) -> bool {
-        match (&self.sched, self.playing) {
-            // while the clock is held the same block would repeat
-            (Some(s), true) if !s.samples.is_empty() && !self.holding => {
-                out[..n * 2].fill(0.0);
-                crate::samples::render(&s.samples, self.time, n, sr, &mut out[..n * 2])
+    /// Mix the sample lanes for the next block into `mixer.extra` (call before [`Self::step`]),
+    /// each through its channel strip with the curves of the clip playing on it. Returns whether
+    /// anything was written.
+    pub fn render_samples(&self, n: usize, sr: f64, mixer: &mut Mixer) -> bool {
+        // while the clock is held the same block would repeat
+        let Some(s) = self.sched.as_ref().filter(|s| self.playing && !s.samples.is_empty() && !self.holding) else { return false };
+        let t0 = self.time;
+        let b0 = s.timeline.beat_at_sec(t0);
+        let bpm = s.timeline.bpm_at_beat(b0).max(1.0);
+        let ctx = FxCtx { sr: sr as f32, bpm, beat: Some(b0), beats_per_frame: bpm / 60.0 / sr };
+        let out = &mut mixer.extra[..n * 2];
+        out.fill(0.0);
+        for (l, (ch, buf)) in mixer.sample_channels.iter_mut().zip(mixer.sample_bufs.iter_mut()).enumerate() {
+            let buf = &mut buf[..n * 2];
+            buf.fill(0.0);
+            crate::samples::render(&s.samples, l, t0, n, sr, buf);
+            // the clip that started last among those sounding drives the lane's strip
+            let clip = s.samples.iter().filter(|c| c.lane == l && c.covers(t0)).max_by(|a, b| a.start.total_cmp(&b.start));
+            let v = match clip {
+                Some(c) => LaneValues::from_curves(&c.curves, (b0 - c.start_beat) as f32),
+                None => LaneValues::neutral(),
+            };
+            // the reverb send and the noise don't pass the clip gain: a muted lane silences them
+            let silenced = clip.is_some_and(|c| c.gain <= 0.0);
+            ch.lane_volume = v.volume;
+            ch.eq_knobs = v.eq;
+            ch.filter_knob = v.filter;
+            ch.echo_send = v.echo;
+            ch.lane_fx.reverb = if silenced { 0.0 } else { v.reverb };
+            ch.lane_fx.noise = if silenced { 0.0 } else { v.noise };
+            ch.lane_fx.loop_beats = clubcraft_core::loop_beats(v.looping);
+            ch.lane_fx.brake = v.brake;
+            ch.lane_fx.pump = v.pump;
+            let post = &mut mixer.sample_post[..n * 2];
+            ch.process(buf, post, &ctx, crate::mixer::FaderCurve::Smooth, 1.0, false);
+            for (o, p) in out.iter_mut().zip(post.iter()) {
+                *o += *p;
             }
-            _ => false,
         }
+        true
     }
 
     /// Advance by one block of `n` frames at `sr`. Old tracks are passed to `drop_track`.

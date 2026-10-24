@@ -225,6 +225,11 @@ pub struct Mixer {
     /// Extra signal added to the master before its gain and limiter (sample lanes), `n` frames.
     pub extra: Vec<f32>,
     pub extra_on: bool,
+    /// One channel strip per sample lane, driven by its clips' curves.
+    pub sample_channels: Vec<Channel>,
+    /// Each sample lane's audio of the block, and its channel output.
+    pub sample_bufs: Vec<Vec<f32>>,
+    pub sample_post: Vec<f32>,
 }
 
 impl Mixer {
@@ -247,6 +252,9 @@ impl Mixer {
             post: vec![0.0; MAX_BLOCK * 2],
             extra: vec![0.0; MAX_BLOCK * 2],
             extra_on: false,
+            sample_channels: (0..clubcraft_core::SAMPLE_LANES).map(|_| Channel::new(sr)).collect(),
+            sample_bufs: (0..clubcraft_core::SAMPLE_LANES).map(|_| vec![0.0; MAX_BLOCK * 2]).collect(),
+            sample_post: vec![0.0; MAX_BLOCK * 2],
         }
     }
 

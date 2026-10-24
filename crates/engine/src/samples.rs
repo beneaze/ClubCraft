@@ -23,7 +23,18 @@ pub struct SchedSample {
     pub offset: f64,
     /// How long it sounds (s); silent where that is outside the file.
     pub length: f64,
+    /// Mix beat where it starts: its curves count from there.
+    pub start_beat: f64,
+    /// Volume, EQ, filter and effect curves (see [`clubcraft_core::SampleClip::curves`]).
+    pub curves: Vec<clubcraft_core::Lane>,
     pub audio: Option<Arc<AudioBuffer>>,
+}
+
+impl SchedSample {
+    /// Whether it sounds at mix time `t`.
+    pub fn covers(&self, t: f64) -> bool {
+        t >= self.start && t < self.start + self.length
+    }
 }
 
 fn cache() -> &'static Mutex<HashMap<PathBuf, Option<Arc<AudioBuffer>>>> {
@@ -52,13 +63,13 @@ pub fn load(path: &Path) -> Option<Arc<AudioBuffer>> {
     a
 }
 
-/// Mix the samples sounding in `[t0, t0 + n / sr)` into `out` (interleaved stereo, `n` frames,
-/// added). Linear interpolation when the file's rate differs from the output's. Returns whether
-/// anything was written.
-pub fn render(samples: &[SchedSample], t0: f64, n: usize, sr: f64, out: &mut [f32]) -> bool {
+/// Mix the samples of `lane` sounding in `[t0, t0 + n / sr)` into `out` (interleaved stereo, `n`
+/// frames, added). Linear interpolation when the file's rate differs from the output's. Returns
+/// whether anything was written.
+pub fn render(samples: &[SchedSample], lane: usize, t0: f64, n: usize, sr: f64, out: &mut [f32]) -> bool {
     let t1 = t0 + n as f64 / sr;
     let mut any = false;
-    for s in samples {
+    for s in samples.iter().filter(|s| s.lane == lane) {
         let Some(a) = &s.audio else { continue };
         let len = a.frames();
         if s.gain <= 0.0 || len < 2 || t1 <= s.start || t0 >= s.start + s.length {
@@ -100,17 +111,17 @@ mod tests {
     #[test]
     fn plays_at_its_start_time_and_rate() {
         let a = Arc::new(AudioBuffer::new(44_100, vec![1.0; 44_100], vec![0.5; 44_100]));
-        let s = vec![SchedSample { lane: 0, start: 1.0, gain: 0.5, offset: 0.0, length: 1.0, audio: Some(a) }];
+        let s = vec![SchedSample { lane: 0, start: 1.0, gain: 0.5, offset: 0.0, length: 1.0, start_beat: 0.0, curves: Vec::new(), audio: Some(a) }];
         let sr = 48_000.0;
         // block that starts 10 ms before the sample
         let mut out = vec![0.0f32; 2 * 960];
-        assert!(render(&s, 0.99, 960, sr, &mut out));
+        assert!(render(&s, 0, 0.99, 960, sr, &mut out));
         let first = out.chunks(2).position(|f| f[0] != 0.0).unwrap();
         assert_eq!(first, 480); // 10 ms at 48 kHz
         assert!((out[2 * 600] - 0.5).abs() < 1e-6 && (out[2 * 600 + 1] - 0.25).abs() < 1e-6);
         // after its end (1 s long) nothing
         let mut out = vec![0.0f32; 2 * 256];
-        assert!(!render(&s, 2.5, 256, sr, &mut out));
+        assert!(!render(&s, 0, 2.5, 256, sr, &mut out));
     }
 
     #[test]
@@ -121,22 +132,22 @@ mod tests {
         let a = Arc::new(AudioBuffer::new(48_000, ramp.clone(), ramp));
         let at = |s: &[SchedSample], t: f64| {
             let mut out = vec![0.0f32; 2];
-            render(s, t, 1, sr, &mut out);
+            render(s, 0, t, 1, sr, &mut out);
             out[0]
         };
-        let s = vec![SchedSample { lane: 0, start: 0.0, gain: 1.0, offset: 0.25, length: 0.5, audio: Some(a.clone()) }];
+        let s = vec![SchedSample { lane: 0, start: 0.0, gain: 1.0, offset: 0.25, length: 0.5, start_beat: 0.0, curves: Vec::new(), audio: Some(a.clone()) }];
         assert!((at(&s, 0.0) - 0.25).abs() < 1e-3);
         assert!((at(&s, 0.4) - 0.65).abs() < 1e-3);
         assert_eq!(at(&s, 0.6), 0.0);
         // reaching past both ends of the file (before it is cut again): silence there, no repeat
-        let s = vec![SchedSample { lane: 0, start: 0.0, gain: 1.0, offset: -0.5, length: 2.0, audio: Some(a.clone()) }];
+        let s = vec![SchedSample { lane: 0, start: 0.0, gain: 1.0, offset: -0.5, length: 2.0, start_beat: 0.0, curves: Vec::new(), audio: Some(a.clone()) }];
         assert_eq!(at(&s, 0.25), 0.0);
         assert!((at(&s, 0.75) - 0.25).abs() < 1e-3);
         assert_eq!(at(&s, 1.75), 0.0);
         // trimmed to 0.5 s: silent after that
-        let s = vec![SchedSample { lane: 0, start: 0.0, gain: 1.0, offset: 0.0, length: 0.5, audio: Some(a) }];
+        let s = vec![SchedSample { lane: 0, start: 0.0, gain: 1.0, offset: 0.0, length: 0.5, start_beat: 0.0, curves: Vec::new(), audio: Some(a) }];
         let mut out = vec![0.0f32; 2 * 48_000];
-        render(&s, 0.0, 48_000, sr, &mut out);
+        render(&s, 0, 0.0, 48_000, sr, &mut out);
         assert!(out[2 * 23_999] > 0.0 && out[2 * 24_000] == 0.0);
     }
 }
