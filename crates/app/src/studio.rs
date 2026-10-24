@@ -184,6 +184,8 @@ pub struct StudioView {
     /// Extractions asked for this frame: (part, save to a file instead of a sample lane).
     pub extract_requests: Vec<(crate::extract::Part, bool)>,
     extract_tx: crossbeam_channel::Sender<ExtractDone>,
+    /// Sample files being cut again from their track (see [`StudioView::recut_sample`]).
+    recutting: std::collections::HashSet<std::path::PathBuf>,
     extract_rx: crossbeam_channel::Receiver<ExtractDone>,
     pub extracting: usize,
 }
@@ -251,18 +253,28 @@ impl Default for StudioView {
             range_anchor: 0.0,
             extract_requests: Vec::new(),
             extract_tx,
+            recutting: Default::default(),
             extract_rx,
             extracting: 0,
         }
     }
 }
 
-/// A finished extraction: the WAV and its length, and where to put it (a sample lane at a mix
-/// beat) unless it was saved as a file.
+/// A finished extraction: the WAV and its length, and what to do with it.
 struct ExtractDone {
     result: Result<(std::path::PathBuf, f64), String>,
-    place_at: Option<f64>,
+    then: ExtractThen,
     label: String,
+}
+
+enum ExtractThen {
+    /// It was saved as a file.
+    Saved,
+    /// Put it on a sample lane at this mix beat.
+    Place(f64, clubcraft_core::SampleSource),
+    /// It replaces the file `old` of the clips cut from the same part of a track, reaching
+    /// `s0` seconds (of the old file) further back.
+    Recut { old: std::path::PathBuf, s0: f64, source: clubcraft_core::SampleSource },
 }
 
 /// A drop indicator line along the top of a hovered playlist row.
@@ -1028,21 +1040,38 @@ impl StudioView {
             } else {
                 clubcraft_core::paths::data_dir().join("Samples").join(format!("{name}.wav"))
             };
-            let req = crate::extract::Request { audio_path: t.path.clone(), hash: t.hash.clone(), t0, t1, rate, semis, part, out };
-            let tx = self.extract_tx.clone();
-            let place_at = (!save).then_some(rs.b0);
-            let label = format!("{} of {}", part.label(), title);
-            self.extracting += 1;
-            self.message = format!("Extracting {label}…");
-            std::thread::spawn(move || {
-                let result = crate::extract::run(&req).map(|d| (req.out.clone(), d)).map_err(|e| format!("{e:#}"));
-                let _ = tx.send(ExtractDone { result, place_at, label });
-            });
+            let req = crate::extract::Request { audio_path: t.path.clone(), hash: t.hash.clone(), t0, t1, rate, semis, weights: part.weights(), out };
+            let source = clubcraft_core::SampleSource { audio_path: t.path.clone(), hash: t.hash.clone(), stems: part.weights(), t0, track_secs: t.duration, rate, semis };
+            let then = if save { ExtractThen::Saved } else { ExtractThen::Place(rs.b0, source) };
+            self.start_extraction(req, then, format!("{} of {}", part.label(), title));
         }
         while let Ok(d) = self.extract_rx.try_recv() {
             self.extracting = self.extracting.saturating_sub(1);
-            match (d.result, d.place_at) {
-                (Ok((path, secs)), Some(beat)) => {
+            match (d.result, d.then) {
+                (Ok((path, secs)), ExtractThen::Recut { old, s0, source }) => {
+                    self.recutting.remove(&old);
+                    for c in self.mix.samples.iter_mut().filter(|c| c.path == old) {
+                        c.path = path.clone();
+                        c.source = Some(source.clone());
+                        c.offset -= s0;
+                        if c.offset.abs() < 1e-3 && c.length.is_some_and(|l| (l - secs).abs() < 1e-3) {
+                            (c.offset, c.length) = (0.0, None);
+                        }
+                    }
+                    // dragged further while it was being cut
+                    for j in 0..self.mix.samples.len() {
+                        if self.mix.samples[j].path == path {
+                            self.recut_sample(j, secs);
+                        }
+                    }
+                    self.message = format!("{} extended", d.label);
+                    self.changed();
+                }
+                (Err(e), ExtractThen::Recut { old, .. }) => {
+                    self.recutting.remove(&old);
+                    self.message = format!("Couldn't extend {}: {e}", d.label);
+                }
+                (Ok((path, secs)), ExtractThen::Place(beat, source)) => {
                     // first sample lane that is free over the clip's span
                     let end = self.timeline.beat_at_sec(self.timeline.sec_at_beat(beat) + secs);
                     let busy = |l: u8, s: &StudioView| {
@@ -1053,15 +1082,47 @@ impl StudioView {
                         })
                     };
                     let lane = (0..clubcraft_core::SAMPLE_LANES as u8).find(|&l| !busy(l, self)).unwrap_or(0);
-                    self.mix.samples.push(clubcraft_core::SampleClip::new(lane, path, beat));
+                    self.mix.samples.push(clubcraft_core::SampleClip { source: Some(source), ..clubcraft_core::SampleClip::new(lane, path, beat) });
                     self.sample_open[lane as usize] = true;
                     self.message = format!("{} copied to Sample {}", d.label, lane + 1);
                     self.changed();
                 }
-                (Ok((path, _)), None) => self.message = format!("Saved {}", path.display()),
+                (Ok((path, _)), ExtractThen::Saved) => self.message = format!("Saved {}", path.display()),
                 (Err(e), _) => self.message = format!("Extract failed: {e}"),
             }
         }
+    }
+
+    fn start_extraction(&mut self, req: crate::extract::Request, then: ExtractThen, label: String) {
+        let tx = self.extract_tx.clone();
+        self.extracting += 1;
+        self.message = format!("Extracting {label}…");
+        std::thread::spawn(move || {
+            let result = crate::extract::run(&req).map(|d| (req.out.clone(), d)).map_err(|e| format!("{e:#}"));
+            let _ = tx.send(ExtractDone { result, then, label });
+        });
+    }
+
+    /// Sample clip `j` (its file `file_secs` long) was dragged past its file: cut the part of the
+    /// track it now covers again, so it continues the track instead of falling silent.
+    pub(crate) fn recut_sample(&mut self, j: usize, file_secs: f64) {
+        let Some(c) = self.mix.samples.get(j) else { return };
+        let Some(src) = c.source.clone() else { return };
+        let (lo, hi) = src.file_bounds();
+        let (s0, s1) = (c.offset.max(lo), (c.offset + c.secs(file_secs)).min(hi));
+        if (s0 > -1e-4 && s1 < file_secs + 1e-4) || s1 <= s0 || self.recutting.contains(&c.path) {
+            return;
+        }
+        let (t0, t1) = (src.t0 + s0 * src.rate, src.t0 + s1 * src.rate);
+        // a new name: the engine and the timeline cache files by path
+        let stem = c.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let base = stem.split(" @").next().unwrap_or(&stem).to_string();
+        let out = c.path.with_file_name(format!("{base} @{t0:.2}-{t1:.2}s.wav"));
+        let req = crate::extract::Request { audio_path: src.audio_path.clone(), hash: src.hash.clone(), t0, t1, rate: src.rate, semis: src.semis, weights: src.stems, out };
+        let old = c.path.clone();
+        self.recutting.insert(old.clone());
+        let source = clubcraft_core::SampleSource { t0, ..src };
+        self.start_extraction(req, ExtractThen::Recut { old, s0, source }, base);
     }
 
     pub(crate) fn track_at_playhead(&self) -> Option<usize> {

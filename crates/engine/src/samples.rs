@@ -19,9 +19,9 @@ pub struct SchedSample {
     pub start: f64,
     /// Linear gain (clip gain × lane fader, 0 when the lane is muted / not soloed).
     pub gain: f32,
-    /// Position in the file (s) at `start`, modulo the file's length.
+    /// Position in the file (s) at `start`.
     pub offset: f64,
-    /// How long it sounds (s); past the file's end it loops.
+    /// How long it sounds (s); silent where that is outside the file.
     pub length: f64,
     pub audio: Option<Arc<AudioBuffer>>,
 }
@@ -76,13 +76,17 @@ pub fn render(samples: &[SchedSample], t0: f64, n: usize, sr: f64, out: &mut [f3
             if since >= end {
                 break;
             }
-            // a clip longer than its file loops it; the last frame blends into the first
-            let src = (head + since * ratio).rem_euclid(len as f64);
-            let i = (src as usize).min(len - 1);
-            let k = if i + 1 < len { i + 1 } else { 0 };
+            let src = head + since * ratio;
+            if src < 0.0 {
+                continue;
+            }
+            let i = src as usize;
+            if i + 1 >= len {
+                break;
+            }
             let fr = (src - i as f64) as f32;
-            out[2 * f] += (a.left[i] + (a.left[k] - a.left[i]) * fr) * s.gain;
-            out[2 * f + 1] += (a.right[i] + (a.right[k] - a.right[i]) * fr) * s.gain;
+            out[2 * f] += (a.left[i] + (a.left[i + 1] - a.left[i]) * fr) * s.gain;
+            out[2 * f + 1] += (a.right[i] + (a.right[i + 1] - a.right[i]) * fr) * s.gain;
             any = true;
         }
     }
@@ -110,23 +114,25 @@ mod tests {
     }
 
     #[test]
-    fn extended_clips_loop_the_file_and_trimmed_ones_stop() {
+    fn trimmed_clips_start_into_the_file_and_stop_early() {
         // 1 s ramp 0..1 at the output rate: the value tells the position in the file
         let sr = 48_000.0;
         let ramp: Vec<f32> = (0..48_000).map(|i| i as f32 / 48_000.0).collect();
         let a = Arc::new(AudioBuffer::new(48_000, ramp.clone(), ramp));
-        // -0.75 s is 0.25 s into the file; lasting 2 s it plays 0.25..1, 0..1, 0..0.25
-        let s = vec![SchedSample { lane: 0, start: 0.0, gain: 1.0, offset: -0.75, length: 2.0, audio: Some(a.clone()) }];
-        let at = |t: f64| {
+        let at = |s: &[SchedSample], t: f64| {
             let mut out = vec![0.0f32; 2];
-            render(&s, t, 1, sr, &mut out);
+            render(s, t, 1, sr, &mut out);
             out[0]
         };
-        assert!((at(0.0) - 0.25).abs() < 1e-3);
-        assert!((at(1.0) - 0.25).abs() < 1e-3);
-        assert!((at(1.5) - 0.75).abs() < 1e-3);
-        let mut out = vec![0.0f32; 2 * 256];
-        assert!(!render(&s, 2.0, 256, sr, &mut out));
+        let s = vec![SchedSample { lane: 0, start: 0.0, gain: 1.0, offset: 0.25, length: 0.5, audio: Some(a.clone()) }];
+        assert!((at(&s, 0.0) - 0.25).abs() < 1e-3);
+        assert!((at(&s, 0.4) - 0.65).abs() < 1e-3);
+        assert_eq!(at(&s, 0.6), 0.0);
+        // reaching past both ends of the file (before it is cut again): silence there, no repeat
+        let s = vec![SchedSample { lane: 0, start: 0.0, gain: 1.0, offset: -0.5, length: 2.0, audio: Some(a.clone()) }];
+        assert_eq!(at(&s, 0.25), 0.0);
+        assert!((at(&s, 0.75) - 0.25).abs() < 1e-3);
+        assert_eq!(at(&s, 1.75), 0.0);
         // trimmed to 0.5 s: silent after that
         let s = vec![SchedSample { lane: 0, start: 0.0, gain: 1.0, offset: 0.0, length: 0.5, audio: Some(a) }];
         let mut out = vec![0.0f32; 2 * 48_000];

@@ -1559,6 +1559,7 @@ impl StudioView {
         }
         let mut remove: Option<usize> = None;
         let mut dup: Option<usize> = None;
+        let mut recut: Option<(usize, f64)> = None;
         let mut edited = false;
         for j in 0..self.mix.samples.len() {
             let c = self.mix.samples[j].clone();
@@ -1581,21 +1582,18 @@ impl StudioView {
                 let x0 = r.left().max(canvas.left());
                 let mut x = x0;
                 while x < r.right().min(canvas.right()) {
-                    // position in the file: an extended clip loops it
-                    let t = (c.offset + ((x - r.left()) / self.zoom) as f64).rem_euclid(file_dur.max(1e-3));
-                    let v = peaks.get((t * 100.0) as usize).copied().unwrap_or(0.0).min(1.0);
+                    let t = c.offset + ((x - r.left()) / self.zoom) as f64;
+                    let v = if t < 0.0 { 0.0 } else { peaks.get((t * 100.0) as usize).copied().unwrap_or(0.0).min(1.0) };
                     mesh.add_colored_rect(Rect::from_min_max(pos2(x, cy - v * hmax), pos2(x + 1.0, cy + v * hmax)), SAMPLE_COLOR);
                     x += 1.0;
                 }
                 pc.add(egui::Shape::mesh(mesh));
             }
-            // where a looping clip starts the file again
-            if file_dur > 0.05 {
-                let mut ts = file_dur - c.offset.rem_euclid(file_dur);
-                while ts < dur - 1e-3 {
-                    let xs = x_of(t0 + ts);
-                    pc.line_segment([pos2(xs, r.top() + 14.0), pos2(xs, r.bottom())], Stroke::new(1.0, Color32::WHITE.gamma_multiply(0.35)));
-                    ts += file_dur;
+            // stretches the file doesn't cover yet (it is being cut again from the track)
+            let (gap_l, gap_r) = ((-c.offset).max(0.0), (c.offset + dur - file_dur).max(0.0));
+            for (a, b) in [(0.0, gap_l), (dur - gap_r, dur)] {
+                if b - a > 1e-3 {
+                    pc.rect_filled(Rect::from_min_max(pos2(x_of(t0 + a), r.top()), pos2(x_of(t0 + b), r.bottom())), 0.0, Color32::from_black_alpha(90));
                 }
             }
             let sel = self.selection == Selection::Sample(j) || self.multi.samples.contains(&j);
@@ -1677,6 +1675,7 @@ impl StudioView {
                 }
                 if eresp.drag_stopped() {
                     self.drag = None;
+                    recut = Some((j, file_dur));
                 }
                 if eresp.dragged() {
                     let grab = match self.drag {
@@ -1696,7 +1695,13 @@ impl StudioView {
                         }
                     }
                 }
-                eresp.on_hover_text(if left { "Drag to trim or extend the start (loops the file; Shift: free)" } else { "Drag to trim or extend the end (loops the file; Shift: free)" });
+                let tip = match (left, c.source.is_some()) {
+                    (true, true) => "Drag to cut the start, or pull it left for more of the track before it (Shift: free)",
+                    (false, true) => "Drag to cut the end, or pull it right for more of the track after it (Shift: free)",
+                    (true, false) => "Drag to cut the start (Shift: free)",
+                    (false, false) => "Drag to cut the end (Shift: free)",
+                };
+                eresp.on_hover_text(tip);
             }
             resp.context_menu(|ui| {
                 ui.label(RichText::new(&name).strong());
@@ -1720,7 +1725,10 @@ impl StudioView {
                     ui.close();
                 }
             });
-            resp.on_hover_text(format!("{name} · {:.1} s · drag to move (snaps to the beat grid, finer when zoomed in; Shift: free) · drag an edge to trim or extend it · Backspace deletes it · right-click for more", dur));
+            resp.on_hover_text(format!("{name} · {:.1} s · drag to move (snaps to the beat grid, finer when zoomed in; Shift: free) · drag an edge to cut it or, if cut from a track, extend it · Backspace deletes it · right-click for more", dur));
+        }
+        if let Some((j, file_dur)) = recut {
+            self.recut_sample(j, file_dur);
         }
         if let Some(j) = dup {
             let mut c = self.mix.samples[j].clone();
@@ -1952,20 +1960,21 @@ impl StudioView {
 
 /// Start beat, file offset and length of sample clip `c` (its file `file_secs` long) with its
 /// left or right edge moved to mix beat `beat`. The other edge stays put, and so does the music:
-/// the left edge moves the offset with it. A clip that plays the file exactly once again goes
-/// back to having no length of its own.
+/// the left edge moves the offset with it. A clip cut from a track can reach past its file as far
+/// as the track goes; one that plays its file exactly once again has no length of its own.
 fn trim_sample(tl: &clubcraft_core::MixTimeline, c: &SampleClip, file_secs: f64, left: bool, beat: f64) -> (f64, f64, Option<f64>) {
     // short enough to cut a single hit, long enough to keep both edges grabbable
     const MIN_SECS: f64 = 0.05;
+    let (lo, hi) = c.source.as_ref().map_or((0.0, file_secs), |s| s.file_bounds());
     let t0 = tl.sec_at_beat(c.start_beat);
     let t1 = t0 + c.secs(file_secs);
     let (start, offset, len) = if left {
-        let ns = tl.sec_at_beat(beat).min(t1 - MIN_SECS).max(0.0);
-        let start = if ns < tl.sec_at_beat(beat) - 1e-9 { tl.beat_at_sec(ns) } else { beat };
-        let offset = c.offset + (ns - t0);
-        (start, if file_secs > 0.0 { offset.rem_euclid(file_secs) } else { offset }, t1 - ns)
+        let want = tl.sec_at_beat(beat);
+        let ns = want.max(t0 - (c.offset - lo)).max(0.0).min(t1 - MIN_SECS);
+        let start = if (ns - want).abs() > 1e-9 { tl.beat_at_sec(ns) } else { beat };
+        (start, c.offset + (ns - t0), t1 - ns)
     } else {
-        (c.start_beat, c.offset, (tl.sec_at_beat(beat) - t0).max(MIN_SECS))
+        (c.start_beat, c.offset, (tl.sec_at_beat(beat) - t0).min(hi - c.offset).max(MIN_SECS))
     };
     let whole = offset.abs() < 1e-6 && (len - file_secs).abs() < 1e-4;
     (start, if whole { 0.0 } else { offset }, if whole { None } else { Some(len) })

@@ -685,8 +685,8 @@ pub const MIX_LANES: usize = 2;
 pub const SAMPLE_LANES: usize = 2;
 
 /// An audio file placed on a sample lane. It plays at its own speed from `start_beat` (mix
-/// beats), on top of the decks. Its edges can be dragged: a clip longer than the file loops it,
-/// a shorter one cuts it.
+/// beats), on top of the decks. Its edges can be dragged to cut it shorter; one cut from a track
+/// can also grow past the file, which is then cut again from the track.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SampleClip {
     pub lane: u8,
@@ -694,13 +694,42 @@ pub struct SampleClip {
     pub start_beat: f64,
     #[serde(default)]
     pub gain_db: f32,
-    /// Where in the file (s) the clip starts; taken modulo the file's length, so a clip extended
-    /// to the left plays the file's end first.
+    /// Where in the file (s) the clip starts. Below 0 (or a clip reaching past the file's end)
+    /// only until the file is cut again from its source; silence there meanwhile.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub offset: f64,
     /// Length of the clip (s); `None` plays the file once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub length: Option<f64>,
+    /// The track part the file was cut from, if it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SampleSource>,
+}
+
+/// Where a sample file was cut from: a range of a track, as the mix played it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SampleSource {
+    pub audio_path: std::path::PathBuf,
+    pub hash: String,
+    /// Stem weights (drums, bass, other, vocals); `None` = the original audio.
+    pub stems: Option<[f32; 4]>,
+    /// Track position (s) at the file's start.
+    pub t0: f64,
+    /// Length of the track (s).
+    pub track_secs: f64,
+    /// Speed it was cut at (mix tempo / track tempo): one second of the file is `rate` seconds
+    /// of the track.
+    pub rate: f64,
+    /// Transposition (semitones) it was cut with.
+    pub semis: f32,
+}
+
+impl SampleSource {
+    /// The file positions (s) that lie inside the track.
+    pub fn file_bounds(&self) -> (f64, f64) {
+        let rate = self.rate.max(1e-3);
+        (-self.t0 / rate, (self.track_secs - self.t0) / rate)
+    }
 }
 
 fn is_zero(x: &f64) -> bool {
@@ -710,7 +739,7 @@ fn is_zero(x: &f64) -> bool {
 impl SampleClip {
     /// The whole file once, from `start_beat`.
     pub fn new(lane: u8, path: std::path::PathBuf, start_beat: f64) -> Self {
-        SampleClip { lane, path, start_beat, gain_db: 0.0, offset: 0.0, length: None }
+        SampleClip { lane, path, start_beat, gain_db: 0.0, offset: 0.0, length: None, source: None }
     }
 
     /// Length (s) of the clip when its file is `file_secs` long.

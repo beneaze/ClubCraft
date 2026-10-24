@@ -55,7 +55,8 @@ pub struct Request {
     pub rate: f64,
     /// Transposition in semitones (key shift, plus varispeed without keylock).
     pub semis: f32,
-    pub part: Part,
+    /// Stem weights (drums, bass, other, vocals); `None` = the original audio.
+    pub weights: Option<[f32; 4]>,
     pub out: PathBuf,
 }
 
@@ -72,7 +73,7 @@ pub fn run(r: &Request) -> Result<f64> {
     let pre_frames = (r.t0 * SR) as usize - a;
     let b = (r.t1 * SR) as usize;
     let (mut l, mut rr) = (Vec::with_capacity(b - a), Vec::with_capacity(b - a));
-    match r.part.weights() {
+    match r.weights {
         None => {
             let audio = clubcraft_audio::decode_file(&r.audio_path, clubcraft_core::SAMPLE_RATE)?;
             let b = b.min(audio.frames());
