@@ -137,13 +137,24 @@ fn header_text(bg: Color32) -> Color32 {
 }
 
 /// One mode entry: the chosen one is filled with the column's colour and outlined in it.
+/// Painted by hand: egui's `Button` derives its margins from the hover state's stroke, so a
+/// fixed outline made the chosen box shift by a pixel under the pointer.
 fn mode_button(ui: &mut Ui, selected: bool, label: &str, col: Color32) -> egui::Response {
-    let b = if selected {
-        egui::Button::new(RichText::new(label).color(Color32::WHITE).strong()).fill(theme::blend(theme::PANEL_HI, col, 0.45)).stroke(Stroke::new(1.5, col))
+    let (r, resp) = ui.allocate_exact_size(vec2(128.0, MODE_H), Sense::click());
+    let p = ui.painter();
+    let radius = ui.visuals().widgets.inactive.corner_radius;
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    if selected {
+        p.rect_filled(r, radius, theme::blend(theme::PANEL_HI, col, 0.45));
+        p.rect_stroke(r, radius, Stroke::new(1.5, col), egui::StrokeKind::Inside);
+        p.text(r.center(), egui::Align2::CENTER_CENTER, label, font, Color32::WHITE);
     } else {
-        egui::Button::new(label).fill(Color32::TRANSPARENT).stroke(Stroke::NONE)
-    };
-    ui.add_sized([128.0, MODE_H], b)
+        if resp.hovered() {
+            p.rect_filled(r, radius, ui.visuals().widgets.hovered.weak_bg_fill);
+        }
+        p.text(r.center(), egui::Align2::CENTER_CENTER, label, font, theme::TEXT);
+    }
+    resp
 }
 
 fn style_help(s: TransitionStyle) -> &'static str {
@@ -156,6 +167,7 @@ fn style_help(s: TransitionStyle) -> &'static str {
         TransitionStyle::EchoOut => "Old track echoes out, new track drops in on the downbeat.",
         TransitionStyle::Cut => "Hard cut on the downbeat.",
         TransitionStyle::Mashup => "The old track's vocals sing over the new track's instrumental for the whole transition.",
+        TransitionStyle::MashupIn => "The new track's vocals sing over the old track's instrumental for the whole transition.",
         TransitionStyle::Custom => "Your own curves.",
     }
 }
@@ -360,8 +372,12 @@ impl StudioView {
             });
         });
         if let Some(p) = manual {
-            // draw it in the timeline: its stem row, its effect row or its curve
+            // draw it in the timeline: its stem row, its effect row (shown even while unused) or
+            // its curve
             self.curve_target = crate::studio_timeline::CurveTarget::of(p);
+            if self.curve_target == crate::studio_timeline::CurveTarget::Effects {
+                self.fx_shown.insert((k, p));
+            }
         }
         if changed {
             self.changed();

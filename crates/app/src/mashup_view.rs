@@ -4,7 +4,7 @@
 use crate::app::Shared;
 use crate::mashup::{self, Query};
 use crate::theme;
-use clubcraft_analysis::mashup::{Match, MatchOptions};
+use clubcraft_analysis::mashup::{MashupOrder, Match, MatchOptions};
 use clubcraft_core::{Mix, TrackId};
 use crossbeam_channel::Receiver;
 use eframe::egui::{self, Color32, RichText, Sense, Ui};
@@ -26,6 +26,8 @@ pub enum MashupAction {
     NewMix(Match),
     Insert(Match),
     Apply(Match, usize),
+    /// Separate the track again with the best vocal model.
+    SeparateBest(TrackId),
 }
 
 struct Job {
@@ -36,7 +38,10 @@ struct Job {
 
 pub struct MashupView {
     pub open: bool,
+    /// The track the search is for; it plays first in a mix made from a match.
     pub vocal: Option<TrackId>,
+    /// Its vocals over the other tracks, or the other tracks' vocals over it.
+    order: MashupOrder,
     pick: String,
     auto_phrase: bool,
     phrase_bar: i32,
@@ -46,10 +51,9 @@ pub struct MashupView {
     scope_mix: bool,
     rerank: bool,
     target: Target,
-    /// Only this instrumental (transition mode) and bar ranges.
+    /// Only this other track (transition mode), and the bar counts of both tracks there.
     inst_only: Option<TrackId>,
-    vocal_range: Option<(i32, i32)>,
-    inst_range: Option<(i32, i32)>,
+    transition_bars: Option<(i32, i32)>,
     job: Option<Job>,
     results: Vec<Match>,
     message: String,
@@ -63,6 +67,7 @@ impl Default for MashupView {
         MashupView {
             open: false,
             vocal: None,
+            order: MashupOrder::VocalsFirst,
             pick: String::new(),
             auto_phrase: true,
             phrase_bar: 0,
@@ -73,8 +78,7 @@ impl Default for MashupView {
             rerank: true,
             target: Target::Library,
             inst_only: None,
-            vocal_range: None,
-            inst_range: None,
+            transition_bars: None,
             job: None,
             results: Vec::new(),
             message: String::new(),
@@ -110,8 +114,7 @@ impl MashupView {
         self.just_opened = true;
         self.target = Target::Library;
         self.inst_only = None;
-        self.vocal_range = None;
-        self.inst_range = None;
+        self.transition_bars = None;
         self.auto_phrase = true;
         self.results.clear();
         self.message.clear();
@@ -122,7 +125,8 @@ impl MashupView {
         self.run_next_frame = self.vocal.is_some();
     }
 
-    /// Find where the vocals of track `k` fit best over track `k + 1` (transition `k`).
+    /// Find a mashup for transition `k` (track `k` → `k + 1`): by default the vocals of track `k`
+    /// over track `k + 1`; the finder can turn it round.
     pub fn open_for_transition(&mut self, mix: &Mix, k: usize, sh: &Shared) {
         let (Some(a), Some(b)) = (mix.tracks.get(k), mix.tracks.get(k + 1)) else { return };
         self.open_for(Some(a.track_id), sh);
@@ -138,9 +142,7 @@ impl MashupView {
         let (na, nb) = (bars_of(a.track_id), bars_of(b.track_id));
         self.target = Target::Transition { mix_id: mix.id, index: k };
         self.inst_only = Some(b.track_id);
-        // vocals from the second half of the outgoing track, instrumental from the first 60 %
-        self.vocal_range = Some((na * 45 / 100, na));
-        self.inst_range = Some((0, nb * 60 / 100));
+        self.transition_bars = Some((na, nb));
     }
 
     /// True once after the finder was opened (the studio switches to its tab).
@@ -170,17 +172,29 @@ impl MashupView {
             (None, false) => None,
         };
         let transition = self.inst_only.is_some();
+        // in a transition the outgoing track gives its second half, the incoming track its first
+        // 60 %, whichever of them sings
+        let (first, second) = match self.transition_bars {
+            Some((na, nb)) => (Some((na * 45 / 100, na)), Some((0, nb * 60 / 100))),
+            None => (None, None),
+        };
+        let (vocal_range, inst_range) = match self.order {
+            MashupOrder::VocalsFirst => (first, second),
+            MashupOrder::InstrumentalFirst => (second, first),
+        };
+        // a fixed phrase bar only means something for a single vocal track
+        let fixed = !self.auto_phrase && (self.order == MashupOrder::VocalsFirst || transition);
         let opts = MatchOptions {
             bars: self.bars,
             key_range: self.key_range,
             tempo_tolerance: self.tempo_pct as f64 / 100.0,
-            vocal_bars: if self.auto_phrase { self.vocal_range } else { None },
-            inst_bars: self.inst_range,
+            vocal_bars: if fixed { None } else { vocal_range },
+            inst_bars: inst_range,
             per_track: if transition { 10 } else { 2 },
             max_results: if transition { 10 } else { 30 },
             ..Default::default()
         };
-        let q = Query { vocal, vocal_bar: (!self.auto_phrase).then_some(self.phrase_bar), candidates, opts, rerank: self.rerank };
+        let q = Query { track: vocal, order: self.order, vocal_bar: fixed.then_some(self.phrase_bar), candidates, opts, rerank: self.rerank };
         let (tx, rx) = crossbeam_channel::bounded(1);
         let progress = Arc::new(Mutex::new((0.0, "Starting".to_string())));
         let cancel = Arc::new(AtomicBool::new(false));
@@ -242,7 +256,7 @@ impl MashupView {
         ui.horizontal(|ui| {
             ui.label(RichText::new("🎤 Mashup finder").size(15.0).strong());
             ui.add_space(10.0);
-            ui.label(RichText::new("Vocals from").color(theme::TEXT_DIM));
+            ui.label(RichText::new("Track").color(theme::TEXT_DIM));
             let sel = self.vocal.map(|id| track_label(sh, id)).unwrap_or_else(|| "choose a track…".into());
             egui::ComboBox::from_id_salt("mashup-vocal").width(420.0).selected_text(crate::studio::truncate(&sel, 60)).show_ui(ui, |ui| {
                 ui.add(egui::TextEdit::singleline(&mut self.pick).hint_text("search").desired_width(400.0));
@@ -262,15 +276,18 @@ impl MashupView {
                             self.vocal = Some(id);
                             self.target = Target::Library;
                             self.inst_only = None;
-                            self.vocal_range = None;
-                            self.inst_range = None;
+                            self.transition_bars = None;
                         }
                     }
                 });
             });
-            if let Target::Transition { index, .. } = self.target {
-                ui.label(RichText::new(format!("over track {} (transition {} ▶ {})", index + 2, index + 1, index + 2)).color(theme::accent()));
-            }
+            // old vocals in the new song, or new vocals in the old song
+            let (own, others) = match self.target {
+                Target::Transition { index, .. } => (format!("Its vocals over track {}", index + 2), format!("Track {}'s vocals over it", index + 2)),
+                Target::Library => ("Its vocals over other tracks".to_string(), "Other tracks' vocals over it".to_string()),
+            };
+            ui.selectable_value(&mut self.order, MashupOrder::VocalsFirst, own).on_hover_text("This track plays, its vocals sing on over the next track's instrumental, which plays on (old vocals in the new song)");
+            ui.selectable_value(&mut self.order, MashupOrder::InstrumentalFirst, others).on_hover_text("This track plays, the next track's vocals come in over its instrumental, and that track plays on (new vocals in the old song)");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 close = ui.button("Close").on_hover_text("Back to the track / transition editor").clicked();
             });
@@ -331,6 +348,17 @@ impl MashupView {
                 }
             }
         });
+        // the fast models leave synths and pads in the vocal stem: the acapella sounds dirty and
+        // the phrase choice can't tell them from singing
+        let model = self.vocal.filter(|_| self.order == MashupOrder::VocalsFirst).and_then(|v| sh.analyses.get(&v)).and_then(|a| a.stems_model.clone());
+        if let (Some(v), Some(model)) = (self.vocal, model.filter(|m| !m.starts_with("melroformer"))) {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("The vocals of this track were separated with {model}, which leaves instruments in the vocal stem.")).size(11.5).color(theme::WARN));
+                if ui.small_button("Separate in Best quality").on_hover_text("Separate this track again with the Mel-RoFormer vocal model (a few minutes). Cleaner acapella, better phrases.").clicked() {
+                    out.push(MashupAction::SeparateBest(v));
+                }
+            });
+        }
         if let Some(j) = &self.job {
             let (f, l) = j.progress.lock().clone();
             ui.add(egui::ProgressBar::new(f).text(l).desired_height(16.0));
@@ -351,16 +379,19 @@ impl MashupView {
         let results = self.results.clone();
         egui::ScrollArea::vertical().id_salt("mashup-results").show(ui, |ui| {
             egui::Grid::new("mashup-grid").striped(true).num_columns(9).spacing([10.0, 6.0]).show(ui, |ui| {
-                for h in ["", "Instrumental", "Where", "Vocals", "Shift", "Fit per bar", "Score", "AI", ""] {
+                let other_head = if self.order == MashupOrder::VocalsFirst { "Instrumental" } else { "Vocals of" };
+                for h in ["", other_head, "Instrumental at", "Vocals at", "Shift", "Fit per bar", "Score", "AI", ""] {
                     ui.label(RichText::new(h).size(11.0).color(theme::TEXT_DIM));
                 }
                 ui.end_row();
                 for (i, m) in results.iter().enumerate() {
                     ui.label(RichText::new(format!("{}", i + 1)).color(theme::TEXT_DIM));
-                    ui.label(crate::studio::truncate(&track_label(sh, m.inst_track), 48));
+                    let other = if m.order == MashupOrder::VocalsFirst { m.inst_track } else { m.vocal_track };
+                    ui.label(crate::studio::truncate(&track_label(sh, other), 48));
                     let when = |id: TrackId, bar: i32| sh.analyses.get(&id).and_then(|a| a.grid).map(|g| theme::fmt_time_short(g.time_of_bar(bar as f64))).unwrap_or_default();
-                    ui.label(format!("bars {}–{} · {}", m.inst_bar + 1, m.inst_bar + m.bars as i32, when(m.inst_track, m.inst_bar)));
-                    ui.label(RichText::new(format!("bars {}–{} · {}", m.vocal_bar + 1, m.vocal_bar + m.bars as i32, when(m.vocal_track, m.vocal_bar))).color(theme::TEXT_DIM));
+                    let section = sh.analyses.get(&m.inst_track).and_then(|a| a.sections.iter().find(|s| m.inst_bar >= s.start_bar && m.inst_bar < s.start_bar + s.bars as i32)).map(|s| format!(" · {}", s.kind.label())).unwrap_or_default();
+                    ui.label(format!("bars {}–{} · {}{section}", m.inst_bar + 1, m.inst_bar + m.bars as i32, when(m.inst_track, m.inst_bar)));
+                    ui.label(RichText::new(format!("bars {}–{} · {} · {}", m.vocal_bar + 1, m.vocal_bar + m.bars as i32, when(m.vocal_track, m.vocal_bar), m.vocal_role.label())).color(theme::TEXT_DIM));
                     let tempo = (m.tempo_ratio - 1.0) * 100.0;
                     let mut shift = if m.key_shift == 0 { "key ±0".to_string() } else { format!("key {:+}", m.key_shift) };
                     if tempo.abs() >= 0.1 {
@@ -368,11 +399,13 @@ impl MashupView {
                     }
                     ui.label(RichText::new(shift).monospace().size(11.5));
                     fit_strip(ui, &m.per_bar).on_hover_text(format!(
-                        "harmony {:.0} % (weakest 4 bars {:.0} %) · masking {:.0} % · leftover vocals {:.0} %",
+                        "harmony {:.0} % (weakest 4 bars {:.0} %) · masking {:.0} % · leftover vocals {:.0} %\nspot in the instrumental {:.0} % · vocal phrase {:.0} %",
                         m.harmony * 100.0,
                         m.harmony_min * 100.0,
                         m.masking * 100.0,
-                        m.residual_vocals * 100.0
+                        m.residual_vocals * 100.0,
+                        m.placement * 100.0,
+                        m.phrase * 100.0
                     ));
                     score_bar(ui, m.score);
                     ui.label(m.learned.map(|l| format!("{:.0}", l * 100.0)).unwrap_or_else(|| "–".into()));
@@ -397,7 +430,7 @@ impl MashupView {
                                 if ui.button("New mix").on_hover_text("Create a mix with this mashup").clicked() {
                                     out.push(MashupAction::NewMix(m.clone()));
                                 }
-                                if vocal_in_mix.is_some() && ui.button("Insert").on_hover_text("Put the instrumental after the vocal track in the open mix").clicked() {
+                                if vocal_in_mix.is_some() && ui.button("Insert").on_hover_text("Put the other track after this one in the open mix").clicked() {
                                     out.push(MashupAction::Insert(m.clone()));
                                 }
                             }

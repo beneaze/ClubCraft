@@ -242,7 +242,9 @@ fn analyze_with(lib: &Library, id: TrackId, s: &Settings, structure: clubcraft_a
         ..Default::default()
     };
     let sref = owned.as_ref().map(|o| o.as_ref());
-    let (analysis, wf) = rayon::join(|| clubcraft_analysis::analyze(&audio, sref.as_ref(), &opts), || clubcraft_analysis::waveform(&audio, sref));
+    // the structure model runs here rather than inside the analysis, so its labels can be kept
+    let act = if structure == clubcraft_analysis::StructureSource::Auto { sref.as_ref().and_then(clubcraft_analysis::allinone::shared_activations) } else { None };
+    let (analysis, wf) = rayon::join(|| clubcraft_analysis::analyze_with_activations(&audio, sref.as_ref(), &opts, act.as_ref()), || clubcraft_analysis::waveform(&audio, sref));
     progress(0.9, "Saving");
     wf.save(&t.hash)?;
     lib.save_analysis(id, &analysis)?;
@@ -251,6 +253,15 @@ fn analyze_with(lib: &Library, id: TrackId, s: &Settings, structure: clubcraft_a
         let f = mashup_features_from(sr, grid, &analysis);
         if let Err(e) = save_mashup_features(&t.hash, &f) {
             log::warn!("mashup features: {e:#}");
+        }
+        let m = clubcraft_analysis::vocals::compute(sr, grid, analysis.duration);
+        if let Err(e) = save_vocal_map(&t.hash, &m) {
+            log::warn!("vocal map: {e:#}");
+        }
+        if let Some(act) = &act {
+            if let Err(e) = save_labels(&t.hash, &clubcraft_analysis::labels::BarLabels::from_activations(act, grid, analysis.duration)) {
+                log::warn!("structure labels: {e:#}");
+            }
         }
     }
     let _ = Waveform::cache_path(&t.hash);
@@ -265,7 +276,9 @@ pub fn mashup_features_path(hash: &str) -> std::path::PathBuf {
 
 fn mashup_features_from(stems: &clubcraft_analysis::StemsRef, grid: clubcraft_core::BeatGrid, a: &clubcraft_core::Analysis) -> clubcraft_analysis::mashup::MashupFeatures {
     let starts: Vec<f64> = a.sections.iter().map(|s| s.start).collect();
-    clubcraft_analysis::mashup::compute(stems, grid, a.duration, a.gain_db.unwrap_or(0.0), &starts)
+    let mut f = clubcraft_analysis::mashup::compute(stems, grid, a.duration, a.gain_db.unwrap_or(0.0), &starts);
+    f.set_sections(&a.sections);
+    f
 }
 
 fn save_mashup_features(hash: &str, f: &clubcraft_analysis::mashup::MashupFeatures) -> Result<()> {
@@ -279,9 +292,13 @@ fn save_mashup_features(hash: &str, f: &clubcraft_analysis::mashup::MashupFeatur
 
 /// Cached mashup features of a track if they are current (same grid as the analysis).
 pub fn cached_mashup_features(hash: &str, a: &clubcraft_core::Analysis) -> Option<clubcraft_analysis::mashup::MashupFeatures> {
-    let f = clubcraft_analysis::mashup::MashupFeatures::from_bytes(&std::fs::read(mashup_features_path(hash)).ok()?)?;
+    let mut f = clubcraft_analysis::mashup::MashupFeatures::from_bytes(&std::fs::read(mashup_features_path(hash)).ok()?)?;
     let g = a.grid?;
-    (f.version == clubcraft_analysis::mashup::FEATURE_VERSION && (f.bpm - g.bpm).abs() < 1e-6 && (f.downbeat - g.downbeat).abs() < 1e-6).then_some(f)
+    if f.version != clubcraft_analysis::mashup::FEATURE_VERSION || (f.bpm - g.bpm).abs() > 1e-6 || (f.downbeat - g.downbeat).abs() > 1e-6 {
+        return None;
+    }
+    f.set_sections(&a.sections);
+    Some(f)
 }
 
 /// Mashup features of a track, computed from its cached stems when missing or stale (~1-2 s,
@@ -303,4 +320,93 @@ pub fn mashup_features(lib: &Library, id: TrackId) -> Result<Option<clubcraft_an
     let f = mashup_features_from(&owned.as_ref(), grid, &a);
     save_mashup_features(&t.hash, &f)?;
     Ok(Some(f))
+}
+
+// ------------------------------------------------------------------ vocal maps
+
+pub fn vocal_map_path(hash: &str) -> std::path::PathBuf {
+    clubcraft_core::paths::data_dir().join("Mashup").join(format!("{hash}.ccvm"))
+}
+
+fn save_vocal_map(hash: &str, m: &clubcraft_analysis::vocals::VocalMap) -> Result<()> {
+    let p = vocal_map_path(hash);
+    if let Some(d) = p.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    std::fs::write(&p, m.to_bytes())?;
+    Ok(())
+}
+
+/// Cached vocal map of a track if it is current (same grid as the analysis).
+pub fn cached_vocal_map(hash: &str, a: &clubcraft_core::Analysis) -> Option<clubcraft_analysis::vocals::VocalMap> {
+    let m = clubcraft_analysis::vocals::VocalMap::from_bytes(&std::fs::read(vocal_map_path(hash)).ok()?)?;
+    let g = a.grid?;
+    (m.version == clubcraft_analysis::vocals::VERSION && (m.bpm - g.bpm).abs() < 1e-6 && (m.downbeat - g.downbeat).abs() < 1e-6).then_some(m)
+}
+
+/// The vocal map of a track ([`clubcraft_analysis::vocals`]), computed from the cached stems when
+/// missing or stale (~1 s, mostly loading them; callers hold the heavy-work lock). `None`
+/// without stems.
+pub fn vocal_map(lib: &Library, id: TrackId) -> Result<Option<clubcraft_analysis::vocals::VocalMap>> {
+    let t = lib.track(id)?.context("unknown track")?;
+    let Some(a) = lib.analysis(id)? else { return Ok(None) };
+    if let Some(m) = cached_vocal_map(&t.hash, &a) {
+        return Ok(Some(m));
+    }
+    let Some(grid) = a.grid else { return Ok(None) };
+    let sp = stems_path(&t.hash);
+    if !sp.exists() {
+        return Ok(None);
+    }
+    let st = clubcraft_stems::load_stem_track(&sp)?;
+    let owned = OwnedStems::from_stem_track_partial(&st);
+    drop(st);
+    let m = clubcraft_analysis::vocals::compute(&owned.as_ref(), grid, a.duration);
+    save_vocal_map(&t.hash, &m)?;
+    Ok(Some(m))
+}
+
+// ------------------------------------------------------------------ functional labels
+
+pub fn labels_path(hash: &str) -> std::path::PathBuf {
+    clubcraft_core::paths::data_dir().join("Mashup").join(format!("{hash}.ccfl"))
+}
+
+fn save_labels(hash: &str, l: &clubcraft_analysis::labels::BarLabels) -> Result<()> {
+    let p = labels_path(hash);
+    if let Some(d) = p.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    std::fs::write(&p, l.to_bytes())?;
+    Ok(())
+}
+
+/// Cached functional labels of a track if they are current (same grid as the analysis).
+pub fn cached_labels(hash: &str, a: &clubcraft_core::Analysis) -> Option<clubcraft_analysis::labels::BarLabels> {
+    let l = clubcraft_analysis::labels::BarLabels::from_bytes(&std::fs::read(labels_path(hash)).ok()?)?;
+    let g = a.grid?;
+    (l.version == clubcraft_analysis::labels::VERSION && (l.bpm - g.bpm).abs() < 1e-6 && (l.downbeat - g.downbeat).abs() < 1e-6).then_some(l)
+}
+
+/// The structure model's functional labels per bar (chorus, verse ...), computed from the cached
+/// stems when missing or stale: ~20-30 s and ~2 GB while the model runs, so callers hold the
+/// heavy-work lock. `None` without stems, without the model, or for tracks under 102 s.
+pub fn labels(lib: &Library, id: TrackId) -> Result<Option<clubcraft_analysis::labels::BarLabels>> {
+    let t = lib.track(id)?.context("unknown track")?;
+    let Some(a) = lib.analysis(id)? else { return Ok(None) };
+    if let Some(l) = cached_labels(&t.hash, &a) {
+        return Ok(Some(l));
+    }
+    let Some(grid) = a.grid else { return Ok(None) };
+    let sp = stems_path(&t.hash);
+    if !sp.exists() {
+        return Ok(None);
+    }
+    let st = clubcraft_stems::load_stem_track(&sp)?;
+    let owned = OwnedStems::from_stem_track_partial(&st);
+    drop(st);
+    let Some(act) = clubcraft_analysis::allinone::shared_activations(&owned.as_ref()) else { return Ok(None) };
+    let l = clubcraft_analysis::labels::BarLabels::from_activations(&act, grid, a.duration);
+    save_labels(&t.hash, &l)?;
+    Ok(Some(l))
 }

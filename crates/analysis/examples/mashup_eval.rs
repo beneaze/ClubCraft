@@ -157,10 +157,10 @@ fn main() {
     // full search timing
     if let Some((id, _, f)) = feats.first() {
         let o = MatchOptions::default();
-        let regions = mashup::vocal_regions(f, &o, 3);
+        let units = mashup::vocal_units(f, &o, 6);
         let cands: Vec<(i64, &MashupFeatures)> = feats.iter().map(|(i, _, g)| (*i, g)).collect();
         let t = Instant::now();
-        let r = mashup::find((*id, f), &regions, &cands, &o);
+        let r = mashup::find((*id, f), &units, &cands, &o);
         let name = |i: i64| feats.iter().find(|x| x.0 == i).map(|x| x.1.chars().take(30).collect::<String>()).unwrap_or_default();
         for m in r.iter().take(8) {
             println!("  {:<30} vocal bar {:>3} → {:<30} bar {:>3} key {:+} tempo {:+.1}% score {:.2} (harm {:.2} min {:.2} mask {:.2} resid {:.2})", name(m.vocal_track), m.vocal_bar, name(m.inst_track), m.inst_bar, m.key_shift, (m.tempo_ratio - 1.0) * 100.0, m.score, m.harmony, m.harmony_min, m.masking, m.residual_vocals);

@@ -119,11 +119,17 @@ impl MixSchedule {
             samples: mix
                 .samples
                 .iter()
-                .map(|c| crate::samples::SchedSample {
-                    lane: c.lane as usize,
-                    start: timeline.sec_at_beat(c.start_beat),
-                    gain: mix.sample_lane_gain(c.lane as usize) * 10f32.powf(c.gain_db / 20.0),
-                    audio: crate::samples::load(&c.path),
+                .map(|c| {
+                    let audio = crate::samples::load(&c.path);
+                    let file_secs = audio.as_ref().map_or(0.0, |a| a.frames() as f64 / a.sample_rate as f64);
+                    crate::samples::SchedSample {
+                        lane: c.lane as usize,
+                        start: timeline.sec_at_beat(c.start_beat),
+                        gain: mix.sample_lane_gain(c.lane as usize) * 10f32.powf(c.gain_db / 20.0),
+                        offset: c.offset,
+                        length: c.secs(file_secs),
+                        audio,
+                    }
                 })
                 .collect(),
             sample_solo: mix.sample_lanes.iter().any(|l| l.solo),

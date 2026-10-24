@@ -92,7 +92,7 @@ pub fn style_color(s: clubcraft_core::TransitionStyle) -> Color32 {
         T::FilterOut => Color32::from_rgb(96, 150, 232),
         T::EchoOut => Color32::from_rgb(232, 116, 100),
         T::Cut => Color32::from_rgb(176, 178, 186),
-        T::Mashup => Color32::from_rgb(170, 212, 84),
+        T::Mashup | T::MashupIn => Color32::from_rgb(170, 212, 84),
         T::Custom => Color32::from_rgb(210, 200, 120),
     }
 }

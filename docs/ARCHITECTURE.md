@@ -70,25 +70,68 @@ search job and `mashup_view.rs` the window.
   and the melody's level in the vocal band (300 Hz to 3.4 kHz). They're stored in
   `<data>/Mashup/<hash>.ccmf` (about 6 kB per track), written by the analysis when stems exist,
   and computed on demand for older tracks.
-* **Score** for "vocals of A, bars a..a+n, shifted k semitones, over the instrumental of B from
-  bar b":
-  * per bar, a directional interval-consonance table applied to the two chroma vectors
-    (`CONSONANCE`), with bass weight 0.45;
-  * calibrated to 0..1 (random ≈ 0.5, own instrumental ≈ 0.65), combined as 0.7·mean + 0.3·weakest
-    4 bars;
-  * minus masking, leftover vocals of B, tempo cost (quadratic within the tolerance) and key cost,
-    plus a phrase bonus.
-  * `examples/mashup_eval.rs` measures it: own pairing vs its ±1-2 semitone shifts AUC 0.93,
-    vs random placements 0.78. Chroma cosine scores 0.84 / 0.72, beat resolution doesn't help.
-* **Search**: every vocal phrase (default: the 3 strongest) × every phrase-aligned bar of every
-  track with stems × key shifts, in parallel. That's under 1 ms for 17 tracks.
+Design and sources: [mashup-research.md](mashup-research.md). The finder works in whole units,
+never sliding windows: a sung phrase of A goes on a section start of B. It searches both ways
+round for the chosen track, which plays first in a mix either way (`MashupOrder`): its vocals
+over the other tracks' instrumentals (old vocals in the new song), or the other tracks' vocals
+over its instrumental (new vocals in the old song; every candidate needs its vocal map, computed
+once; structure labels are used where cached, a phrase without them gets a neutral prior). With
+the instrumental first, it ends with the transition, so a late spot in it is fine, while the
+vocal track plays on after its phrase, which therefore must not sit just before its outro.
+
+* **Vocal units** (`mashup::vocal_units`): sung sections of A by the All-In-One structure model's
+  labels (`analysis::labels`, chorus / verse / bridge per bar, in `<data>/Mashup/<hash>.ccfl`;
+  computed on the first search of a vocal track, ~30 s, or on analysis when the model runs).
+  Each is tried at its start and every 8 bars in, and wherever a sung passage starts after a
+  pause of a beat, at the full and half length, with the start moved by up to two bars to where
+  a line starts. Quality = chorus prior (a chorus, or a verse running into one: "the chorus and
+  one verse") × hook × real singing × not a loop × clean boundaries × 0.95 when it doesn't start
+  with its section; a unit that would cut a line scores 0.
+  The line data comes from A's vocal map (`analysis::vocals`, per 16th note, in
+  `<data>/Mashup/<hash>.ccvm`):
+  * singing = vocal stem level, minus leakage (a quieter copy of the melody or drum stem's
+    spectrum) and minus bars the model calls instrumental;
+  * line breaks = two quiet 16ths, quiet meaning a 9 dB dip under the surrounding beat and a
+    half (reverb never lets the stem go silent); a line start needs singing on 3 of its first 4
+    16ths (a sidechain pump ducks the one after each kick); a line may start up to two beats
+    either side of the bar (pickups), and must end by a beat after the unit;
+  * loop = the unit matches itself 1-2 bars later (vocal chops, or synths the separation put
+    into the vocal stem); hook = its best near-copy elsewhere in the track.
+  * The fast separation models leave whole synth leads in the vocal stem, which no picker can
+    tell from singing; the finder offers to separate such a track in Best quality.
+* **Slots** in B: section starts (and the middle of sections twice as long as the unit), and
+  where B's own vocal comes back after two quiet bars; never an intro or outro. B's vocal stem is
+  muted in the mashup and its arrangement was made to carry a vocal there, so a vocal swap is
+  a strong spot (a hand-made Take It Back × Do You Still Care mashup enters exactly where Do You
+  Still Care's breakdown vocal comes back). Placement = the bars' carry (drops and grooves need
+  drums and bass, a breakdown doesn't) × the role fit (chorus → drop 1, groove 0.75, breakdown
+  0.55; verse → groove or breakdown 1, drop 0.8) × entry (section start or B's vocal entry) ×
+  room (0.75 + 0.25 × share of the slot where B sings itself) × position (not the first 18 %,
+  not so late that B has nothing left to play).
+* **Score** = fit × (0.15 + 0.85·placement) × (0.4 + 0.6·phrase) − tempo cost − 0.06 per
+  semitone of key shift (listeners prefer vocals in their own key).
+  * **Fit**: per bar, a directional interval-consonance table applied to the two chroma vectors
+    (`CONSONANCE`), with bass weight 0.45; calibrated to 0..1 (random ≈ 0.5, own instrumental
+    ≈ 0.65), combined as 0.7·mean + 0.3·weakest 4 bars, minus masking and (lightly, since only
+    separation bleed of it is heard) B's own vocals.
+  * `examples/mashup_eval.rs` measures the harmony: own pairing vs its ±1-2 semitone shifts AUC
+    0.93, vs random placements 0.78. Chroma cosine scores 0.84 / 0.72, beat resolution doesn't
+    help. `examples/mashup_places.rs` lists the units and where the best matches land;
+    `examples/mashup_pair.rs` explains one pair part by part and where it ranks;
+    `examples/vocal_probe.rs` prints a track's vocal map (`ALLIN1=1`: with the model's labels).
+* **Search**: up to 6 units × the slots of every track with stems × key shifts, in parallel.
+  Sections come from the analysis (`MashupFeatures::set_sections`), not from the feature file,
+  so they are always current.
 * **Re-ranking**: COCOLA (`analysis::cocola`).
   * The librosa front end (STFT, median-filter HPSS, Slaney mel, dB) is ported to Rust and matches
     librosa within 0.003 dB (`tests/cocola_ref.rs`), and the ONNX embeddings match PyTorch within 1e-5.
   * Two 5 s snippets per candidate: the vocals stretched and pitch-shifted with Signalsmith, as the
     mix plays them, and the instrumental (drums + bass + melody).
-  * Final score = 0.6 rule + 0.4 learned (AUC vs random: 0.78 rule, 0.79 learned, 0.84 blend).
-* **Result**: a `TransitionStyle::Mashup`: the outgoing instrumental and the incoming instrumental
-  swap within the first bar, the outgoing vocals sing for the whole transition, the incoming
-  vocals return on its last beat. Previews play on the studio decks through a separate
+  * Fit = 0.6 rule + 0.4 learned (AUC vs random: 0.78 rule, 0.79 learned, 0.84 blend); placement
+    and phrase then scale it as above.
+* **Result**: vocals first, a `TransitionStyle::Mashup`: the instrumentals swap within the first
+  bar, the outgoing vocals sing for the whole transition, the incoming vocals return on its last
+  beat. Instrumental first, a `TransitionStyle::MashupIn`: the outgoing vocals stop, the incoming
+  vocals sing for the whole transition over the outgoing instrumental, and the instrumentals swap
+  in its last bar. Previews play on the studio decks through a separate
   `MixPlayer` (`LiveEngine::preview_player`).

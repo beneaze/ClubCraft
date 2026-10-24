@@ -5,7 +5,7 @@ use crate::library_view::DraggedTracks;
 use crate::theme;
 
 use clubcraft_core::planner::{self, OrderItem, OrderOptions, PlanOptions};
-use clubcraft_core::{Analysis, Mix, MixTimeline, MixTrack, TempoMode, TrackId, TransitionStyle};
+use clubcraft_core::{Analysis, Mix, MixTimeline, MixTrack, Param, TempoMode, TrackId, TransitionStyle};
 use eframe::egui::{self, pos2, vec2, Align, Color32, Layout, RichText, Sense, Stroke, StrokeKind, Ui};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -148,6 +148,11 @@ pub struct StudioView {
     /// Curves of stem rows switched off in the timeline, to bring back when switched on again:
     /// (transition, incoming side, stem index).
     pub stem_stash: std::collections::HashMap<(usize, bool, usize), clubcraft_core::Lane>,
+    /// Effect rows shown in the timeline although the effect is not used yet (chosen with
+    /// "Manual"): (transition, effect).
+    pub fx_shown: std::collections::HashSet<(usize, Param)>,
+    /// The deck lanes take all the room they can while effect rows are edited.
+    pub fx_expanded: bool,
     pub tempo_open: bool,
     pub drag: Option<crate::studio_timeline::Drag>,
     pub drag_acc: f32,
@@ -226,6 +231,8 @@ impl Default for StudioView {
             lane_show: Default::default(),
             curve_target: Default::default(),
             stem_stash: Default::default(),
+            fx_shown: Default::default(),
+            fx_expanded: false,
             tempo_open: true,
             drag: None,
             drag_acc: 0.0,
@@ -1040,13 +1047,13 @@ impl StudioView {
                     let end = self.timeline.beat_at_sec(self.timeline.sec_at_beat(beat) + secs);
                     let busy = |l: u8, s: &StudioView| {
                         s.mix.samples.iter().any(|c| {
-                            let len = s.sample_cache.get(&c.path).and_then(|x| x.as_ref().map(|x| x.0)).unwrap_or(4.0);
+                            let len = c.secs(s.sample_cache.get(&c.path).and_then(|x| x.as_ref().map(|x| x.0)).unwrap_or(4.0));
                             let ce = s.timeline.beat_at_sec(s.timeline.sec_at_beat(c.start_beat) + len);
                             c.lane == l && c.start_beat < end && ce > beat
                         })
                     };
                     let lane = (0..clubcraft_core::SAMPLE_LANES as u8).find(|&l| !busy(l, self)).unwrap_or(0);
-                    self.mix.samples.push(clubcraft_core::SampleClip { lane, path, start_beat: beat, gain_db: 0.0 });
+                    self.mix.samples.push(clubcraft_core::SampleClip::new(lane, path, beat));
                     self.sample_open[lane as usize] = true;
                     self.message = format!("{} copied to Sample {}", d.label, lane + 1);
                     self.changed();

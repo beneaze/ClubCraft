@@ -93,6 +93,9 @@ impl CurveTarget {
     }
 }
 
+/// Effect rows that fit a lane without expanding it.
+const FX_ROWS_COMPACT: usize = 3;
+
 /// Effect rows from top to bottom, with their colours.
 pub const FX_ROWS: [(Param, &str, Color32); 7] = [
     (Param::Filter, "Filter", FILTER_COLOR),
@@ -125,6 +128,8 @@ pub enum Drag {
     Range(usize),
     /// Moving sample clip `j`, grabbed this many beats after its start.
     Sample(usize, f64),
+    /// Dragging the left (`true`) or right edge of sample clip `j`, grabbed this many beats from it.
+    SampleEdge(usize, bool, f64),
     /// Box selection from this point (on empty lane space).
     Box(egui::Pos2),
 }
@@ -177,6 +182,16 @@ pub fn db_fader(db: f32) -> f32 {
 }
 
 impl StudioView {
+    /// Effect rows shown for transition `k`: the effects either track uses in it, and those
+    /// picked to be drawn by hand.
+    pub(crate) fn fx_rows(&self, k: usize) -> Vec<(Param, &'static str, Color32)> {
+        let Some(t) = self.mix.transitions.get(k) else { return Vec::new() };
+        FX_ROWS
+            .into_iter()
+            .filter(|(p, _, _)| self.fx_shown.contains(&(k, *p)) || t.lanes.iter().any(|l| l.param == *p && l.points.iter().any(|q| (q.1 - p.neutral()).abs() > 1e-3)))
+            .collect()
+    }
+
     pub(crate) fn timeline_ui(&mut self, ui: &mut Ui, sh: &Shared, out: &mut Vec<StudioAction>) {
         let avail = ui.available_rect_before_wrap();
         let full = Rect::from_min_size(avail.min, vec2(avail.width(), avail.height().max(220.0)));
@@ -189,8 +204,14 @@ impl StudioView {
         let n_closed = MIX_LANES as f32 - (0..MIX_LANES).filter(|l| !self.lane_collapsed[*l]).count() as f32;
         // editing a transition's stems needs room for four rows per track: the tempo and sample
         // lanes give way first
-        let stem_edit = matches!(self.selection, Selection::Transition(_)) && matches!(self.curve_target, CurveTarget::Stems | CurveTarget::Effects);
-        let want = if stem_edit { 150.0 } else { 70.0 };
+        let fx_n = match self.selection {
+            Selection::Transition(k) if self.curve_target == CurveTarget::Effects => Some(self.fx_rows(k).len()),
+            _ => None,
+        };
+        let stem_edit = matches!(self.selection, Selection::Transition(_)) && self.curve_target == CurveTarget::Stems || fx_n.is_some_and(|n| n > 0);
+        // expanded effect lanes take everything the other lanes can give up
+        let fx_big = self.fx_expanded && fx_n.is_some_and(|n| n > FX_ROWS_COMPACT);
+        let want = if fx_big { f32::INFINITY } else if stem_edit { 150.0 } else { 70.0 };
         let layout = |squeeze: bool| {
             let tempo_h = if self.tempo_open && !squeeze { 58.0 } else { 24.0 };
             // empty sample lanes stay slim (they still take dropped files)
@@ -203,7 +224,7 @@ impl StudioView {
         if open < want {
             (tempo_h, sample_hs, open) = layout(true);
         }
-        let open_h = open.clamp(70.0, if stem_edit { 420.0 } else { 300.0 });
+        let open_h = open.clamp(70.0, if fx_big { f32::INFINITY } else if stem_edit { 420.0 } else { 300.0 });
         let lane_hs: Vec<f32> = (0..MIX_LANES).map(|l| if self.lane_collapsed[l] { COLLAPSED_H } else { open_h }).collect();
         let canvas = Rect::from_min_max(pos2(full.left() + HEADER_W + 4.0, full.top()), full.max);
         let ruler = Rect::from_min_size(canvas.min, vec2(canvas.width(), ruler_h));
@@ -723,7 +744,7 @@ impl StudioView {
             for j in 0..self.mix.samples.len() {
                 let c = self.mix.samples[j].clone();
                 let Some(lane) = slanes.get(c.lane as usize).copied() else { continue };
-                let dur = self.sample_info(&c.path).map_or(2.0, |s| s.0);
+                let dur = c.secs(self.sample_info(&c.path).map_or(2.0, |s| s.0));
                 let t0 = self.timeline.sec_at_beat(c.start_beat);
                 let r = Rect::from_min_max(pos2(x_of(t0), lane.top() + 2.0), pos2(x_of(t0 + dur).max(x_of(t0) + 6.0), lane.bottom() - 2.0));
                 if r.intersects(bx) {
@@ -828,8 +849,19 @@ impl StudioView {
             let painter = ui.painter_at(canvas);
             match (target, target.param()) {
                 (CurveTarget::Effects, _) => {
-                    let rh = area.height() / FX_ROWS.len() as f32;
-                    for (row, (param, name, col)) in FX_ROWS.into_iter().enumerate() {
+                    let rows = self.fx_rows(k);
+                    if rows.is_empty() {
+                        if side == Side::Out && area.width() > 120.0 {
+                            // on a dark backing: the waveform shows through right behind it
+                            let g = painter.layout_no_wrap("No effects in this transition\nchoose one under Effects or Rhythm FX below".into(), egui::FontId::proportional(11.0), theme::TEXT);
+                            let box_r = Rect::from_center_size(area.center(), g.size() + vec2(16.0, 10.0));
+                            painter.rect_filled(box_r, 6.0, Color32::from_black_alpha(200));
+                            painter.galley(box_r.min + vec2(8.0, 5.0), g, theme::TEXT);
+                        }
+                        continue;
+                    }
+                    let rh = area.height() / rows.len() as f32;
+                    for (row, (param, name, col)) in rows.into_iter().enumerate() {
                         let rr = Rect::from_min_size(pos2(area.left(), area.top() + row as f32 * rh), vec2(area.width(), rh - 1.0));
                         let mut lane = lane_of(&self.mix.transitions[k], side, param);
                         let used = lane.points.iter().any(|p| (p.1 - param.neutral()).abs() > 1e-3);
@@ -853,7 +885,7 @@ impl StudioView {
                             fmt,
                             fmt_x: &fmt_x,
                         };
-                        if crate::curve_edit::curve_ui(ui, Id::new(("tfx", k, side == Side::In, row)), &c, &mut lane) {
+                        if crate::curve_edit::curve_ui(ui, Id::new(("tfx", k, side == Side::In, param.label())), &c, &mut lane) {
                             set_lane(&mut self.mix.transitions[k], lane);
                             changed = true;
                         }
@@ -959,9 +991,11 @@ impl StudioView {
                 }
             }
         }
-        // the selector, centred over the frame just below the transition bar
+        // the selector, centred over the frame just below the transition bar; with many effect
+        // rows a button to give their lanes more room
         let seg = 50.0;
-        let w = seg * CurveTarget::ALL.len() as f32;
+        let expander = target == CurveTarget::Effects && self.fx_rows(k).len() > FX_ROWS_COMPACT;
+        let w = seg * CurveTarget::ALL.len() as f32 + if expander { 26.0 } else { 0.0 };
         if canvas.width() > w + 16.0 {
             let top = lanes[0].top() + 1.0;
             let bar = Rect::from_center_size(pos2(((xs + xe) / 2.0).clamp(canvas.left() + w / 2.0, canvas.right() - w / 2.0), top + 10.0), vec2(w, 19.0));
@@ -979,6 +1013,21 @@ impl StudioView {
                 painter.text(sr.center(), egui::Align2::CENTER_CENTER, t.label(), egui::FontId::proportional(11.0), if on { t.color() } else { theme::TEXT_DIM });
                 if resp.on_hover_text(format!("Draw the {} curves in the timeline", t.label().to_lowercase())).clicked() {
                     self.curve_target = t;
+                }
+            }
+            if expander {
+                let er = Rect::from_min_max(pos2(bar.right() - 26.0, bar.top()), bar.max).shrink(1.5);
+                let resp = ui.interact(er, Id::new("fx-expand"), Sense::click());
+                let on = self.fx_expanded;
+                if on {
+                    painter.rect_filled(er, 5.0, theme::SEG_ON);
+                } else if resp.hovered() {
+                    painter.rect_filled(er, 5.0, theme::SEG_HOVER);
+                }
+                painter.text(er.center(), egui::Align2::CENTER_CENTER, if on { "⤡" } else { "⤢" }, egui::FontId::proportional(12.0), if on { CurveTarget::Effects.color() } else { theme::TEXT_DIM });
+                let tip = if on { "Give the effect rows their usual height again" } else { "Make the lanes taller for the effect rows (drag the panel below smaller for even more room)" };
+                if resp.on_hover_text(tip).clicked() {
+                    self.fx_expanded = !on;
                 }
             }
         }
@@ -1445,7 +1494,7 @@ impl StudioView {
                     if let Some(files) = rfd::FileDialog::new().set_title("Add samples").add_filter("Audio", crate::importer::AUDIO_EXTS).pick_files() {
                         let beat = self.timeline.beat_at_sec(self.position).round();
                         for (n, f) in files.into_iter().enumerate() {
-                            self.mix.samples.push(SampleClip { lane: l as u8, path: f, start_beat: beat + 4.0 * n as f64, gain_db: 0.0 });
+                            self.mix.samples.push(SampleClip::new(l as u8, f, beat + 4.0 * n as f64));
                         }
                         self.changed();
                     }
@@ -1502,7 +1551,7 @@ impl StudioView {
             if let Some(l) = slanes.iter().position(|r| r.contains(q)) {
                 let beat = beat_at_x(&self.timeline, q.x).round();
                 for (n, f) in dropped.into_iter().enumerate() {
-                    self.mix.samples.push(SampleClip { lane: l as u8, path: f, start_beat: beat + 4.0 * n as f64, gain_db: 0.0 });
+                    self.mix.samples.push(SampleClip::new(l as u8, f, beat + 4.0 * n as f64));
                 }
                 self.consumed_drop = true;
                 self.changed();
@@ -1514,7 +1563,8 @@ impl StudioView {
         for j in 0..self.mix.samples.len() {
             let c = self.mix.samples[j].clone();
             let Some(lane) = slanes.get(c.lane as usize).copied() else { continue };
-            let (dur, peaks) = self.sample_info(&c.path).unwrap_or((2.0, Default::default()));
+            let (file_dur, peaks) = self.sample_info(&c.path).unwrap_or((2.0, Default::default()));
+            let dur = c.secs(file_dur);
             let t0 = self.timeline.sec_at_beat(c.start_beat);
             let r = Rect::from_min_max(pos2(x_of(t0), lane.top() + 2.0), pos2(x_of(t0 + dur).max(x_of(t0) + 6.0), lane.bottom() - 2.0));
             if r.right() < canvas.left() || r.left() > canvas.right() {
@@ -1531,12 +1581,22 @@ impl StudioView {
                 let x0 = r.left().max(canvas.left());
                 let mut x = x0;
                 while x < r.right().min(canvas.right()) {
-                    let t = (x - r.left()) / self.zoom;
+                    // position in the file: an extended clip loops it
+                    let t = (c.offset + ((x - r.left()) / self.zoom) as f64).rem_euclid(file_dur.max(1e-3));
                     let v = peaks.get((t * 100.0) as usize).copied().unwrap_or(0.0).min(1.0);
                     mesh.add_colored_rect(Rect::from_min_max(pos2(x, cy - v * hmax), pos2(x + 1.0, cy + v * hmax)), SAMPLE_COLOR);
                     x += 1.0;
                 }
                 pc.add(egui::Shape::mesh(mesh));
+            }
+            // where a looping clip starts the file again
+            if file_dur > 0.05 {
+                let mut ts = file_dur - c.offset.rem_euclid(file_dur);
+                while ts < dur - 1e-3 {
+                    let xs = x_of(t0 + ts);
+                    pc.line_segment([pos2(xs, r.top() + 14.0), pos2(xs, r.bottom())], Stroke::new(1.0, Color32::WHITE.gamma_multiply(0.35)));
+                    ts += file_dur;
+                }
             }
             let sel = self.selection == Selection::Sample(j) || self.multi.samples.contains(&j);
             pc.rect_stroke(r, 4.0, if sel { Stroke::new(2.0, theme::accent()) } else { Stroke::new(1.0, SAMPLE_COLOR) }, StrokeKind::Inside);
@@ -1598,12 +1658,58 @@ impl StudioView {
                     }
                 }
             }
+            // the edges trim the clip or extend it (looping the file); added after the body so
+            // they win the pointer where they overlap it
+            let hw = (r.width() / 3.0).min(6.0);
+            for left in [true, false] {
+                let er = if left { Rect::from_min_max(r.min, pos2(r.left() + hw, r.bottom())) } else { Rect::from_min_max(pos2(r.right() - hw, r.top()), r.max) };
+                let eresp = ui.interact(er.intersect(canvas), Id::new(("sample-edge", j, left)), Sense::drag());
+                if eresp.hovered() || eresp.dragged() {
+                    ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+                    pc.rect_filled(er, 2.0, SAMPLE_COLOR.gamma_multiply(0.6));
+                }
+                if eresp.drag_started() {
+                    self.selection = Selection::Sample(j);
+                    self.multi = Default::default();
+                    let edge = if left { c.start_beat } else { self.timeline.beat_at_sec(t0 + dur) };
+                    let grab = ui.input(|i| i.pointer.press_origin()).map_or(0.0, |q| beat_at_x(&self.timeline, q.x) - edge);
+                    self.drag = Some(Drag::SampleEdge(j, left, grab));
+                }
+                if eresp.drag_stopped() {
+                    self.drag = None;
+                }
+                if eresp.dragged() {
+                    let grab = match self.drag {
+                        Some(Drag::SampleEdge(d, l, g)) if d == j && l == left => g,
+                        _ => 0.0,
+                    };
+                    if let Some(q) = ui.input(|i| i.pointer.latest_pos()) {
+                        let nb = (beat_at_x(&self.timeline, q.x) - grab).max(0.0);
+                        let px_per_beat = ((self.timeline.sec_at_beat(nb + 1.0) - self.timeline.sec_at_beat(nb)) as f32 * self.zoom).max(1e-3);
+                        let step = snap_step(px_per_beat);
+                        let snapped = if ui.input(|i| i.modifiers.shift) { nb } else { (nb / step).round() * step };
+                        let clip = &mut self.mix.samples[j];
+                        let (start, offset, len) = trim_sample(&self.timeline, clip, file_dur, left, snapped);
+                        if (start - clip.start_beat).abs() > 1e-9 || (offset - clip.offset).abs() > 1e-9 || len != clip.length {
+                            (clip.start_beat, clip.offset, clip.length) = (start, offset, len);
+                            edited = true;
+                        }
+                    }
+                }
+                eresp.on_hover_text(if left { "Drag to trim or extend the start (loops the file; Shift: free)" } else { "Drag to trim or extend the end (loops the file; Shift: free)" });
+            }
             resp.context_menu(|ui| {
                 ui.label(RichText::new(&name).strong());
                 let mut g = self.mix.samples[j].gain_db;
                 if ui.add(egui::Slider::new(&mut g, -24.0..=6.0).suffix(" dB").text("Gain")).changed() {
                     self.mix.samples[j].gain_db = g;
                     edited = true;
+                }
+                if (c.length.is_some() || c.offset != 0.0) && ui.button("Play the whole file once").clicked() {
+                    self.mix.samples[j].offset = 0.0;
+                    self.mix.samples[j].length = None;
+                    edited = true;
+                    ui.close();
                 }
                 if ui.button("Duplicate (1 bar later)").clicked() {
                     dup = Some(j);
@@ -1614,7 +1720,7 @@ impl StudioView {
                     ui.close();
                 }
             });
-            resp.on_hover_text(format!("{name} · {:.1} s · drag to move (snaps to the beat grid, finer when zoomed in; Shift: free) · Backspace deletes it · right-click for more", dur));
+            resp.on_hover_text(format!("{name} · {:.1} s · drag to move (snaps to the beat grid, finer when zoomed in; Shift: free) · drag an edge to trim or extend it · Backspace deletes it · right-click for more", dur));
         }
         if let Some(j) = dup {
             let mut c = self.mix.samples[j].clone();
@@ -1842,6 +1948,27 @@ impl StudioView {
             }
         }
     }
+}
+
+/// Start beat, file offset and length of sample clip `c` (its file `file_secs` long) with its
+/// left or right edge moved to mix beat `beat`. The other edge stays put, and so does the music:
+/// the left edge moves the offset with it. A clip that plays the file exactly once again goes
+/// back to having no length of its own.
+fn trim_sample(tl: &clubcraft_core::MixTimeline, c: &SampleClip, file_secs: f64, left: bool, beat: f64) -> (f64, f64, Option<f64>) {
+    // short enough to cut a single hit, long enough to keep both edges grabbable
+    const MIN_SECS: f64 = 0.05;
+    let t0 = tl.sec_at_beat(c.start_beat);
+    let t1 = t0 + c.secs(file_secs);
+    let (start, offset, len) = if left {
+        let ns = tl.sec_at_beat(beat).min(t1 - MIN_SECS).max(0.0);
+        let start = if ns < tl.sec_at_beat(beat) - 1e-9 { tl.beat_at_sec(ns) } else { beat };
+        let offset = c.offset + (ns - t0);
+        (start, if file_secs > 0.0 { offset.rem_euclid(file_secs) } else { offset }, t1 - ns)
+    } else {
+        (c.start_beat, c.offset, (tl.sec_at_beat(beat) - t0).max(MIN_SECS))
+    };
+    let whole = offset.abs() < 1e-6 && (len - file_secs).abs() < 1e-4;
+    (start, if whole { 0.0 } else { offset }, if whole { None } else { Some(len) })
 }
 
 /// The lane of `param` on `side` (empty when the transition has none).

@@ -284,28 +284,32 @@ fn tools() -> Value {
         tool(
             "find_mashups",
             "Find mashups",
-            "Find where the vocals of a track fit over the instrumental of other tracks (vocals of A over the instrumental of B, with key shift and tempo change). Scores every 16-bar placement bar by bar for harmony, masking and leftover vocals, then re-ranks the best with a neural network (COCOLA). Needs stems on both tracks. Bars are 1-based (bar 1 = first downbeat).",
+            "Find mashups for a track, both ways round: its vocals over the instrumentals of other tracks (order vocals_first: old vocals in the new song), or the vocals of other tracks over its instrumental (order instrumental_first: new vocals in the old song). The track plays first in a mix made from a result. Takes whole sung phrases of the vocal track (the chorus first, by the structure model; starting and ending with a line, not mid-sentence) and tries them at the section starts of the instrumental, and where its own vocal comes back (a vocal swap): a chorus on a drop, a verse on a breakdown or groove, never an intro or outro. Scores harmony bar by bar and masking. The first vocals_first search for a track runs the structure model on it (up to half a minute); instrumental_first computes a vocal map for every candidate once. Then re-ranks the best with a neural network (COCOLA). Needs stems on both tracks. Bars are 1-based (bar 1 = first downbeat).",
             json!({
-                "vocal_track_id": {"type": "integer"},
-                "vocal_bar": {"type": "integer", "description": "Use the vocal phrase starting at this bar. Default: the strongest vocal phrases."},
+                "track_id": {"type": "integer", "description": "The track the search is for (plays first)."},
+                "order": {"type": "string", "enum": ["vocals_first", "instrumental_first"], "description": "vocals_first (default): the track's vocals over other tracks' instrumentals. instrumental_first: other tracks' vocals over the track's instrumental."},
+                "vocal_track_id": {"type": "integer", "description": "Older name for track_id with order vocals_first."},
+                "vocal_bar": {"type": "integer", "description": "Use the vocal phrase starting at this bar (of the vocal track). Default: the best vocal phrases."},
                 "bars": {"type": "integer", "enum": [8, 16, 32], "description": "Phrase length, default 16."},
                 "key_range": {"type": "integer", "description": "Allowed key shift of the vocals in ± semitones, default 2."},
                 "tempo_tolerance_pct": {"type": "number", "description": "Allowed tempo change of the vocals in ± %, default 6."},
-                "instrumental_track_ids": ids,
+                "other_track_ids": ids,
+                "instrumental_track_ids": {"type": "array", "items": {"type": "integer"}, "description": "Older name for other_track_ids."},
                 "rerank": {"type": "boolean", "description": "Neural re-ranking of the best 20 (a few seconds), default true."},
                 "limit": {"type": "integer", "description": "Default 15."}
             }),
-            &["vocal_track_id"],
+            &[],
             &ro,
         ),
         tool(
             "create_mashup_mix",
             "Create mashup mix",
-            "Create a two-track mix from a find_mashups result: the vocal track plays 16 bars before its phrase, then its vocals sing over the instrumental, which continues to its end.",
+            "Create a two-track mix from a find_mashups result: the first track (by order) plays 16 bars before the mashup, then the vocals sing over the instrumental for the phrase, and the second track plays on to its end.",
             json!({
                 "vocal_track_id": {"type": "integer"}, "instrumental_track_id": {"type": "integer"},
                 "vocal_bar": {"type": "integer"}, "instrumental_bar": {"type": "integer"},
                 "bars": {"type": "integer"}, "key_shift": {"type": "integer"},
+                "order": {"type": "string", "enum": ["vocals_first", "instrumental_first"], "description": "Which track plays first, default vocals_first."},
                 "name": {"type": "string"}
             }),
             &["vocal_track_id", "instrumental_track_id", "vocal_bar", "instrumental_bar"],
@@ -708,18 +712,24 @@ fn call_tool(name: &str, a: &Value, call: &Call) -> Result<Value> {
             let m = clubcraft_analysis::mashup::Match {
                 vocal_track: v,
                 vocal_bar: arg_i64(a, "vocal_bar")? as i32 - 1,
+                vocal_role: Default::default(),
                 inst_track: i,
                 inst_bar: arg_i64(a, "instrumental_bar")? as i32 - 1,
                 bars: a.get("bars").and_then(|x| x.as_u64()).unwrap_or(16).clamp(4, 64) as usize,
                 key_shift: a.get("key_shift").and_then(|x| x.as_i64()).unwrap_or(0).clamp(-6, 6) as i32,
                 tempo_ratio: 1.0,
                 score: 0.0,
+                fit: 0.0,
                 harmony: 0.0,
                 harmony_min: 0.0,
                 masking: 0.0,
                 residual_vocals: 0.0,
+                placement: 0.0,
+                phrase: 0.0,
+                cost: 0.0,
                 per_bar: vec![],
                 learned: None,
+                order: order_arg(a)?,
             };
             let title = |id: TrackId| lib.track(id).ok().flatten().map(|t| if t.title.is_empty() { t.display_name() } else { t.title }).unwrap_or_default();
             let name = opt_str(a, "name").map(str::to_string).unwrap_or_else(|| format!("{} × {}", title(v), title(i)));
@@ -901,8 +911,19 @@ fn export_mix(lib: &Library, a: &Value, call: &Call) -> Result<Value> {
     }))
 }
 
+/// The `order` argument of the mashup tools.
+fn order_arg(a: &Value) -> Result<clubcraft_analysis::mashup::MashupOrder> {
+    use clubcraft_analysis::mashup::MashupOrder;
+    match opt_str(a, "order") {
+        None | Some("vocals_first") => Ok(MashupOrder::VocalsFirst),
+        Some("instrumental_first") => Ok(MashupOrder::InstrumentalFirst),
+        Some(o) => bail!("unknown order '{o}' (vocals_first or instrumental_first)"),
+    }
+}
+
 fn find_mashups(lib: &Library, a: &Value, call: &Call) -> Result<Value> {
-    let vocal = arg_i64(a, "vocal_track_id")?;
+    let track = arg_i64(a, "track_id").or_else(|_| arg_i64(a, "vocal_track_id")).map_err(|_| anyhow!("track_id is required"))?;
+    let order = order_arg(a)?;
     let opts = clubcraft_analysis::mashup::MatchOptions {
         bars: a.get("bars").and_then(|v| v.as_u64()).unwrap_or(16).clamp(4, 64) as usize,
         key_range: a.get("key_range").and_then(|v| v.as_i64()).unwrap_or(2).clamp(0, 6) as i32,
@@ -911,9 +932,13 @@ fn find_mashups(lib: &Library, a: &Value, call: &Call) -> Result<Value> {
         ..Default::default()
     };
     let q = crate::mashup::Query {
-        vocal,
+        track,
+        order,
         vocal_bar: a.get("vocal_bar").and_then(|v| v.as_i64()).map(|b| b as i32 - 1),
-        candidates: if a.get("instrumental_track_ids").is_some() { Some(ids_arg(a, "instrumental_track_ids")?) } else { None },
+        candidates: match ["other_track_ids", "instrumental_track_ids"].into_iter().find(|k| a.get(*k).is_some()) {
+            Some(k) => Some(ids_arg(a, k)?),
+            None => None,
+        },
         opts,
         rerank: opt_bool(a, "rerank").unwrap_or(true),
     };
@@ -925,25 +950,38 @@ fn find_mashups(lib: &Library, a: &Value, call: &Call) -> Result<Value> {
         .map(|m| {
             let (tv, ti) = crate::mashup::match_times(m, &analyses).unwrap_or((0.0, 0.0));
             json!({
+                "vocal_track_id": m.vocal_track,
+                "vocals": title(m.vocal_track),
                 "instrumental_track_id": m.inst_track,
                 "instrumental": title(m.inst_track),
                 "instrumental_bar": m.inst_bar + 1,
                 "instrumental_start_sec": r2(ti),
                 "vocal_bar": m.vocal_bar + 1,
+                "vocal_role": m.vocal_role.label(),
                 "vocal_start_sec": r2(tv),
                 "bars": m.bars,
                 "key_shift": m.key_shift,
                 "tempo_change_pct": r2((m.tempo_ratio - 1.0) * 100.0),
                 "score": r2(m.score as f64),
+                "instrumental_section": section_label(&analyses, m.inst_track, m.inst_bar),
+                "placement": r2(m.placement as f64),
+                "phrase": r2(m.phrase as f64),
+                "fit": r2(m.fit as f64),
                 "harmony": r2(m.harmony as f64),
                 "weakest_4_bars": r2(m.harmony_min as f64),
                 "masking": r2(m.masking as f64),
                 "leftover_vocals": r2(m.residual_vocals as f64),
                 "ai_score": m.learned.map(|l| r2(l as f64)),
+                "order": if m.order == clubcraft_analysis::mashup::MashupOrder::VocalsFirst { "vocals_first" } else { "instrumental_first" },
             })
         })
         .collect();
-    Ok(json!({"vocal_track_id": vocal, "vocals": title(vocal), "matches": matches}))
+    Ok(json!({"track_id": track, "track": title(track), "order": opt_str(a, "order").unwrap_or("vocals_first"), "matches": matches}))
+}
+
+/// Kind of the section a bar of a track is in ("Drop", "Intro" ...).
+fn section_label(analyses: &HashMap<TrackId, Analysis>, id: TrackId, bar: i32) -> Option<&'static str> {
+    analyses.get(&id)?.sections.iter().find(|s| bar >= s.start_bar && bar < s.start_bar + s.bars as i32).map(|s| s.kind.label())
 }
 
 fn virtualdj_running() -> bool {

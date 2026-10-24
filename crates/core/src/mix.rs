@@ -273,12 +273,16 @@ pub enum TransitionStyle {
     /// Mashup: the outgoing vocals sing over the incoming instrumental for the whole transition
     /// (instrumentals swap within the first bar, the incoming vocals return at the end).
     Mashup,
+    /// Mashup the other way round: the incoming vocals sing over the outgoing instrumental for
+    /// the whole transition (the outgoing vocals stop at its start, the instrumentals swap in its
+    /// last bar).
+    MashupIn,
     /// Lanes edited by hand.
     Custom,
 }
 
 impl TransitionStyle {
-    pub const ALL: [TransitionStyle; 9] = [
+    pub const ALL: [TransitionStyle; 10] = [
         TransitionStyle::StemBlend,
         TransitionStyle::BassSwap,
         TransitionStyle::Crossfade,
@@ -287,6 +291,7 @@ impl TransitionStyle {
         TransitionStyle::EchoOut,
         TransitionStyle::Cut,
         TransitionStyle::Mashup,
+        TransitionStyle::MashupIn,
         TransitionStyle::Custom,
     ];
 
@@ -299,7 +304,8 @@ impl TransitionStyle {
             TransitionStyle::FilterOut => "Filter out",
             TransitionStyle::EchoOut => "Echo out",
             TransitionStyle::Cut => "Cut",
-            TransitionStyle::Mashup => "Mashup",
+            TransitionStyle::Mashup => "Mashup (old vocals)",
+            TransitionStyle::MashupIn => "Mashup (new vocals)",
             TransitionStyle::Custom => "Custom",
         }
     }
@@ -367,6 +373,22 @@ impl TransitionStyle {
                     Lane::new(In, Stem(StemKind::Bass), &[(0.0, 0.0), (bar * 0.5 - 0.01, 0.0), (bar * 0.5, 1.0)]),
                     Lane::new(In, Stem(StemKind::Other), &[(0.0, 0.0), (bar, 1.0)]),
                     Lane::new(In, Stem(StemKind::Vocals), &[(0.0, 0.0), (len - 1.0, 0.0), (len, 1.0)]),
+                ]
+            }
+            TransitionStyle::MashupIn => {
+                let bar = 4.0f32.min(len * 0.25);
+                let swap = len - bar;
+                vec![
+                    // outgoing: its vocals stop for the new ones, instrumental out over the last bar
+                    Lane::new(Out, Stem(StemKind::Vocals), &[(0.0, 0.0), (len, 0.0)]),
+                    Lane::new(Out, Stem(StemKind::Drums), &[(0.0, 1.0), (swap, 1.0), (len, 0.0)]),
+                    Lane::new(Out, Stem(StemKind::Bass), &[(0.0, 1.0), (swap + bar * 0.5 - 0.01, 1.0), (swap + bar * 0.5, 0.0)]),
+                    Lane::new(Out, Stem(StemKind::Other), &[(0.0, 1.0), (swap, 1.0), (len, 0.0)]),
+                    // incoming: vocals from the start, instrumental in over the last bar
+                    Lane::new(In, Stem(StemKind::Vocals), &[(0.0, 1.0)]),
+                    Lane::new(In, Stem(StemKind::Drums), &[(0.0, 0.0), (swap, 0.0), (len, 1.0)]),
+                    Lane::new(In, Stem(StemKind::Bass), &[(0.0, 0.0), (swap + bar * 0.5 - 0.01, 0.0), (swap + bar * 0.5, 1.0)]),
+                    Lane::new(In, Stem(StemKind::Other), &[(0.0, 0.0), (swap, 0.0), (len, 1.0)]),
                 ]
             }
             TransitionStyle::Cut => vec![
@@ -663,7 +685,8 @@ pub const MIX_LANES: usize = 2;
 pub const SAMPLE_LANES: usize = 2;
 
 /// An audio file placed on a sample lane. It plays at its own speed from `start_beat` (mix
-/// beats), on top of the decks.
+/// beats), on top of the decks. Its edges can be dragged: a clip longer than the file loops it,
+/// a shorter one cuts it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SampleClip {
     pub lane: u8,
@@ -671,6 +694,29 @@ pub struct SampleClip {
     pub start_beat: f64,
     #[serde(default)]
     pub gain_db: f32,
+    /// Where in the file (s) the clip starts; taken modulo the file's length, so a clip extended
+    /// to the left plays the file's end first.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub offset: f64,
+    /// Length of the clip (s); `None` plays the file once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub length: Option<f64>,
+}
+
+fn is_zero(x: &f64) -> bool {
+    *x == 0.0
+}
+
+impl SampleClip {
+    /// The whole file once, from `start_beat`.
+    pub fn new(lane: u8, path: std::path::PathBuf, start_beat: f64) -> Self {
+        SampleClip { lane, path, start_beat, gain_db: 0.0, offset: 0.0, length: None }
+    }
+
+    /// Length (s) of the clip when its file is `file_secs` long.
+    pub fn secs(&self, file_secs: f64) -> f64 {
+        self.length.unwrap_or(file_secs).max(0.0)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -823,6 +869,18 @@ mod tests {
         r.paint(12.0, 13.0, 0.0);
         assert!((r.value_at(3.0) - before).abs() < 1e-6);
         assert_eq!(r.value_at(12.5), 0.0);
+    }
+
+    #[test]
+    fn mashup_in_puts_the_new_vocals_over_the_old_instrumental() {
+        let t = Transition::new(TransitionStyle::MashupIn, 64);
+        let v = |side, kind, x| t.value(side, Param::Stem(kind), x);
+        for x in [1.0, 32.0, 59.0] {
+            assert_eq!((v(Side::Out, StemKind::Vocals, x), v(Side::In, StemKind::Vocals, x)), (0.0, 1.0));
+            assert_eq!((v(Side::Out, StemKind::Drums, x), v(Side::In, StemKind::Drums, x)), (1.0, 0.0));
+        }
+        // the instrumentals swap in the last bar
+        assert_eq!((v(Side::Out, StemKind::Bass, 64.0), v(Side::In, StemKind::Bass, 64.0)), (0.0, 1.0));
     }
 }
 

@@ -622,6 +622,10 @@ impl App {
                     }
                 }
                 M::StopPreview => self.eng.stop_preview(),
+                M::SeparateBest(id) => {
+                    self.jobs.separate_at(id, "best");
+                    self.status = format!("Separating {} in Best quality…", short(&self.sh, id));
+                }
                 M::NewMix(m) => {
                     self.eng.stop_preview();
                     self.save_mix();
@@ -640,7 +644,8 @@ impl App {
                     }
                 }
                 M::Insert(m) => {
-                    if let Some(k) = self.studio.mix.tracks.iter().position(|t| t.track_id == m.vocal_track) {
+                    let first = if m.order == clubcraft_analysis::mashup::MashupOrder::VocalsFirst { m.vocal_track } else { m.inst_track };
+                    if let Some(k) = self.studio.mix.tracks.iter().position(|t| t.track_id == first) {
                         if crate::mashup::insert_after(&mut self.studio.mix, k, &m, &self.sh.analyses) {
                             self.studio.changed();
                             self.studio.selection = crate::studio::Selection::Transition(k);
@@ -966,7 +971,7 @@ impl App {
                 // `sample <lane> <beat> <path>` (tests)
                 let mut it = arg.splitn(3, ' ');
                 let (l, b, path) = (it.next().and_then(|v| v.parse().ok()).unwrap_or(0u8), it.next().and_then(|v| v.parse().ok()).unwrap_or(0.0), it.next().unwrap_or(""));
-                self.studio.mix.samples.push(clubcraft_core::SampleClip { lane: l, path: path.into(), start_beat: b, gain_db: 0.0 });
+                self.studio.mix.samples.push(clubcraft_core::SampleClip::new(l, path.into(), b));
                 self.studio.changed();
                 self.save_mix();
             }

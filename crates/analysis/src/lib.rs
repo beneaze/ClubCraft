@@ -66,9 +66,11 @@ mod dsp;
 pub mod energy;
 pub mod frontend;
 pub mod key;
+pub mod labels;
 pub mod mashup;
 pub mod loudness;
 pub mod structure;
+pub mod vocals;
 pub mod waveform;
 
 pub use beatgrid::BeatOptions;

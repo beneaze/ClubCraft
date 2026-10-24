@@ -1042,7 +1042,7 @@ mod tests {
         let r = import_all(&lib, &f.root).unwrap();
         let id = r.mixes[0].0;
         let mut mix = lib.mix(id).unwrap().unwrap();
-        mix.samples.push(clubcraft_core::SampleClip { lane: 0, path: "/tmp/x.wav".into(), start_beat: 4.0, gain_db: 0.0 });
+        mix.samples.push(clubcraft_core::SampleClip::new(0, "/tmp/x.wav".into(), 4.0));
         mix.lanes[0].gain_db = -2.0;
         mix.tracks[0].mix_out = 1.0; // will be replaced
         lib.save_mix(&mut mix).unwrap();
