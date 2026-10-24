@@ -235,6 +235,8 @@ impl App {
                 Event::LibraryChanged => reload_all = true,
                 Event::TrackUpdated(id) => {
                     self.sh.reload_track(&self.lib, id);
+                    // new stems: sample clips cut from the track may get better ones
+                    self.studio.check_linked_samples();
                     // the cached audio may predate the new stems: a mix would keep playing the
                     // stem-less copy and only imitate its stem curves
                     self.eng.cache.invalidate(id);
@@ -269,6 +271,7 @@ impl App {
         }
         if reload_all {
             self.sh.reload(&self.lib);
+            self.studio.check_linked_samples();
             self.refresh_mixes();
         }
         self.add_dropped_to_mix();
@@ -466,6 +469,9 @@ impl App {
         };
         self.eng.prefs = p.clone();
         *self.eng.sep.quality.lock() = p.stem_quality.clone();
+        if self.applied_prefs.as_ref().is_none_or(|o| o.stem_quality != p.stem_quality || o.export_stem_quality != p.export_stem_quality) {
+            self.studio.check_linked_samples();
+        }
         if !first {
             p.save();
         }
@@ -872,6 +878,7 @@ impl App {
                     // The heavy part happens here: stems in the export quality where the stem
                     // automation plays, and only there (a fraction of each track).
                     let quality = self.prefs.export_stem_quality.clone();
+                    self.studio.check_linked_samples();
                     let need = self.export_stem_regions(&quality);
                     if need.is_empty() && !self.studio.linked_samples_waiting(&self.sh) {
                         self.eng.export_mix(&self.studio.mix, out, &self.sh);

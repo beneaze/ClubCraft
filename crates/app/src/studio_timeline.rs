@@ -1531,7 +1531,7 @@ impl StudioView {
     }
 
     /// Duration (s) and a peak overview (100 per second) of a sample file, cached.
-    fn sample_info(&mut self, path: &std::path::Path) -> Option<(f64, std::sync::Arc<Vec<f32>>)> {
+    pub(crate) fn sample_info(&mut self, path: &std::path::Path) -> Option<(f64, std::sync::Arc<Vec<f32>>)> {
         if let Some(i) = self.sample_cache.get(path) {
             return i.clone();
         }

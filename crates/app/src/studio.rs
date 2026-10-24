@@ -190,8 +190,9 @@ pub struct StudioView {
     /// those that couldn't be (not tried again this session).
     recutting: std::collections::HashSet<std::path::PathBuf>,
     recut_failed: std::collections::HashSet<std::path::PathBuf>,
-    /// When the linked sample clips were last checked for better stems.
-    linked_checked: Option<std::time::Instant>,
+    /// The linked sample clips are to be checked for better stems: stems or settings changed,
+    /// or an export starts (see [`StudioView::check_linked_samples`]).
+    linked_check: bool,
     extract_rx: crossbeam_channel::Receiver<ExtractDone>,
     pub extracting: usize,
 }
@@ -262,7 +263,7 @@ impl Default for StudioView {
             extract_tx,
             recutting: Default::default(),
             recut_failed: Default::default(),
-            linked_checked: None,
+            linked_check: true,
             extract_rx,
             extracting: 0,
         }
@@ -1180,22 +1181,25 @@ impl StudioView {
         (crate::pipeline::model_rank(&model) > have).then_some(model)
     }
 
-    /// Cut clips again whose track has better stems by now (checked about once a second).
+    /// Look for better stems for the linked sample clips on the next tick.
+    pub(crate) fn check_linked_samples(&mut self) {
+        self.linked_check = true;
+    }
+
+    /// Cut clips again whose track has better stems by now, when asked to look.
     fn refresh_linked_samples(&mut self, sh: &Shared) {
-        let now = std::time::Instant::now();
-        if self.linked_checked.is_some_and(|t| now.duration_since(t).as_secs_f32() < 1.0) {
+        if !std::mem::take(&mut self.linked_check) {
             return;
         }
-        self.linked_checked = Some(now);
         for j in 0..self.mix.samples.len() {
+            let path = self.mix.samples[j].path.clone();
+            // the file's length, read now if the timeline hasn't drawn the clip yet
+            let Some(file_secs) = self.sample_info(&path).map(|x| x.0) else { continue };
             let c = &self.mix.samples[j];
             if self.recut_failed.contains(&c.path) || self.better_stems_for(sh, c).is_none() {
                 continue;
             }
-            let file_secs = self.sample_cache.get(&c.path).and_then(|x| x.as_ref().map(|x| x.0));
-            if let Some(f) = file_secs {
-                self.recut_sample(j, f, true);
-            }
+            self.recut_sample(j, file_secs, true);
         }
     }
 
