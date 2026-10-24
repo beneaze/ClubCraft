@@ -277,10 +277,25 @@ pub(crate) struct Conductor {
 /// (a file that fails to load must not stop the mix).
 const MAX_HOLD_SECS: f64 = 5.0;
 
-fn unload_if_holding(deck: &mut Deck, t: &Arc<LoadedTrack>, drop_track: &mut dyn FnMut(Arc<LoadedTrack>)) {
-    if deck.track().is_some_and(|x| Arc::ptr_eq(x, t)) {
-        if let Some(old) = deck.unload() {
-            drop_track(old);
+/// Unload `t` from `deck` if the deck holds it; returns whether it did.
+fn unload_if_holding(deck: &mut Deck, t: &Arc<LoadedTrack>, drop_track: &mut dyn FnMut(Arc<LoadedTrack>)) -> bool {
+    if !deck.track().is_some_and(|x| Arc::ptr_eq(x, t)) {
+        return false;
+    }
+    if let Some(old) = deck.unload() {
+        drop_track(old);
+    }
+    true
+}
+
+/// Pause the schedule's decks and silence their transition effects (tails ring out).
+fn pause_decks(ids: &[DeckId], decks: &mut [Deck], mixer: &mut Mixer) {
+    for &d in ids {
+        if let Some(deck) = decks.get_mut(d) {
+            deck.pause();
+        }
+        if let Some(ch) = mixer.channels.get_mut(d) {
+            ch.lane_fx.reset();
         }
     }
 }
@@ -385,14 +400,24 @@ impl Conductor {
         Some(s)
     }
 
-    pub fn pause(&mut self, decks: &mut [Deck]) {
+    /// Pause the decks. The transition effects fall silent with them (a noise sweep or a loop
+    /// would play on), and on resume every track jumps straight back to its automation.
+    pub fn pause(&mut self, decks: &mut [Deck], mixer: &mut Mixer) {
         self.playing = false;
         if let Some(s) = &self.sched {
-            for &d in &s.decks {
-                if let Some(deck) = decks.get_mut(d) {
-                    deck.pause();
-                }
-            }
+            pause_decks(&s.decks, decks, mixer);
+        }
+        self.slot_track = [None; 2];
+    }
+
+    /// Move the mix clock to `t`. Every track restarts from its automation there, so no loop or
+    /// brake carries audio over from before the jump.
+    pub fn seek(&mut self, t: f64) {
+        if self.sched.is_some() {
+            self.time = t.max(0.0);
+            self.finished = false;
+            self.held = 0.0;
+            self.slot_track = [None; 2];
         }
     }
 
@@ -452,11 +477,8 @@ impl Conductor {
         if self.playing && t0 >= s.timeline.total_secs {
             self.playing = false;
             self.finished = true;
-            for &d in &s.decks {
-                if let Some(deck) = decks.get_mut(d) {
-                    deck.pause();
-                }
-            }
+            pause_decks(&s.decks, decks, mixer);
+            self.slot_track = [None; 2];
         }
         // release tracks outside the residency window (lazy schedules)
         if s.release_finished {
@@ -468,7 +490,13 @@ impl Conductor {
                 if let Some(t) = s.slots[i].take() {
                     for &d in &s.decks {
                         if let Some(deck) = decks.get_mut(d) {
-                            unload_if_holding(deck, &t, drop_track);
+                            // its effects end with it: a noise sweep or a loop would otherwise
+                            // keep playing on the empty deck
+                            if unload_if_holding(deck, &t, drop_track) {
+                                if let Some(ch) = mixer.channels.get_mut(d) {
+                                    ch.reset_automation();
+                                }
+                            }
                         }
                     }
                     for st in self.slot_track.iter_mut() {

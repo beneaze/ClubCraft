@@ -407,14 +407,8 @@ impl EngineCore {
                     Self::dispose(&mut self.garbage, Garbage::Schedule(schedule));
                 }
             }
-            MixSeek(t) => {
-                if self.conductor.sched.is_some() {
-                    self.conductor.time = t.max(0.0);
-                    self.conductor.finished = false;
-                    self.conductor.held = 0.0;
-                }
-            }
-            MixPause => self.conductor.pause(&mut self.decks),
+            MixSeek(t) => self.conductor.seek(t),
+            MixPause => self.conductor.pause(&mut self.decks, &mut self.mixer),
             SetMixLanes(l) => self.conductor.set_lanes(l),
             MixTrackReady { schedule, index, track } => {
                 if let Some(t) = self.conductor.set_track(schedule, index, track) {

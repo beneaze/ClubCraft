@@ -1196,3 +1196,57 @@ fn transition_effect_modes_play_through_the_mix() {
     let riser = render(Param::Noise, Mode::Riser);
     assert!(riser(28.0, 31.5) > full * 1.05 && (riser(4.0, 12.0) / full - 1.0).abs() < 0.05);
 }
+
+/// Outgoing track: a steady tone; incoming: silence. Transition 0 uses `param` in `mode`.
+fn effect_mix(param: clubcraft_core::Param, mode: clubcraft_core::Mode) -> (Mix, Arc<LoadedTrack>, Arc<LoadedTrack>) {
+    let n = SR as usize * 60;
+    let tone: Vec<f32> = (0..n).map(|i| 0.5 * (i as f32 * 440.0 * std::f32::consts::TAU / SR as f32).sin()).collect();
+    let mut mix = two_track_mix(TransitionStyle::Crossfade, true);
+    let mut t = Transition::new(TransitionStyle::Cut, 32);
+    t.set_mode(param, mode);
+    mix.transitions[0] = t;
+    (mix, track(&tone, 120.0, 0.0), track(&vec![0f32; n], 120.0, 0.0))
+}
+
+#[test]
+fn transition_effects_stop_with_their_transition() {
+    use clubcraft_core::{Mode, Param};
+    for param in [Param::Echo, Param::Reverb, Param::Noise, Param::Loop, Param::Brake, Param::Pump] {
+        for &mode in Mode::for_param(param) {
+            let (mix, a, b) = effect_mix(param, mode);
+            let tr = |id: i64| Some(if id == 1 { a.clone() } else { b.clone() });
+            let opts = RenderOptions { limiter: false, tail_secs: 0.5, ..Default::default() };
+            let (r, rep) = render_mix_to_vec(&mix, &|id| tr(id).map(|t| t.analysis()), &tr, &opts).unwrap();
+            let end = rep.timeline.transitions[0].end_sec;
+            // tails (echo, reverb) die away within a few seconds; nothing else stays
+            let from = ((end + 6.0) * SR as f64) as usize * 2;
+            let peak = r[from.min(r.len())..].iter().fold(0f32, |m, v| m.max(v.abs()));
+            assert!(peak < 1e-3, "{param:?} {mode:?} still sounds at {peak} after its transition");
+        }
+    }
+}
+
+#[test]
+fn transition_effects_fall_silent_on_pause() {
+    use clubcraft_core::{Mode, Param};
+    for (param, mode) in [(Param::Noise, Mode::Riser), (Param::Loop, Mode::LoopOut), (Param::Brake, Mode::BrakeSwap), (Param::Noise, Mode::Swoosh)] {
+        let (mix, a, b) = effect_mix(param, mode);
+        let tr = |id: i64| Some(if id == 1 { a.clone() } else { b.clone() });
+        let mut core = EngineCore::new(SR, 2);
+        let mut player = MixPlayer::new(&mix, &tr, [0, 1]).unwrap();
+        // pause three quarters into the transition, where every one of them is busy
+        let x = player.timeline().transitions[0].clone();
+        let at = player.timeline().sec_at_beat(x.start_beat + 24.0);
+        player.play(&mut core, at - 1.0).unwrap();
+        run_blocks(&mut core, (SR as usize / 512) * 2);
+        player.pause(&mut core).unwrap();
+        run_blocks(&mut core, 20);
+        let (mut m, mut c) = (vec![0f32; 512 * 2], vec![0f32; 512 * 2]);
+        let mut peak = 0f32;
+        for _ in 0..200 {
+            core.process(&mut m, &mut c);
+            peak = m.iter().fold(peak, |p, v| p.max(v.abs()));
+        }
+        assert!(peak < 1e-3, "{param:?} {mode:?} still sounds at {peak} while paused");
+    }
+}

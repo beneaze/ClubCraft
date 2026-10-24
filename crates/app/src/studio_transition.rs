@@ -40,11 +40,6 @@ impl ParamGroup {
             ParamGroup::Rhythm => TCategory::Rhythm.columns(),
         }
     }
-
-    /// The group whose curve editor holds `p`.
-    fn of(p: Param) -> ParamGroup {
-        ParamGroup::ALL.into_iter().find(|g| g.params().iter().any(|c| c.0 == p)).unwrap_or_default()
-    }
 }
 
 /// Categories of the transition editor (DJ.Studio-like): simple choices per stem / band, or the
@@ -420,18 +415,8 @@ impl StudioView {
             });
         });
         if let Some(p) = manual {
-            // draw it in the timeline where it has a curve row there, else in the curve editor
-            let target = match p {
-                Param::Stem(_) => Some(crate::studio_timeline::CurveTarget::Stems),
-                p => crate::studio_timeline::CurveTarget::ALL.into_iter().find(|t| t.param() == Some(p)),
-            };
-            match target {
-                Some(t) => self.curve_target = t,
-                None => {
-                    self.tcat = TCategory::Curves;
-                    self.tgroup = ParamGroup::of(p);
-                }
-            }
+            // draw it in the timeline: its stem row, its effect row or its curve
+            self.curve_target = crate::studio_timeline::CurveTarget::of(p);
         }
         if changed {
             self.changed();

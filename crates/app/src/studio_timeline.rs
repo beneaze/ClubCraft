@@ -34,7 +34,8 @@ impl ShowMode {
 }
 
 /// What the timeline draws and edits inside the selected transition (like DJ.Studio's
-/// automation choice): one row per stem, or one curve for the volume, an EQ band or the filter.
+/// automation choice): one row per stem, one row per effect, or one curve for the volume or an
+/// EQ band.
 /// How much of a track's unplayed audio is shown beside its clip (s).
 const GHOST_SECS: f64 = 16.0;
 
@@ -46,11 +47,12 @@ pub enum CurveTarget {
     EqLow,
     EqMid,
     EqHigh,
-    Filter,
+    /// The filter and the transition effects, one row each.
+    Effects,
 }
 
 impl CurveTarget {
-    pub const ALL: [CurveTarget; 6] = [CurveTarget::Stems, CurveTarget::Volume, CurveTarget::EqLow, CurveTarget::EqMid, CurveTarget::EqHigh, CurveTarget::Filter];
+    pub const ALL: [CurveTarget; 6] = [CurveTarget::Stems, CurveTarget::Volume, CurveTarget::EqLow, CurveTarget::EqMid, CurveTarget::EqHigh, CurveTarget::Effects];
     pub fn label(self) -> &'static str {
         match self {
             CurveTarget::Stems => "Stems",
@@ -58,17 +60,17 @@ impl CurveTarget {
             CurveTarget::EqLow => "Low",
             CurveTarget::EqMid => "Mid",
             CurveTarget::EqHigh => "High",
-            CurveTarget::Filter => "Filter",
+            CurveTarget::Effects => "Effects",
         }
     }
+    /// The one parameter this target draws (`None` for the rows of stems and effects).
     pub(crate) fn param(self) -> Option<Param> {
         match self {
-            CurveTarget::Stems => None,
+            CurveTarget::Stems | CurveTarget::Effects => None,
             CurveTarget::Volume => Some(Param::Volume),
             CurveTarget::EqLow => Some(Param::EqLow),
             CurveTarget::EqMid => Some(Param::EqMid),
             CurveTarget::EqHigh => Some(Param::EqHigh),
-            CurveTarget::Filter => Some(Param::Filter),
         }
     }
     fn color(self) -> Color32 {
@@ -77,10 +79,30 @@ impl CurveTarget {
             CurveTarget::EqLow => EQ_COLORS[0],
             CurveTarget::EqMid => EQ_COLORS[1],
             CurveTarget::EqHigh => EQ_COLORS[2],
-            CurveTarget::Filter => FILTER_COLOR,
+            CurveTarget::Effects => FILTER_COLOR,
+        }
+    }
+
+    /// Where `p` is drawn in the timeline.
+    pub(crate) fn of(p: Param) -> CurveTarget {
+        match p {
+            Param::Stem(_) => CurveTarget::Stems,
+            p if FX_ROWS.iter().any(|r| r.0 == p) => CurveTarget::Effects,
+            p => CurveTarget::ALL.into_iter().find(|t| t.param() == Some(p)).unwrap_or_default(),
         }
     }
 }
+
+/// Effect rows from top to bottom, with their colours.
+pub const FX_ROWS: [(Param, &str, Color32); 7] = [
+    (Param::Filter, "Filter", FILTER_COLOR),
+    (Param::Echo, "Echo", theme::FX_ECHO),
+    (Param::Reverb, "Reverb", theme::FX_REVERB),
+    (Param::Noise, "Noise", theme::FX_NOISE),
+    (Param::Loop, "Loop", theme::FX_LOOP),
+    (Param::Brake, "Brake", theme::FX_BRAKE),
+    (Param::Pump, "Side-chain", theme::FX_PUMP),
+];
 
 /// Stem rows from top to bottom (as in DJ.Studio).
 pub const STEM_ROWS: [StemKind; 4] = [StemKind::Drums, StemKind::Bass, StemKind::Other, StemKind::Vocals];
@@ -167,7 +189,7 @@ impl StudioView {
         let n_closed = MIX_LANES as f32 - (0..MIX_LANES).filter(|l| !self.lane_collapsed[*l]).count() as f32;
         // editing a transition's stems needs room for four rows per track: the tempo and sample
         // lanes give way first
-        let stem_edit = matches!(self.selection, Selection::Transition(_)) && self.curve_target == CurveTarget::Stems;
+        let stem_edit = matches!(self.selection, Selection::Transition(_)) && matches!(self.curve_target, CurveTarget::Stems | CurveTarget::Effects);
         let want = if stem_edit { 150.0 } else { 70.0 };
         let layout = |squeeze: bool| {
             let tempo_h = if self.tempo_open && !squeeze { 58.0 } else { 24.0 };
@@ -785,6 +807,12 @@ impl StudioView {
                 format!("high-pass {:.0} %", (v - 0.5) * 200.0)
             }
         };
+        let loop_fmt = |v: f32| match clubcraft_core::loop_beats(v) {
+            None => "off".to_string(),
+            Some(b) if b >= 4.0 => "1 bar".to_string(),
+            Some(b) if b >= 1.0 => format!("{b:.0} beat{}", if b > 1.0 { "s" } else { "" }),
+            Some(b) => format!("1/{:.0} beat", 1.0 / b),
+        };
         let target = self.curve_target;
         let mut changed = false;
         for (side, ti) in [(Side::Out, k), (Side::In, k + 1)] {
@@ -803,8 +831,43 @@ impl StudioView {
                 continue;
             }
             let painter = ui.painter_at(canvas);
-            match target.param() {
-                None => {
+            match (target, target.param()) {
+                (CurveTarget::Effects, _) => {
+                    let rh = area.height() / FX_ROWS.len() as f32;
+                    for (row, (param, name, col)) in FX_ROWS.into_iter().enumerate() {
+                        let rr = Rect::from_min_size(pos2(area.left(), area.top() + row as f32 * rh), vec2(area.width(), rh - 1.0));
+                        let mut pts = self.mix.transitions[k].lanes.iter().find(|ln| ln.side == side && ln.param == param).map(|ln| ln.points.clone()).unwrap_or_default();
+                        let used = pts.iter().any(|p| (p.1 - param.neutral()).abs() > 1e-3);
+                        painter.rect_filled(rr, 0.0, theme::blend(theme::PANEL, col, if used { 0.22 } else { 0.08 }));
+                        let fmt: &dyn Fn(f32) -> String = match param {
+                            Param::Filter => &filter_fmt,
+                            Param::Loop => &loop_fmt,
+                            _ => &pct,
+                        };
+                        let c = crate::curve_edit::Curve {
+                            rect: rr.shrink2(vec2(0.0, 2.0)),
+                            x0: 0.0,
+                            x1: beats,
+                            to_x: &to_x,
+                            from_x: &from_x,
+                            snap: &snap,
+                            neutral: param.neutral(),
+                            centered: param == Param::Filter,
+                            color: col,
+                            editable,
+                            fmt,
+                            fmt_x: &fmt_x,
+                        };
+                        if crate::curve_edit::curve_ui(ui, Id::new(("tfx", k, side == Side::In, row)), &c, &mut pts) {
+                            set_lane(&mut self.mix.transitions[k], side, param, pts);
+                            changed = true;
+                        }
+                        if rr.height() >= 11.0 && area.width() > 60.0 {
+                            painter.text(pos2(rr.left() + 4.0, rr.center().y), egui::Align2::LEFT_CENTER, name, egui::FontId::proportional((rr.height() * 0.6).clamp(8.0, 11.0)), if used { col } else { col.gamma_multiply(0.55) });
+                        }
+                    }
+                }
+                (_, None) => {
                     let has_stems = sh.waveforms.get(&tid).is_some_and(|w| w.stems.is_some());
                     let rh = area.height() / STEM_ROWS.len() as f32;
                     for (row, stem) in STEM_ROWS.into_iter().enumerate() {
@@ -873,7 +936,7 @@ impl StudioView {
                         painter.text(pos2(area.right() - 6.0, area.top() + 3.0), egui::Align2::RIGHT_TOP, "no stems yet: imitated with volume and EQ", egui::FontId::proportional(10.0), theme::TEXT_DIM);
                     }
                 }
-                Some(param) => {
+                (_, Some(param)) => {
                     let centered = matches!(param, Param::EqLow | Param::EqMid | Param::EqHigh | Param::Filter);
                     let mut pts = self.mix.transitions[k].lanes.iter().find(|ln| ln.side == side && ln.param == param).map(|ln| ln.points.clone()).unwrap_or_default();
                     let fmt: &dyn Fn(f32) -> String = match param {
