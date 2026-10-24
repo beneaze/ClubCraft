@@ -21,9 +21,9 @@
 <br>
 
 <p align="center">
-  <img src="docs/images/transition.jpg" alt="The ClubCraft studio zoomed in on the first transition of a 28-minute mix: the outgoing and incoming track on two beat-matched lanes inside the transition frame, and the transition editor below with presets, categories and Off, Swap, Crossfade or Full for drums, bass, melody and vocals" width="100%">
+  <img src="docs/images/transition.jpg" alt="The ClubCraft studio zoomed in on the third transition of a 23-track mix: inside the transition frame both tracks are split into drums, bass, melody and vocals rows, each with its curve and an on/off button, the bass swapping halfway; below, the transition editor with presets, categories and Off, Swap, Crossfade, Full or Manual for every stem" width="100%">
   <br>
-  <sub>A 28-minute mix imported from DJ.Studio, zoomed in on its first stem blend with the transition editor open.</sub>
+  <sub>A 59-minute, 23-track mix zoomed in on a bass swap: every stem of both tracks has its own row and curve, and the transition editor is open below.</sub>
 </p>
 
 <p align="center">
@@ -63,23 +63,23 @@
 
 ## Features
 
-Every screenshot here is the real app at work on a mix imported from DJ.Studio. ClubCraft captures them itself through its developer control channel.
+Every screenshot here is the real app at work on a 23-track mix. ClubCraft captures them itself through its developer control channel.
 
 <table>
   <tr>
     <td width="50%" valign="top">
-      <img src="docs/images/studio.jpg" alt="The studio timeline: two deck lanes with mixer headers (fader, solo, mute, EQ and filter knobs), stem-coloured clips with key badges, transition markers on their own strip, two sample lanes, the tempo lane gliding between 122 and 138 BPM, and the bottom bar with the transport, the Stems missing button and the panel tabs" width="100%">
+      <img src="docs/images/studio.jpg" alt="The studio timeline of a 59-minute mix: two deck lanes with mixer headers (fader, solo, mute, EQ and filter knobs), 23 stem-coloured clips with key badges, transition markers on their own strip, vocal samples on the first sample lane, the tempo lane gliding between 122 and 127 BPM, and the bottom bar with the transport and the panel tabs" width="100%">
       <br>
-      <sub>Two deck lanes with their own mixers, two sample lanes, and the tempo gliding between 122 and 138 BPM.</sub>
+      <sub>A whole set at a glance: two deck lanes with their own mixers, vocal samples on a sample lane, and the tempo gliding between 122 and 127 BPM.</sub>
       <h3>Design the whole set</h3>
       Drop tracks in and <b>✨ Harmonize</b> orders them by Camelot key, tempo and energy arc, using simulated annealing over the whole set. Mix-in and mix-out points come from the analysed structure, and transition lengths fit the intro and outro of each pair.
       <br><br>
-      Slide tracks and transitions by bars, collapse lanes, solo or mute them, shape a lane with its EQ and filter, and render the result to WAV with a cue sheet, faster than real time. Everything else lives in a DJ.Studio-style bar at the bottom: the transport, plus tabs for Zoom, Playlist (a sortable track table with keys, harmonic matches, energy and BPM), Transition, Track, Mashups and Master. Two <b>sample lanes</b> take one-shots, loops and FX dropped from Finder. Drag across a track's waveform to select a range and right-click to copy it to a sample lane: the full sound, or just its drums, bass, melody, vocals, instrumental or drums + bass (⌘L, ⇧⌘1–6). The copy is stretched and key-shifted like the mix plays it, or you can save it as a WAV. Every edit can be undone, and <b>savepoints</b> keep versions of a mix to switch between (none is lost on the way); <b>Duplicate</b> copies a mix to try something out.
+      Slide tracks by bars and transitions by beats (finer when you zoom in, Shift for free moves), select several clips with a box or Shift-click, collapse lanes, solo or mute them, shape a lane with its EQ and filter, and render the result to WAV with a cue sheet, faster than real time. Everything else lives in a DJ.Studio-style bar at the bottom: the transport, plus tabs for Zoom, Playlist (a sortable track table with keys, harmonic matches, energy and BPM; tracks joined by locked transitions are linked and drag as one group), Transition, Track, Mashups and Master. Every edit can be undone, and <b>savepoints</b> keep versions of a mix to switch between (none is lost on the way); <b>Duplicate</b> copies a mix to try something out.
     </td>
     <td width="50%" valign="top">
-      <img src="docs/images/live.jpg" alt="The live view during an automix transition: two scrolling stem-coloured waveforms in phase, deck A playing Define (Club Mix) and deck B Alone, both at 122.5 BPM with eight auto-generated hot cues, the mixer in the middle with the automix moving the channel faders, and the browser with the automix queue below" width="100%">
+      <img src="docs/images/live.jpg" alt="The live view playing a studio mix with automix: two scrolling stem-coloured waveforms, deck A playing MK - 17 at 122 BPM and deck B cued at the Mix In of Do You Still Care, both with eight auto-generated hot cues, the mixer in the middle with AUTOMIX on, and the browser with the mix's tracks and the automix queue below" width="100%">
       <br>
-      <sub>Automix in the middle of a transition: both decks phase-locked, every hot cue placed by the analysis.</sub>
+      <sub>A studio mix on the live decks: automix plays it at its mix points, and every hot cue was placed by the analysis.</sub>
       <h3>Then play it live</h3>
       VirtualDJ-style decks: CDJ cue logic, eight hot cues, loops and loop rolls, beat jump, slip, keylock, key shift and match key, sync with a phase meter, stem knobs and pads (acapella, instrumental, drums only), three-band EQ with kill, filter and beat-synced FX.
       <br><br>
@@ -88,7 +88,7 @@ Every screenshot here is the real app at work on a mix imported from DJ.Studio. 
   </tr>
   <tr>
     <td width="50%" valign="top">
-      <img src="docs/images/library.jpg" alt="The library sorted by BPM: tracks with stems marked by a green dot, BPM, Camelot key, energy, length and the number of generated cues" width="100%">
+      <img src="docs/images/library.jpg" alt="The library showing a mix's 23 tracks in mix order: tracks with stems marked by a green dot, BPM, Camelot key, energy, length, genre and the number of generated cues" width="100%">
       <br>
       <sub>The library: BPM, key, energy and cues for every analysed track.</sub>
       <h3>A library that analyses itself</h3>
@@ -97,7 +97,7 @@ Every screenshot here is the real app at work on a mix imported from DJ.Studio. 
       Imports your <b>DJ.Studio</b> projects: mix points, cues, transitions with their curves, stem automation and DJ.Studio's timing. The importer is built clean-room, from DJ.Studio's own files and exports only ([how it works](docs/interop/djstudio.md)). Exports beat grids, keys, hot cues and automix points to <b>VirtualDJ</b>.
     </td>
     <td width="50%" valign="top">
-      <img src="docs/images/home.jpg" alt="The home page: recent mixes as a searchable list with their key colours, track count, length and last edit on the left; a New mix panel (start empty, from selected tracks, a playlist or auto-built from the library) and the library status with analysis and stem progress and recently added tracks on the right" width="100%">
+      <img src="docs/images/home.jpg" alt="The home page: recent mixes as a searchable list with their key colours, track count, length and last edit on the left; a New mix panel (start empty, from selected tracks or auto-built from the library) and the library status with analysis and stem progress and recently added tracks on the right" width="100%">
       <br>
       <sub>The home page: recent mixes on the left, a new mix and the library status on the right.</sub>
       <h3>Start anywhere</h3>
@@ -114,13 +114,28 @@ Every screenshot here is the real app at work on a mix imported from DJ.Studio. 
     </td>
     <td width="50%" valign="top">
       <h3>Transitions you can read</h3>
-      Pick a preset (Stem blend, Bass swap, Crossfade, Vocal over, Mashup, Filter out, Echo out, Cut), then adjust it the way DJ.Studio does it: for every stem <b>Off · Swap · Crossfade · Full</b>, the same for each EQ band, plus volume, filter and echo choices. Or draw it in the timeline, like in DJ.Studio: a selected transition splits both tracks into drums, bass, melody and vocals rows, each with its curve. Press on a line to add a point, drag points (they stop at their neighbours; double-click removes one), slide a hard switch sideways by its edge, and switch a stem off on either side with its button. The same works for the volume, each EQ band and the filter. Drag a transition's bar to move it by beats (Shift: quarter beats) and its edges to change its length; the curves keep their shape. Lock a transition and harmonizing or recomputing mix points leaves it alone.
+      Pick a preset (Stem blend, Bass swap, Crossfade, Vocal over, Filter out, Echo out, Cut, and Mashup with the old or the new vocals), then adjust it the way DJ.Studio does it: for every stem <b>Off · Swap · Crossfade · Full</b>, the same for each EQ band, plus volume and effects: filter, echo, reverb and noise risers, and <b>Rhythm FX</b> with loops and rolls, a vinyl brake and a side-chain pump. They play in the preview, the export and automix, with or without stems.
+      <br><br>
+      Or draw it in the timeline, like in DJ.Studio: a selected transition splits both tracks into drums, bass, melody and vocals rows, each with its curve, and the effects it uses get a row each. Press on a line to add a point, drag points between their neighbours, bend a slope by its handle, double-click a slope to make it a hard switch, ⌘-drag to draw flat steps on the grid, and switch a stem off on either side with its button. A hard switch slides sideways as one, and the other track's switch goes along, so a swap stays a swap. The same works for the volume and each EQ band. Drag a transition's bar to move it and its edges to change its length; the curves keep their shape. Lock a transition and harmonizing or recomputing mix points leaves it alone.
       <br><br>
       To switch stems off in any part of a song, drag across the waveform and right-click: mute drums, bass, melody or vocals there, or make that part an acapella or an instrumental.
       <br><br>
       Stems for a mix's stem transitions are separated automatically, only for the transition windows and at the Fast quality, so they are ready in seconds per transition. Until then the stem curves are imitated with volume and EQ: each transition keeps its own shape, and the timeline shows it marked "no stems". An export separates those windows again at the export quality first, not the whole tracks, so a Best export takes a fraction of the time. The editor also warns when the outgoing track fades out before its transition ends, or when the incoming track comes in much quieter.
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/images/samples.jpg" alt="A vocal sample on the first sample lane under a transition: the clip, copied from Come Find Me and locked to it, is selected and shows its volume curve fading in and out over its waveform, with a selector for Volume, Low, Mid, High and Effects in its title bar" width="100%">
+      <br>
+      <sub>The vocals of a track copied to a sample lane, locked to it and faded in with their own volume curve.</sub>
+      <h3>Samples that follow the music</h3>
+      Two <b>sample lanes</b> take one-shots, loops and FX dropped from Finder. Drag across a track's waveform to select a range and right-click to copy it to a sample lane: the full sound, or just its drums, bass, melody, vocals, instrumental or drums + bass (⌘L, ⇧⌘1–6). The copy is stretched and key-shifted like the mix plays it, or you can save it as a WAV.
+      <br><br>
+      A copy stays linked to its track. Drag its edges to cut it shorter or to bring in more of the track before or after it. When the track gets better stems (or an export separates that part at the export quality), the clip is cut again from them. It's locked to its track, so it moves along when the track moves in the mix. Every clip has its own volume, EQ, filter and effect curves, drawn like a transition's, and each sample lane plays through a channel strip of its own.
+    </td>
+    <td width="50%" valign="top">
       <h3>Keyboard first</h3>
-      <b>Studio:</b> Space play · ← → bar (⇧ 8 bars) · [ ] transitions · F follow · + − zoom · ⌘Z / ⇧⌘Z undo / redo · ⌘S save.<br>
+      <b>Studio:</b> Space play · ← → bar (⇧ 8 bars) · [ ] transitions · F follow · + − zoom · ⌘Z / ⇧⌘Z undo / redo · ⌘S save · ⌫ remove the selection.<br>
       <b>Live:</b> Z X C and M , . cue/play/sync · 1–8 hot cues (⇧ deck B) · ← → crossfader.<br>
       MIDI controllers map with MIDI learn.
     </td>
@@ -131,13 +146,14 @@ Every screenshot here is the real app at work on a mix imported from DJ.Studio. 
 
 ## Find mashups
 
-<p align="center"><img src="docs/images/mashups.jpg" alt="The mashup finder in the studio's bottom section: the vocals of Gorgon City's Mitsubishi matched against the library; every row shows the instrumental's bars, the vocal phrase, the key shift and tempo change, a strip with the fit of every bar, the rule score and the AI score, with preview, new mix and insert buttons" width="100%"></p>
+<p align="center"><img src="docs/images/mashups.jpg" alt="The mashup finder in the studio's bottom section: the vocals of MK and Clementine Douglas' Come Find Me matched against the library; every row shows where in the instrumental it goes (bars, time and section, such as a drop), the chorus it uses, the key shift and tempo change, a strip with the fit of every bar, the rule score and the AI score, with preview, new mix and insert buttons" width="100%"></p>
 
-Want the vocals of one track over another? The **🎤 Mashups** tab of the studio's bottom bar opens the finder. You can also start it from the track inspector, the library's context menu or ⇧⌘M. It searches your library for the instrumentals that carry those vocals, and tells you where.
+Want the vocals of one track over another? The **🎤 Mashups** tab of the studio's bottom bar opens the finder. You can also start it from the track inspector, the library's context menu or ⇧⌘M. It searches your library both ways round: the instrumentals that carry a track's vocals, or the vocals that fit over its instrumental. And it tells you where.
 
-- **Where it fits, bar by bar.** For every 16-bar placement it compares the vocal notes with the instrumental's bass and chords, using a consonance table that knows a vocal a major seventh above a chord is colour but a semitone above it clashes. It also weighs masking by a loud melody in the vocal range, leftover vocals of the backing track, and the tempo and key change needed. On real tracks the original pairing beats its own ±1–2 semitone shifts 93 % of the time, where plain key matching or chroma similarity (as in AutoMashUpper) manages 84 %.
+- **Whole phrases in the right place.** It takes whole sung phrases (the chorus first, found by the structure model) and tries them where the other track's sections start: a chorus on a drop, a verse on a breakdown or groove, never on an intro or outro.
+- **Where it fits, bar by bar.** For every placement it compares the vocal notes with the instrumental's bass and chords, using a consonance table that knows a vocal a major seventh above a chord is colour but a semitone above it clashes. It also weighs masking by a loud melody in the vocal range, leftover vocals of the backing track, and the tempo and key change needed. On real tracks the original pairing beats its own ±1–2 semitone shifts 93 % of the time, where plain key matching or chroma similarity (as in AutoMashUpper) manages 84 %.
 - **An AI second opinion.** The best 20 candidates are rendered as the mix would play them, with the vocals shifted and stretched, and [COCOLA](https://github.com/gladia-research-group/cocola) (ICASSP 2025), a network trained on separated stems, listens to each. Blending both scores ranks the right match higher than either alone (84 % against random placements, from 78 %).
-- **Hear it, then use it.** ▶ plays the vocals over the instrumental straight away. **New mix** makes a two-track mashup, and **Insert** puts the instrumental after the vocal track in the open mix. Both use the new **Mashup** transition: the instrumentals swap within a bar and the vocals keep singing for the whole phrase.
+- **Hear it, then use it.** ▶ plays the vocals over the instrumental straight away. **New mix** makes a two-track mashup, and **Insert** puts the instrumental after the vocal track in the open mix. Both use a **Mashup** transition: the instrumentals swap within a bar and the vocals keep singing for the whole phrase, the old vocals over the new track or the new vocals over the old one.
 - **For transitions too.** In the transition editor, **🎤 Find vocal-over point** finds where the outgoing vocals sound best over the incoming track and sets the transition with one click.
 
 ## Everything in the box
@@ -154,7 +170,7 @@ Want the vocals of one track over another? The **🎤 Mashups** tab of the studi
     </td>
     <td width="33%" valign="top">
       <h4>🗺️ Studio</h4>
-      Harmonic ordering (key, BPM, energy arc) · automatic mix points · beat-locked timeline with a tempo glide or a fixed BPM · per-lane gain, solo, mute, EQ and filter · 7 transition styles plus custom curves · lazy, memory-bounded preview · WAV export (16/24/32-bit) with a cue sheet
+      Harmonic ordering (key, BPM, energy arc) · automatic mix points · beat-locked timeline with a tempo glide or a fixed BPM · per-lane gain, solo, mute, EQ and filter · 9 transition styles plus custom curves with bends and hard switches · two sample lanes with their own curves and effects · lazy, memory-bounded preview · WAV export (16/24/32-bit) with a cue sheet
     </td>
   </tr>
   <tr>
@@ -164,7 +180,7 @@ Want the vocals of one track over another? The **🎤 Mashups** tab of the studi
     </td>
     <td width="33%" valign="top">
       <h4>🔊 Mixer and FX</h4>
-      3-band isolator EQ with kill · resonant one-knob filter · crossfader curves · headphone cue on outputs 3/4 or a split cable · master limiter · recording · echo, ping-pong, reverb, flanger, filter LFO, gate, roll, bitcrusher, brake · per-stem echo-out
+      3-band isolator EQ with kill · resonant one-knob filter · crossfader curves · headphone cue on outputs 3/4 or a split cable · master limiter · recording · echo, ping-pong, reverb, flanger, filter LFO, gate, roll, bitcrusher, brake · per-stem echo-out · transition effects: reverb send, noise sweeps, beat loops, vinyl brake, side-chain pump
     </td>
     <td width="33%" valign="top">
       <h4>🔗 Interop</h4>
@@ -215,7 +231,7 @@ The cue generator places Mix In at least 32 beats before the first drop or vocal
 - **Exact timing:** tempo is piecewise linear in mix beats and integrated analytically, which keeps overlapping tracks beat-locked to within a millisecond.
 - **Clean-room:** ClubCraft is independent. Other DJ software is only studied through its files, its output and public documentation, never through its program code, and none of its code, models or assets are used. The DJ.Studio importer was rebuilt under that rule; see [docs/clean-room.md](docs/clean-room.md).
 - **Never crash:** no `unwrap`, `expect` or `panic` outside tests, and unsafe code only in five FFI modules, each block with a `SAFETY` note. Clippy enforces both. The contributor rules are in [AGENTS.md](AGENTS.md).
-- **Tested:** 84 unit and integration tests, plus evaluations against Python Demucs and a 137-track analysis corpus.
+- **Tested:** 154 unit and integration tests, plus evaluations against Python Demucs and a 137-track analysis corpus.
 
 ## Talk to it: built-in MCP server
 
