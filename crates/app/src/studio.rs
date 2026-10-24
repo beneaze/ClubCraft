@@ -5,7 +5,7 @@ use crate::library_view::DraggedTracks;
 use crate::theme;
 
 use clubcraft_core::planner::{self, OrderItem, OrderOptions, PlanOptions};
-use clubcraft_core::{Analysis, Mix, MixTimeline, MixTrack, Param, Side, TempoMode, TrackId, Transition, TransitionStyle};
+use clubcraft_core::{Analysis, Mix, MixTimeline, MixTrack, TempoMode, TrackId, TransitionStyle};
 use eframe::egui::{self, pos2, vec2, Align, Color32, Layout, RichText, Sense, Stroke, StrokeKind, Ui};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -147,7 +147,7 @@ pub struct StudioView {
     pub curve_target: crate::studio_timeline::CurveTarget,
     /// Curves of stem rows switched off in the timeline, to bring back when switched on again:
     /// (transition, incoming side, stem index).
-    pub stem_stash: std::collections::HashMap<(usize, bool, usize), Vec<(f32, f32)>>,
+    pub stem_stash: std::collections::HashMap<(usize, bool, usize), clubcraft_core::Lane>,
     pub tempo_open: bool,
     pub drag: Option<crate::studio_timeline::Drag>,
     pub drag_acc: f32,
@@ -157,7 +157,6 @@ pub struct StudioView {
     /// group drag moves (index, start beat).
     pub(crate) multi_base: MultiSel,
     pub(crate) drag_origins: Vec<(usize, f64)>,
-    pub tgroup: crate::studio_transition::ParamGroup,
     pub tcat: crate::studio_transition::TCategory,
     /// Zoom to fit the whole mix on the next frame.
     pub fit_request: bool,
@@ -233,7 +232,6 @@ impl Default for StudioView {
             multi: MultiSel::default(),
             multi_base: MultiSel::default(),
             drag_origins: Vec::new(),
-            tgroup: Default::default(),
             tcat: Default::default(),
             fit_request: true,
             plan_opts: PlanOptions::default(),
@@ -1565,16 +1563,6 @@ fn card(ui: &mut Ui, w: f32, add: impl FnOnce(&mut Ui)) {
     });
 }
 
-pub(crate) fn set_point(tr: &mut Transition, side: Side, param: Param, x: f32, v: f32) {
-    if !tr.lanes.iter().any(|l| l.side == side && l.param == param) {
-        tr.lanes.push(clubcraft_core::Lane::new(side, param, &[(0.0, param.neutral()), (tr.beats as f32, param.neutral())]));
-    }
-    let Some(lane) = tr.lanes.iter_mut().find(|l| l.side == side && l.param == param) else { return };
-    lane.points.retain(|p| (p.0 - x).abs() > 0.25);
-    lane.points.push((x, v));
-    lane.points.sort_by(|a, b| a.0.total_cmp(&b.0));
-}
-
 pub fn truncate(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
         s.to_string()
@@ -1588,7 +1576,7 @@ pub fn truncate(s: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clubcraft_core::MixTrack;
+    use clubcraft_core::{MixTrack, Param, Side, Transition};
 
     fn mix() -> Mix {
         let t = |id| MixTrack { track_id: id, mix_in: 0.0, mix_out: 60.0, key_shift: 0, gain_db: 0.0, stems: Vec::new() };

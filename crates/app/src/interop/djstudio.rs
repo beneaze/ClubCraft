@@ -728,7 +728,7 @@ fn step(len: f32, x: f32, g0: f64, g1: f64, value: fn(f64) -> f32) -> Vec<(f32, 
 
 fn set_lane(lanes: &mut Vec<Lane>, side: Side, param: Param, points: Vec<(f32, f32)>) {
     lanes.retain(|l| !(l.side == side && l.param == param));
-    lanes.push(Lane { side, param, points });
+    lanes.push(Lane::new(side, param, &points));
 }
 
 /// A DJ.Studio transition (`autoEffects` entry) as ClubCraft lanes.

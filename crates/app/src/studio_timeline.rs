@@ -6,7 +6,7 @@ use crate::studio::{Selection, StudioAction, StudioView};
 use crate::theme;
 use crate::waveform::{self, WaveParams, WaveStyle};
 use crate::widgets;
-use clubcraft_core::{CueKind, LaneSettings, Param, SampleClip, Side, StemKind, TempoMode, Transition, MIX_LANES, SAMPLE_LANES};
+use clubcraft_core::{CueKind, Lane, LaneSettings, Param, SampleClip, Side, StemKind, TempoMode, Transition, MIX_LANES, SAMPLE_LANES};
 use eframe::egui::{self, pos2, vec2, Align, Color32, CursorIcon, Id, Layout, Rect, RichText, Sense, Stroke, StrokeKind, Ui};
 
 /// Which automation the timeline draws on a lane's clips.
@@ -773,13 +773,8 @@ impl StudioView {
         let to_x = |b: f32| x_of(tl.sec_at_beat(x.start_beat + b as f64));
         let from_x = |px: f32| (tl.beat_at_sec((((px - origin) / zoom) as f64).max(0.0)) - x.start_beat) as f32;
         let beat_px = (tl.tracks[k].grid.beat_len() as f32 * zoom).max(0.1);
-        let snap = move |b: f32, free: bool| {
-            if free {
-                return b;
-            }
-            let q = if beat_px > 48.0 { 0.25 } else if beat_px > 12.0 { 1.0 } else { 4.0 };
-            (b / q).round() * q
-        };
+        // the finest grid that is still easy to aim at: quarter beats, beats or bars
+        let grid = if beat_px > 48.0 { 0.25 } else if beat_px > 12.0 { 1.0 } else { 4.0 };
         let fmt_x = |b: f32| {
             let bar = (b / 4.0).floor() as i32 + 1;
             let beat = b.rem_euclid(4.0);
@@ -836,8 +831,8 @@ impl StudioView {
                     let rh = area.height() / FX_ROWS.len() as f32;
                     for (row, (param, name, col)) in FX_ROWS.into_iter().enumerate() {
                         let rr = Rect::from_min_size(pos2(area.left(), area.top() + row as f32 * rh), vec2(area.width(), rh - 1.0));
-                        let mut pts = self.mix.transitions[k].lanes.iter().find(|ln| ln.side == side && ln.param == param).map(|ln| ln.points.clone()).unwrap_or_default();
-                        let used = pts.iter().any(|p| (p.1 - param.neutral()).abs() > 1e-3);
+                        let mut lane = lane_of(&self.mix.transitions[k], side, param);
+                        let used = lane.points.iter().any(|p| (p.1 - param.neutral()).abs() > 1e-3);
                         painter.rect_filled(rr, 0.0, theme::blend(theme::PANEL, col, if used { 0.22 } else { 0.08 }));
                         let fmt: &dyn Fn(f32) -> String = match param {
                             Param::Filter => &filter_fmt,
@@ -850,7 +845,7 @@ impl StudioView {
                             x1: beats,
                             to_x: &to_x,
                             from_x: &from_x,
-                            snap: &snap,
+                            grid,
                             neutral: param.neutral(),
                             centered: param == Param::Filter,
                             color: col,
@@ -858,8 +853,8 @@ impl StudioView {
                             fmt,
                             fmt_x: &fmt_x,
                         };
-                        if crate::curve_edit::curve_ui(ui, Id::new(("tfx", k, side == Side::In, row)), &c, &mut pts) {
-                            set_lane(&mut self.mix.transitions[k], side, param, pts);
+                        if crate::curve_edit::curve_ui(ui, Id::new(("tfx", k, side == Side::In, row)), &c, &mut lane) {
+                            set_lane(&mut self.mix.transitions[k], lane);
                             changed = true;
                         }
                         if rr.height() >= 11.0 && area.width() > 60.0 {
@@ -877,15 +872,15 @@ impl StudioView {
                             painter.rect_filled(rr, 0.0, theme::blend(theme::PANEL, col, 0.14));
                         }
                         let plot = rr.shrink2(vec2(0.0, 3.0));
-                        let mut pts = self.mix.transitions[k].lanes.iter().find(|ln| ln.side == side && ln.param == Param::Stem(stem)).map(|ln| ln.points.clone()).unwrap_or_default();
-                        let off = !pts.is_empty() && pts.iter().all(|p| p.1 < 1e-3);
+                        let mut lane = lane_of(&self.mix.transitions[k], side, Param::Stem(stem));
+                        let off = !lane.points.is_empty() && lane.points.iter().all(|p| p.1 < 1e-3);
                         let c = crate::curve_edit::Curve {
                             rect: plot,
                             x0: 0.0,
                             x1: beats,
                             to_x: &to_x,
                             from_x: &from_x,
-                            snap: &snap,
+                            grid,
                             neutral: 1.0,
                             centered: false,
                             color: if off { col.gamma_multiply(0.4) } else { Color32::WHITE },
@@ -893,8 +888,8 @@ impl StudioView {
                             fmt: &pct,
                             fmt_x: &fmt_x,
                         };
-                        if crate::curve_edit::curve_ui(ui, Id::new(("tcurve", k, side == Side::In, row)), &c, &mut pts) {
-                            set_lane(&mut self.mix.transitions[k], side, Param::Stem(stem), pts);
+                        if crate::curve_edit::curve_ui(ui, Id::new(("tcurve", k, side == Side::In, row)), &c, &mut lane) {
+                            set_lane(&mut self.mix.transitions[k], lane);
                             changed = true;
                         }
                         // on / off per stem and side (DJ.Studio's stem toggles), outside the window
@@ -920,14 +915,13 @@ impl StudioView {
                             );
                             if br.on_hover_text(tip).clicked() && editable {
                                 let key = (k, side == Side::In, row);
-                                let cur = self.mix.transitions[k].lanes.iter().find(|ln| ln.side == side && ln.param == Param::Stem(stem)).map(|ln| ln.points.clone()).unwrap_or_default();
                                 let next = if off {
-                                    self.stem_stash.remove(&key).unwrap_or_else(|| vec![(0.0, 1.0), (beats, 1.0)])
+                                    self.stem_stash.remove(&key).unwrap_or_else(|| Lane::new(side, Param::Stem(stem), &[(0.0, 1.0), (beats, 1.0)]))
                                 } else {
-                                    self.stem_stash.insert(key, cur);
-                                    vec![(0.0, 0.0), (beats, 0.0)]
+                                    self.stem_stash.insert(key, lane_of(&self.mix.transitions[k], side, Param::Stem(stem)));
+                                    Lane::new(side, Param::Stem(stem), &[(0.0, 0.0), (beats, 0.0)])
                                 };
-                                set_lane(&mut self.mix.transitions[k], side, Param::Stem(stem), next);
+                                set_lane(&mut self.mix.transitions[k], next);
                                 changed = true;
                             }
                         }
@@ -938,7 +932,7 @@ impl StudioView {
                 }
                 (_, Some(param)) => {
                     let centered = matches!(param, Param::EqLow | Param::EqMid | Param::EqHigh | Param::Filter);
-                    let mut pts = self.mix.transitions[k].lanes.iter().find(|ln| ln.side == side && ln.param == param).map(|ln| ln.points.clone()).unwrap_or_default();
+                    let mut lane = lane_of(&self.mix.transitions[k], side, param);
                     let fmt: &dyn Fn(f32) -> String = match param {
                         Param::Filter => &filter_fmt,
                         Param::EqLow | Param::EqMid | Param::EqHigh => &eq_fmt,
@@ -950,7 +944,7 @@ impl StudioView {
                         x1: beats,
                         to_x: &to_x,
                         from_x: &from_x,
-                        snap: &snap,
+                        grid,
                         neutral: param.neutral(),
                         centered,
                         color: target.color(),
@@ -958,8 +952,8 @@ impl StudioView {
                         fmt,
                         fmt_x: &fmt_x,
                     };
-                    if crate::curve_edit::curve_ui(ui, Id::new(("tcurve", k, side == Side::In, 9)), &c, &mut pts) {
-                        set_lane(&mut self.mix.transitions[k], side, param, pts);
+                    if crate::curve_edit::curve_ui(ui, Id::new(("tcurve", k, side == Side::In, 9)), &c, &mut lane) {
+                        set_lane(&mut self.mix.transitions[k], lane);
                         changed = true;
                     }
                 }
@@ -1044,13 +1038,14 @@ impl StudioView {
         // the curves keep their place in the music: shift them, then fit the new length
         let t = &mut self.mix.transitions[k];
         for l in &mut t.lanes {
+            // the value at the new start, taken before the points left of it go
+            let v = l.value_at(beats as f32);
             for p in &mut l.points {
                 p.0 -= beats as f32;
             }
-            l.points.retain(|p| p.0 >= -1e-3);
+            l.retain_points(|p| p.0 >= -1e-3);
             if l.points.first().is_none_or(|p| p.0 > 1e-3) {
-                let v = l.value_at(0.0);
-                l.points.insert(0, (0.0, v));
+                l.insert_point(0, (0.0, v));
             }
         }
         t.beats = nb as u32;
@@ -1849,11 +1844,16 @@ impl StudioView {
     }
 }
 
-/// Replace (or add) the lane of `param` on `side`.
-fn set_lane(t: &mut Transition, side: Side, param: Param, points: Vec<(f32, f32)>) {
-    match t.lanes.iter_mut().find(|l| l.side == side && l.param == param) {
-        Some(l) => l.points = points,
-        None => t.lanes.push(clubcraft_core::Lane { side, param, points }),
+/// The lane of `param` on `side` (empty when the transition has none).
+pub(crate) fn lane_of(t: &Transition, side: Side, param: Param) -> Lane {
+    t.lanes.iter().find(|l| l.side == side && l.param == param).cloned().unwrap_or_else(|| Lane::new(side, param, &[]))
+}
+
+/// Replace (or add) the lane of its parameter and side.
+pub(crate) fn set_lane(t: &mut Transition, lane: Lane) {
+    match t.lanes.iter_mut().find(|l| l.side == lane.side && l.param == lane.param) {
+        Some(l) => *l = lane,
+        None => t.lanes.push(lane),
     }
 }
 

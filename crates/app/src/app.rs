@@ -1019,7 +1019,7 @@ impl App {
                 }
             }
             "tcat" => {
-                // `tcat <stems|equalizer|effects|curves>`: transition editor category (tests)
+                // `tcat <stems|equalizer|effects|rhythm>`: transition editor category (tests)
                 use crate::studio_transition::TCategory;
                 if let Some(c) = TCategory::ALL.into_iter().find(|c| format!("{c:?}").eq_ignore_ascii_case(arg.trim())) {
                     self.studio.tcat = c;

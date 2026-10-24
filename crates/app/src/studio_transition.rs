@@ -1,49 +1,15 @@
-//! Transition editor: a header with the two tracks and the style, and below it an editor with
-//! one clearly separated band per parameter for the outgoing and the incoming track, aligned on
-//! a bar ruler.
+//! Transition editor: a header with the two tracks and the style, and below it presets and a
+//! choice per stem / band / effect. The curves themselves are drawn in the timeline.
 
 use crate::app::Shared;
 use crate::studio::StudioView;
-use crate::studio_timeline::{EQ_COLORS, FILTER_COLOR, VOLUME_COLOR};
+use crate::studio_timeline::{EQ_COLORS, FILTER_COLOR};
 use crate::theme;
-use crate::waveform::{self, WaveParams, WaveStyle};
-use clubcraft_core::{Mode, Param, Side, StemKind, TrackId, Transition, TransitionStyle};
-use eframe::egui::{self, pos2, vec2, Color32, Id, Rect, RichText, Sense, Stroke, StrokeKind, Ui};
+use clubcraft_core::{Mode, Param, StemKind, TrackId, Transition, TransitionStyle};
+use eframe::egui::{self, vec2, Color32, RichText, Sense, Stroke, Ui};
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum ParamGroup {
-    #[default]
-    Stems,
-    Volume,
-    Eq,
-    FilterFx,
-    Rhythm,
-}
-
-impl ParamGroup {
-    const ALL: [ParamGroup; 5] = [ParamGroup::Stems, ParamGroup::Volume, ParamGroup::Eq, ParamGroup::FilterFx, ParamGroup::Rhythm];
-    fn label(self) -> &'static str {
-        match self {
-            ParamGroup::Stems => "Stems",
-            ParamGroup::Volume => "Volume",
-            ParamGroup::Eq => "EQ",
-            ParamGroup::FilterFx => "Filter & FX",
-            ParamGroup::Rhythm => "Rhythm FX",
-        }
-    }
-    fn params(self) -> Vec<(Param, &'static str, Color32)> {
-        match self {
-            ParamGroup::Stems => [StemKind::Vocals, StemKind::Other, StemKind::Bass, StemKind::Drums].iter().map(|k| (Param::Stem(*k), k.label(), theme::stem_color(*k))).collect(),
-            ParamGroup::Volume => vec![(Param::Volume, "Volume", VOLUME_COLOR)],
-            ParamGroup::Eq => vec![(Param::EqHigh, "High", EQ_COLORS[2]), (Param::EqMid, "Mid", EQ_COLORS[1]), (Param::EqLow, "Low", EQ_COLORS[0])],
-            ParamGroup::FilterFx => TCategory::Effects.columns(),
-            ParamGroup::Rhythm => TCategory::Rhythm.columns(),
-        }
-    }
-}
-
-/// Categories of the transition editor (DJ.Studio-like): simple choices per stem / band, or the
-/// curve editor.
+/// Categories of the transition editor (DJ.Studio-like): simple choices per stem / band; the
+/// curves themselves are drawn in the timeline.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum TCategory {
     #[default]
@@ -53,18 +19,16 @@ pub enum TCategory {
     Effects,
     /// Effects that work on the beat: loop, brake, side-chain pump.
     Rhythm,
-    Curves,
 }
 
 impl TCategory {
-    pub const ALL: [TCategory; 5] = [TCategory::Stems, TCategory::Equalizer, TCategory::Effects, TCategory::Rhythm, TCategory::Curves];
+    pub const ALL: [TCategory; 4] = [TCategory::Stems, TCategory::Equalizer, TCategory::Effects, TCategory::Rhythm];
     fn label(self) -> &'static str {
         match self {
             TCategory::Stems => "Stems",
             TCategory::Equalizer => "Equalizer",
             TCategory::Effects => "Effects",
             TCategory::Rhythm => "Rhythm FX",
-            TCategory::Curves => "Curves (draw)",
         }
     }
     fn params(self) -> Vec<Param> {
@@ -76,7 +40,6 @@ impl TCategory {
             TCategory::Equalizer => vec![(Param::Volume, "Volume", Color32::from_gray(220)), (Param::EqLow, "Low", EQ_COLORS[0]), (Param::EqMid, "Mid", EQ_COLORS[1]), (Param::EqHigh, "High", EQ_COLORS[2])],
             TCategory::Effects => vec![(Param::Filter, "Filter", FILTER_COLOR), (Param::Echo, "Echo", theme::FX_ECHO), (Param::Reverb, "Reverb", theme::FX_REVERB), (Param::Noise, "Noise", theme::FX_NOISE)],
             TCategory::Rhythm => vec![(Param::Loop, "Loop", theme::FX_LOOP), (Param::Brake, "Vinyl brake", theme::FX_BRAKE), (Param::Pump, "Side-chain", theme::FX_PUMP)],
-            TCategory::Curves => vec![],
         }
     }
 }
@@ -196,10 +159,6 @@ fn style_help(s: TransitionStyle) -> &'static str {
         TransitionStyle::Custom => "Your own curves.",
     }
 }
-
-const LABEL_W: f32 = 118.0;
-const BAND_H: f32 = 21.0;
-const WAVE_H: f32 = 22.0;
 
 impl StudioView {
     /// Level of the incoming track for 8 bars after transition `k` minus the outgoing track's level
@@ -370,7 +329,7 @@ impl StudioView {
                     let tr = &self.mix.transitions[k];
                     for c in TCategory::ALL {
                         let n = c.params().iter().filter(|p| tr.lanes.iter().any(|l| l.param == **p && l.points.iter().any(|q| (q.1 - p.neutral()).abs() > 1e-3))).count();
-                        let label = if n > 0 && c != TCategory::Curves { format!("{}   {n}", c.label()) } else { c.label().to_string() };
+                        let label = if n > 0 { format!("{}   {n}", c.label()) } else { c.label().to_string() };
                         if ui.add_sized([150.0, 26.0], egui::Button::selectable(self.tcat == c, label)).clicked() {
                             self.tcat = c;
                         }
@@ -378,39 +337,25 @@ impl StudioView {
                 });
                 ui.vertical(|ui| {
                     let cat = self.tcat;
-                    if cat == TCategory::Curves {
-                        ui.horizontal(|ui| {
-                            for g in ParamGroup::ALL {
-                                if ui.add(egui::Button::new(RichText::new(g.label()).size(12.5)).selected(self.tgroup == g).min_size(vec2(96.0, 22.0))).clicked() {
-                                    self.tgroup = g;
+                    ui.horizontal_top(|ui| {
+                        for (param, name, col) in cat.columns() {
+                            let tr = &mut self.mix.transitions[k];
+                            let cur = tr.mode(param);
+                            mode_column(ui, name, col, h, |ui| {
+                                for &m in Mode::for_param(param) {
+                                    if mode_button(ui, cur == Some(m), mode_label(param, m), col).on_hover_text(mode_help(param, m)).clicked() && cur != Some(m) {
+                                        tr.set_mode(param, m);
+                                        changed = true;
+                                    }
                                 }
-                            }
-                            ui.label(RichText::new("drag in a band to draw · right-click removes a point").size(11.0).color(theme::TEXT_DIM));
-                        });
-                        egui::ScrollArea::vertical().id_salt(("tedit-scroll", k)).show(ui, |ui| {
-                            changed |= self.aligned_editor(ui, sh, k);
-                        });
-                    } else {
-                        ui.horizontal_top(|ui| {
-                            for (param, name, col) in cat.columns() {
-                                let tr = &mut self.mix.transitions[k];
-                                let cur = tr.mode(param);
-                                mode_column(ui, name, col, h, |ui| {
-                                    for &m in Mode::for_param(param) {
-                                        if mode_button(ui, cur == Some(m), mode_label(param, m), col).on_hover_text(mode_help(param, m)).clicked() && cur != Some(m) {
-                                            tr.set_mode(param, m);
-                                            changed = true;
-                                        }
-                                    }
-                                    // a curve none of the modes describe (a preset's own or a
-                                    // hand-drawn one) is "Manual"; choosing it draws that curve
-                                    if mode_button(ui, cur.is_none(), "Manual", col).on_hover_text("Draw this curve yourself in the timeline").clicked() {
-                                        manual = Some(param);
-                                    }
-                                });
-                            }
-                        });
-                    }
+                                // a curve none of the modes describe (a preset's own or a
+                                // hand-drawn one) is "Manual"; choosing it draws that curve
+                                if mode_button(ui, cur.is_none(), "Manual", col).on_hover_text("Draw this curve yourself in the timeline").clicked() {
+                                    manual = Some(param);
+                                }
+                            });
+                        }
+                    });
                 });
             });
         });
@@ -421,130 +366,6 @@ impl StudioView {
         if changed {
             self.changed();
         }
-    }
-
-    /// Ruler + OUT block + IN block. Returns true if edited.
-    fn aligned_editor(&mut self, ui: &mut Ui, sh: &Shared, k: usize) -> bool {
-        let Some(x) = self.timeline.transitions.get(k).cloned() else { return false };
-        let beats = self.mix.transitions[k].beats as f32;
-        let params = self.tgroup.params();
-        let block_h = WAVE_H + 4.0 + params.len() as f32 * (BAND_H + 3.0);
-        let width = ui.available_width();
-        let ruler_h = 18.0;
-        let total_h = ruler_h + 6.0 + 2.0 * block_h + 12.0;
-        let (rect, _) = ui.allocate_exact_size(vec2(width, total_h), Sense::hover());
-        let plot_l = rect.left() + LABEL_W;
-        let plot_w = rect.width() - LABEL_W - 6.0;
-        let x_of_beat = |b: f32| plot_l + b / beats * plot_w;
-        let p = ui.painter_at(rect);
-
-        // ruler
-        let ruler = Rect::from_min_size(pos2(plot_l, rect.top()), vec2(plot_w, ruler_h));
-        p.rect_filled(ruler, 3.0, theme::PANEL_HI);
-        for b in 0..=(beats as i32) {
-            let xx = x_of_beat(b as f32);
-            if b % 4 == 0 {
-                p.line_segment([pos2(xx, ruler.bottom()), pos2(xx, rect.bottom())], Stroke::new(1.0, Color32::from_white_alpha(22)));
-                if b < beats as i32 {
-                    p.text(pos2(xx + 4.0, ruler.center().y), egui::Align2::LEFT_CENTER, format!("bar {}", b / 4 + 1), egui::FontId::proportional(10.5), Color32::from_rgb(220, 210, 120));
-                }
-            } else if plot_w / beats > 12.0 {
-                p.line_segment([pos2(xx, ruler.bottom() - 4.0), pos2(xx, ruler.bottom())], Stroke::new(1.0, theme::LINE));
-            }
-        }
-        let mut edited = false;
-        let mut y = ruler.bottom() + 6.0;
-        for (side, ti) in [(Side::Out, k), (Side::In, k + 1)] {
-            let accent = theme::deck_color(ti % 2);
-            let block = Rect::from_min_size(pos2(rect.left(), y), vec2(rect.width(), block_h));
-            p.rect_filled(block, 6.0, Color32::from_rgb(22, 24, 29));
-            p.rect_filled(Rect::from_min_size(block.min, vec2(4.0, block.height())), 2.0, accent);
-            // label + waveform strip
-            let tid = self.timeline.tracks[ti].track_id;
-            let name = sh.track(tid).map(|t| t.title.clone()).unwrap_or_default();
-            p.text(pos2(block.left() + 10.0, y + WAVE_H / 2.0), egui::Align2::LEFT_CENTER, if side == Side::Out { "OUT" } else { "IN" }, egui::FontId::proportional(12.0), accent);
-            p.text(pos2(block.left() + 42.0, y + WAVE_H / 2.0), egui::Align2::LEFT_CENTER, crate::studio::truncate(&name, 11), egui::FontId::proportional(11.0), theme::TEXT_DIM);
-            let wave = Rect::from_min_size(pos2(plot_l, y + 2.0), vec2(plot_w, WAVE_H - 4.0));
-            if let (Some(wf), Some(a)) = (sh.waveforms.get(&tid), sh.analyses.get(&tid)) {
-                let t0 = self.timeline.track_pos(ti, x.start_beat);
-                let t1 = self.timeline.track_pos(ti, x.start_beat + x.beats);
-                let wp = WaveParams { wf, grid: a.grid, cues: &[], sections: &[], style: WaveStyle::Stems, stem_gains: [0.8; 4], loop_region: None, accent, volume: 1.0 };
-                waveform::paint_wave(&p, wave, &wp, t0, t1, true);
-            }
-            let mut by = y + WAVE_H + 4.0;
-            for (j, (param, label, col)) in params.iter().enumerate() {
-                let band = Rect::from_min_size(pos2(plot_l, by), vec2(plot_w, BAND_H));
-                let centered = matches!(param, Param::EqLow | Param::EqMid | Param::EqHigh | Param::Filter);
-                p.rect_filled(band, 3.0, theme::BG);
-                p.text(pos2(plot_l - 10.0, band.center().y), egui::Align2::RIGHT_CENTER, *label, egui::FontId::proportional(11.5), *col);
-                let inner = band.shrink2(vec2(0.0, 3.0));
-                let to_y = |v: f32| inner.bottom() - v.clamp(0.0, 1.0) * inner.height();
-                let base_y = if centered { to_y(0.5) } else { inner.bottom() };
-                if centered {
-                    p.line_segment([pos2(inner.left(), base_y), pos2(inner.right(), base_y)], Stroke::new(1.0, Color32::from_white_alpha(35)));
-                }
-                let tr = &self.mix.transitions[k];
-                let steps = (plot_w / 4.0).max(24.0) as usize;
-                let pts: Vec<egui::Pos2> = (0..=steps)
-                    .map(|s| {
-                        let f = s as f32 / steps as f32;
-                        pos2(inner.left() + f * inner.width(), to_y(tr.value(side, *param, f * beats)))
-                    })
-                    .collect();
-                for w in pts.windows(2) {
-                    p.add(egui::Shape::convex_polygon(vec![w[0], w[1], pos2(w[1].x, base_y), pos2(w[0].x, base_y)], col.linear_multiply(0.28), Stroke::NONE));
-                }
-                p.add(egui::Shape::line(pts, Stroke::new(1.8, *col)));
-                let resp = ui.interact(band, Id::new(("tband", k, side == Side::In, j)), Sense::click_and_drag());
-                if resp.hovered() || resp.dragged() {
-                    p.rect_stroke(band, 3.0, Stroke::new(1.0, col.linear_multiply(0.6)), StrokeKind::Inside);
-                    if let Some(lane) = tr.lanes.iter().find(|l| l.side == side && l.param == *param) {
-                        for (bx, v) in &lane.points {
-                            p.circle_filled(pos2(x_of_beat(*bx), to_y(*v)), 3.5, *col);
-                        }
-                    }
-                    if let Some(pp) = resp.hover_pos() {
-                        let b = ((pp.x - inner.left()) / inner.width() * beats).clamp(0.0, beats);
-                        let v = tr.value(side, *param, b);
-                        let txt = if centered { format!("{:+.0}", (v - 0.5) * 200.0) } else { format!("{:.0}%", v * 100.0) };
-                        p.text(pos2(band.right() - 4.0, band.top() + 2.0), egui::Align2::RIGHT_TOP, format!("bar {:.2} · {txt}", b / 4.0 + 1.0), egui::FontId::proportional(10.0), Color32::WHITE);
-                    }
-                }
-                if resp.dragged() || resp.clicked() {
-                    if let Some(pp) = resp.interact_pointer_pos() {
-                        let b = (((pp.x - inner.left()) / inner.width() * beats).clamp(0.0, beats) * 2.0).round() / 2.0;
-                        let v = (1.0 - (pp.y - inner.top()) / inner.height()).clamp(0.0, 1.0);
-                        let v = if centered && (v - 0.5).abs() < 0.04 { 0.5 } else { v };
-                        crate::studio::set_point(&mut self.mix.transitions[k], side, *param, b, v);
-                        self.mix.transitions[k].style = TransitionStyle::Custom;
-                        edited = true;
-                    }
-                }
-                if resp.secondary_clicked() {
-                    if let Some(pp) = resp.interact_pointer_pos() {
-                        let b = ((pp.x - inner.left()) / inner.width() * beats).clamp(0.0, beats);
-                        if let Some(lane) = self.mix.transitions[k].lanes.iter_mut().find(|l| l.side == side && l.param == *param) {
-                            if let Some((idx, _)) = lane.points.iter().enumerate().min_by(|a, c| (a.1 .0 - b).abs().total_cmp(&(c.1 .0 - b).abs())) {
-                                if lane.points.len() > 1 {
-                                    lane.points.remove(idx);
-                                    self.mix.transitions[k].style = TransitionStyle::Custom;
-                                    edited = true;
-                                }
-                            }
-                        }
-                    }
-                }
-                by += BAND_H + 3.0;
-            }
-            y += block_h + 6.0;
-        }
-        // playhead within the window
-        if self.position >= x.start_sec && self.position <= x.end_sec {
-            let b = (self.timeline.beat_at_sec(self.position) - x.start_beat) as f32;
-            let xx = x_of_beat(b);
-            p.line_segment([pos2(xx, rect.top()), pos2(xx, rect.bottom())], Stroke::new(1.5, Color32::WHITE));
-        }
-        edited
     }
 }
 

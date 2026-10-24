@@ -72,27 +72,166 @@ impl Param {
 }
 
 /// Automation curve over a transition. `x` is the position in beats from the transition start
-/// (0..=length_beats), `y` the parameter value. Linear interpolation between points.
+/// (0..=length_beats), `y` the parameter value. Straight or bent lines between points.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Lane {
     pub side: Side,
     pub param: Param,
     pub points: Vec<(f32, f32)>,
+    /// Shape of the segment that starts at each point, -1..=1: 0 straight, above 0 bowed up,
+    /// below 0 bowed down. Missing entries are straight, so lanes without bends (and mixes saved
+    /// before bends existed) are plain lines.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bends: Vec<f32>,
 }
+
+/// Steepness of a fully bent segment (see [`bend_shape`]).
+const BEND_K: f32 = 5.0;
 
 impl Lane {
     pub fn new(side: Side, param: Param, points: &[(f32, f32)]) -> Self {
-        Lane { side, param, points: points.to_vec() }
+        Lane { side, param, points: points.to_vec(), bends: Vec::new() }
     }
 
     pub fn value_at(&self, x: f32) -> f32 {
-        interpolate(&self.points, x, self.param.neutral())
+        interpolate_bent(&self.points, &self.bends, x, self.param.neutral())
     }
+
+    /// Bend of the segment from point `i` to `i + 1`.
+    pub fn bend(&self, i: usize) -> f32 {
+        self.bends.get(i).copied().unwrap_or(0.0)
+    }
+
+    pub fn set_bend(&mut self, i: usize, b: f32) {
+        if self.bends.len() <= i {
+            if b == 0.0 {
+                return;
+            }
+            self.bends.resize(i + 1, 0.0);
+        }
+        self.bends[i] = b.clamp(-1.0, 1.0);
+    }
+
+    /// Insert point `pt` at index `k`; both halves of a split segment keep its bend.
+    pub fn insert_point(&mut self, k: usize, pt: (f32, f32)) {
+        let k = k.min(self.points.len());
+        self.points.insert(k, pt);
+        if !self.bends.is_empty() {
+            let b = if k > 0 { self.bend(k - 1) } else { 0.0 };
+            self.bends.resize(self.bends.len().max(k), 0.0);
+            self.bends.insert(k, b);
+        }
+    }
+
+    /// Remove point `k`; the joined segment keeps the bend of the one on its left.
+    pub fn remove_point(&mut self, k: usize) {
+        if k < self.points.len() {
+            self.points.remove(k);
+            if k < self.bends.len() {
+                self.bends.remove(k);
+            }
+        }
+    }
+
+    /// Keep the points `f` accepts (with their bends).
+    pub fn retain_points(&mut self, mut f: impl FnMut(&(f32, f32)) -> bool) {
+        let bends = std::mem::take(&mut self.bends);
+        let mut kept = Vec::new();
+        let mut i = 0;
+        self.points.retain(|p| {
+            let keep = f(p);
+            if let Some(b) = bends.get(i).filter(|_| keep) {
+                kept.push(*b);
+            }
+            i += 1;
+            keep
+        });
+        self.bends = kept;
+    }
+
+    /// Set the curve to `v` from `x0` to `x1`, with hard switches at both ends (a stroke of the
+    /// pencil). The curve outside keeps its values and shape.
+    pub fn paint(&mut self, x0: f32, x1: f32, v: f32) {
+        const EPS: f32 = 1e-4;
+        let (x0, x1) = (x0.min(x1), x0.max(x1));
+        // the value just left of x0 and just right of x1 (a step there counts on its own side)
+        let left = self.points.iter().find(|p| (p.0 - x0).abs() < EPS).map_or_else(|| self.value_at(x0), |p| p.1);
+        let right = self.points.iter().rev().find(|p| (p.0 - x1).abs() < EPS).map_or_else(|| self.value_at(x1), |p| p.1);
+        let (has_left, has_right) = (self.points.iter().any(|p| p.0 < x0 - EPS), self.points.iter().any(|p| p.0 > x1 + EPS));
+        let mut out: Vec<(f32, f32, f32)> = Vec::with_capacity(self.points.len() + 4);
+        for (i, p) in self.points.iter().enumerate().filter(|(_, p)| p.0 < x0 - EPS) {
+            out.push((p.0, p.1, self.bend(i)));
+        }
+        if has_left {
+            out.push((x0, left, 0.0));
+        }
+        out.extend([(x0, v, 0.0), (x1, v, 0.0)]);
+        if has_right {
+            out.push((x1, right, 0.0));
+        }
+        for (i, p) in self.points.iter().enumerate().filter(|(_, p)| p.0 > x1 + EPS) {
+            out.push((p.0, p.1, self.bend(i)));
+        }
+        self.points = out.iter().map(|p| (p.0, p.1)).collect();
+        self.bends = out.iter().map(|p| p.2).collect();
+        self.tidy();
+    }
+
+    /// Drop points that change nothing: repeats, the middle of three points at one time, and the
+    /// middle of a flat run.
+    pub fn tidy(&mut self) {
+        const EPS: f32 = 1e-4;
+        let mut i = 1;
+        while i + 1 < self.points.len() {
+            let (a, b, c) = (self.points[i - 1], self.points[i], self.points[i + 1]);
+            let same_time = (a.0 - b.0).abs() < EPS && (b.0 - c.0).abs() < EPS;
+            let flat = (a.1 - b.1).abs() < EPS && (b.1 - c.1).abs() < EPS && self.bend(i - 1) == 0.0 && self.bend(i) == 0.0;
+            let repeat = (a.0 - b.0).abs() < EPS && (a.1 - b.1).abs() < EPS;
+            if same_time || flat || repeat {
+                self.remove_point(i);
+            } else {
+                i += 1;
+            }
+        }
+        if self.points.len() == 2 && (self.points[0].0 - self.points[1].0).abs() < EPS && (self.points[0].1 - self.points[1].1).abs() < EPS {
+            self.remove_point(1);
+        }
+        while self.bends.last() == Some(&0.0) {
+            self.bends.pop();
+        }
+    }
+}
+
+/// Where a segment bent by `bend` is at `t` (0..1 of its length), as 0..1 of its rise.
+/// `rising`: the segment goes up. Bowing up means fast first on a rise, slow first on a fall.
+pub fn bend_shape(t: f32, bend: f32, rising: bool) -> f32 {
+    let k = if rising { -bend } else { bend } * BEND_K;
+    if k.abs() < 1e-3 {
+        return t;
+    }
+    ((k * t).exp() - 1.0) / (k.exp() - 1.0)
+}
+
+/// The bend that makes a segment from `a` to `b` pass through `v` at its middle.
+pub fn bend_through(a: f32, b: f32, v: f32) -> f32 {
+    if (b - a).abs() < 1e-4 {
+        return 0.0;
+    }
+    // at the middle, bend_shape = 1 / (e^(k/2) + 1)
+    let r = ((v - a) / (b - a)).clamp(0.005, 0.995);
+    let k = 2.0 * (1.0 / r - 1.0).ln();
+    let bend = k / BEND_K;
+    (if b > a { -bend } else { bend }).clamp(-1.0, 1.0)
 }
 
 /// Piecewise-linear value of `p` at `x` (`neutral` without points; held before the first and after
 /// the last point; two points at the same `x` make a step).
 fn interpolate(p: &[(f32, f32)], x: f32, neutral: f32) -> f32 {
+    interpolate_bent(p, &[], x, neutral)
+}
+
+/// [`interpolate`] with the segments shaped by `bends` (see [`Lane::bends`]).
+fn interpolate_bent(p: &[(f32, f32)], bends: &[f32], x: f32, neutral: f32) -> f32 {
     match p.len() {
         0 => neutral,
         1 => p[0].1,
@@ -100,10 +239,12 @@ fn interpolate(p: &[(f32, f32)], x: f32, neutral: f32) -> f32 {
             if x <= p[0].0 {
                 return p[0].1;
             }
-            for w in p.windows(2) {
+            for (i, w) in p.windows(2).enumerate() {
                 let (a, b) = (w[0], w[1]);
                 if x <= b.0 {
                     let t = if b.0 > a.0 { (x - a.0) / (b.0 - a.0) } else { 1.0 };
+                    let bend = bends.get(i).copied().unwrap_or(0.0);
+                    let t = if bend == 0.0 { t } else { bend_shape(t, bend, b.1 > a.1) };
                     return a.1 + (b.1 - a.1) * t;
                 }
             }
@@ -349,7 +490,7 @@ impl Transition {
                 let pts = simplify(&pts, 2e-3);
                 lanes.retain(|l| !(l.side == side && l.param == p));
                 if pts.iter().any(|q| (q.1 - p.neutral()).abs() > 1e-3) {
-                    lanes.push(Lane { side, param: p, points: pts });
+                    lanes.push(Lane::new(side, p, &pts));
                 }
             }
         }
@@ -627,6 +768,62 @@ mod tests {
         assert!((l.value_at(5.0) - 0.5).abs() < 1e-6);
     }
 
+    #[test]
+    fn bent_segments_pass_through_their_handle_and_keep_their_ends() {
+        for (a, b) in [(0.0, 1.0), (1.0, 0.0), (0.2, 0.7)] {
+            for v in [0.15, 0.5, 0.8] {
+                let v = a + (b - a) * v;
+                let mut l = Lane::new(Side::Out, Param::Volume, &[(0.0, a), (8.0, b)]);
+                l.set_bend(0, bend_through(a, b, v));
+                assert!((l.value_at(4.0) - v).abs() < 1e-3, "{a}->{b} through {v}: {}", l.value_at(4.0));
+                assert!((l.value_at(0.0) - a).abs() < 1e-6 && (l.value_at(8.0) - b).abs() < 1e-6);
+            }
+        }
+        // bowed up is above the straight line, rising or falling
+        let mut up = Lane::new(Side::Out, Param::Volume, &[(0.0, 0.0), (8.0, 1.0), (16.0, 0.0)]);
+        up.set_bend(0, 0.5);
+        up.set_bend(1, 0.5);
+        assert!(up.value_at(4.0) > 0.5 && up.value_at(12.0) > 0.5);
+        // mixes saved before bends load as straight lines
+        let old: Lane = serde_json::from_str(r#"{"side":"Out","param":"Volume","points":[[0.0,1.0],[4.0,0.0]]}"#).unwrap();
+        assert!(old.bends.is_empty() && (old.value_at(2.0) - 0.5).abs() < 1e-6);
+        assert!(!serde_json::to_string(&old).unwrap().contains("bends"));
+    }
+
+    #[test]
+    fn points_keep_their_bends_through_edits() {
+        let mut l = Lane::new(Side::Out, Param::Volume, &[(0.0, 0.0), (4.0, 1.0), (8.0, 0.0)]);
+        l.set_bend(1, -0.5);
+        l.insert_point(2, (6.0, 0.4));
+        assert_eq!(l.bends, vec![0.0, -0.5, -0.5]);
+        l.remove_point(0);
+        assert_eq!((l.points.len(), l.bends.clone()), (3, vec![-0.5, -0.5]));
+        l.retain_points(|p| p.0 != 6.0);
+        assert_eq!((l.points, l.bends), (vec![(4.0, 1.0), (8.0, 0.0)], vec![-0.5]));
+    }
+
+    #[test]
+    fn painting_makes_hard_switches_and_merges_runs() {
+        let mut l = Lane::new(Side::Out, Param::Stem(StemKind::Vocals), &[(0.0, 1.0), (16.0, 1.0)]);
+        // off over bars 2 and 3, one beat cell at a time
+        for b in 4..12 {
+            l.paint(b as f32, b as f32 + 1.0, 0.0);
+        }
+        assert_eq!(l.points, vec![(0.0, 1.0), (4.0, 1.0), (4.0, 0.0), (12.0, 0.0), (12.0, 1.0), (16.0, 1.0)]);
+        // painting at the start needs no switch before it
+        l.paint(0.0, 2.0, 0.5);
+        assert_eq!(&l.points[..3], &[(0.0, 0.5), (2.0, 0.5), (2.0, 1.0)]);
+        // painting over a switch at its own value removes it
+        l.paint(2.0, 12.0, 1.0);
+        assert_eq!(l.points, vec![(0.0, 0.5), (2.0, 0.5), (2.0, 1.0), (16.0, 1.0)]);
+        // a ramp next to the stroke keeps its shape
+        let mut r = Lane::new(Side::Out, Param::Volume, &[(0.0, 0.0), (8.0, 1.0), (16.0, 1.0)]);
+        r.set_bend(0, 0.4);
+        let before = r.value_at(3.0);
+        r.paint(12.0, 13.0, 0.0);
+        assert!((r.value_at(3.0) - before).abs() < 1e-6);
+        assert_eq!(r.value_at(12.5), 0.0);
+    }
 }
 
 #[cfg(test)]
