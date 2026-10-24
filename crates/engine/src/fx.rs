@@ -283,31 +283,60 @@ impl Reverb {
         if input.0 == 0.0 && input.1 == 0.0 && self.is_silent() {
             return;
         }
-        let fb = 0.7 + size.clamp(0.0, 1.0) * 0.28;
-        let damp = damp.clamp(0.0, 1.0) * 0.4;
+        let (fb, damp) = Self::coefs(size, damp);
         let n = buf.len() / 2;
         let inv = if n > 1 { 1.0 / (n - 1) as f32 } else { 0.0 };
         let mut e = 0f32;
         for (i, f) in buf.as_chunks_mut::<2>().0.iter_mut().enumerate() {
             let g = input.0 + (input.1 - input.0) * i as f32 * inv;
-            let x = (f[0] + f[1]) * 0.015 * g;
-            let mut y = [0f32; 2];
-            for c in 0..2 {
-                let mut acc = 0f32;
-                for comb in self.combs[c].iter_mut() {
-                    acc += comb.process(x, fb, damp);
-                }
-                for ap in self.aps[c].iter_mut() {
-                    acc = ap.process(acc);
-                }
-                y[c] = acc;
-            }
-            // width 1: wet1 = wet*(1+w)/2, wet2 = wet*(1-w)/2 → plain stereo
-            f[0] += y[0] * wet * 3.0;
-            f[1] += y[1] * wet * 3.0;
-            e += y[0].abs() + y[1].abs() + x.abs();
+            let (y, ei) = self.frame(*f, g, fb, damp);
+            f[0] += y[0] * wet;
+            f[1] += y[1] * wet;
+            e += ei;
         }
         self.energy = self.energy * 0.5 + e;
+    }
+
+    /// Adds the reverb of `input` (send ramp `send`) to `out`; both `n` frames interleaved.
+    pub fn process_send(&mut self, input: &[f32], out: &mut [f32], size: f32, damp: f32, send: (f32, f32)) {
+        if send.0 == 0.0 && send.1 == 0.0 && self.is_silent() {
+            return;
+        }
+        let (fb, damp) = Self::coefs(size, damp);
+        let n = out.len().min(input.len()) / 2;
+        let inv = if n > 1 { 1.0 / (n - 1) as f32 } else { 0.0 };
+        let mut e = 0f32;
+        for (i, (f, x)) in out.as_chunks_mut::<2>().0.iter_mut().zip(input.as_chunks::<2>().0).enumerate() {
+            let g = send.0 + (send.1 - send.0) * i as f32 * inv;
+            let (y, ei) = self.frame(*x, g, fb, damp);
+            f[0] += y[0];
+            f[1] += y[1];
+            e += ei;
+        }
+        self.energy = self.energy * 0.5 + e;
+    }
+
+    fn coefs(size: f32, damp: f32) -> (f32, f32) {
+        (0.7 + size.clamp(0.0, 1.0) * 0.28, damp.clamp(0.0, 1.0) * 0.4)
+    }
+
+    /// One frame of wet signal for input `f` at send gain `g`, and its energy.
+    #[inline]
+    fn frame(&mut self, f: [f32; 2], g: f32, fb: f32, damp: f32) -> ([f32; 2], f32) {
+        let x = (f[0] + f[1]) * 0.015 * g;
+        let mut y = [0f32; 2];
+        for c in 0..2 {
+            let mut acc = 0f32;
+            for comb in self.combs[c].iter_mut() {
+                acc += comb.process(x, fb, damp);
+            }
+            for ap in self.aps[c].iter_mut() {
+                acc = ap.process(acc);
+            }
+            // width 1: wet1 = wet*(1+w)/2, wet2 = wet*(1-w)/2 → plain stereo
+            y[c] = acc * 3.0;
+        }
+        (y, y[0].abs() + y[1].abs() + x.abs())
     }
 }
 
@@ -555,6 +584,298 @@ impl FxSlot {
     }
 }
 
+/// Effects the studio's transition lanes drive on a mixer channel: beat loop and vinyl brake on
+/// the track's audio, side-chain pump, and a reverb send and noise sweep added after the fader.
+/// The lane values are set per block; the buffers are allocated up front.
+pub struct LaneFx {
+    /// Reverb send 0..1 (taken before the fader).
+    pub reverb: f32,
+    /// Noise sweep 0..1.
+    pub noise: f32,
+    /// Loop length in beats, `None` = off.
+    pub loop_beats: Option<f32>,
+    /// Brake 0..1 (1 = stopped).
+    pub brake: f32,
+    /// Side-chain pump depth 0..1.
+    pub pump: f32,
+    reverb_fx: Reverb,
+    reverb_amt: Smoother,
+    noise_amt: Smoother,
+    noise_svf: Svf,
+    rng: u32,
+    counter: usize,
+    lp: LoopBuf,
+    tape: Vec<[f32; 2]>,
+    tape_w: usize,
+    /// How far the brake's read position lags the live audio (frames).
+    lag: f64,
+    brake_amt: Smoother,
+    /// Fade back in after a brake is let go.
+    resume: f32,
+    pump_env: f32,
+}
+
+/// Beat loop: records `len` frames from a grid boundary, then repeats them.
+struct LoopBuf {
+    buf: Vec<[f32; 2]>,
+    len: usize,
+    /// Frames recorded so far (the loop's capacity once looping).
+    rec: usize,
+    play: usize,
+    state: LoopState,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LoopState {
+    Idle,
+    Armed,
+    Recording,
+    Looping,
+}
+
+/// Longest loop / brake lag (s).
+const LANE_FX_SECS: f32 = 4.0;
+
+impl LaneFx {
+    pub fn new(sr: f32) -> Self {
+        let cap = (sr * LANE_FX_SECS) as usize + 4;
+        LaneFx {
+            reverb: 0.0,
+            noise: 0.0,
+            loop_beats: None,
+            brake: 0.0,
+            pump: 0.0,
+            reverb_fx: Reverb::new(sr),
+            reverb_amt: Smoother::new(0.0, 0.02, sr),
+            noise_amt: Smoother::new(0.0, 0.01, sr),
+            noise_svf: Svf::default(),
+            rng: 0x9E37_79B9,
+            counter: 0,
+            lp: LoopBuf { buf: vec![[0.0; 2]; cap], len: 1, rec: 0, play: 0, state: LoopState::Idle },
+            tape: vec![[0.0; 2]; cap],
+            tape_w: 0,
+            lag: 0.0,
+            brake_amt: Smoother::new(0.0, 0.01, sr),
+            resume: 1.0,
+            pump_env: 1.0,
+        }
+    }
+
+    /// All lane values back to neutral (tails keep ringing).
+    pub fn reset(&mut self) {
+        self.reverb = 0.0;
+        self.noise = 0.0;
+        self.loop_beats = None;
+        self.brake = 0.0;
+        self.pump = 0.0;
+    }
+
+    /// Jump to the current values (a track starts or the mix seeks): no loop or brake carried
+    /// over from before.
+    pub fn snap(&mut self) {
+        self.reverb_amt.reset(self.reverb.clamp(0.0, 1.0));
+        self.noise_amt.reset(self.noise.clamp(0.0, 1.0));
+        self.brake_amt.reset(self.brake.clamp(0.0, 1.0));
+        self.lp.state = LoopState::Idle;
+        self.lag = 0.0;
+        self.resume = 1.0;
+    }
+
+    /// Loop, brake and pump on the track's audio (before the fader).
+    pub fn process_pre(&mut self, buf: &mut [f32], ctx: &FxCtx) {
+        self.looper(buf, ctx);
+        self.brake(buf, ctx);
+        self.pump(buf, ctx);
+    }
+
+    /// Reverb send of `pre` (the pre-fader signal) and the noise sweep, added to `post`.
+    pub fn process_post(&mut self, pre: &[f32], post: &mut [f32], ctx: &FxCtx) {
+        let n = post.len().min(pre.len()) / 2;
+        self.reverb_amt.set(self.reverb.clamp(0.0, 1.0));
+        let send = self.reverb_amt.advance(n);
+        self.reverb_fx.process_send(&pre[..n * 2], &mut post[..n * 2], 0.85, 0.35, send);
+        self.noise_amt.set(self.noise.clamp(0.0, 1.0));
+        let (v0, v1) = self.noise_amt.advance(n);
+        if v0 > 0.0 || v1 > 0.0 {
+            let inv = if n > 1 { 1.0 / (n - 1) as f32 } else { 0.0 };
+            let half = ctx.sr * 0.5;
+            const Q: f32 = 1.2;
+            let mut gain = 0.0;
+            for (i, f) in post[..n * 2].as_chunks_mut::<2>().0.iter_mut().enumerate() {
+                let v = v0 + (v1 - v0) * i as f32 * inv;
+                if self.counter == 0 {
+                    // band-pass from 300 Hz up to ~14 kHz; the level is set for a constant
+                    // loudness per band (white noise in a band carries √(bandwidth) of it)
+                    let fc = (300.0 * 2f32.powf(5.5 * v)).min(half * 0.9);
+                    self.noise_svf.set(fc, Q, ctx.sr);
+                    let share = (fc / Q / half).clamp(1e-3, 1.0);
+                    gain = 0.12 * v / (0.577 * share.sqrt());
+                    self.counter = 16;
+                }
+                self.counter -= 1;
+                for c in 0..2 {
+                    let w = self.white();
+                    let y = self.noise_svf.process(c, w).bp;
+                    f[c] += y * gain;
+                }
+            }
+        } else {
+            self.noise_svf.reset();
+        }
+    }
+
+    #[inline]
+    fn white(&mut self) -> f32 {
+        // xorshift32: allocation free and good enough for noise
+        let mut x = self.rng;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.rng = x;
+        (x as f32 / u32::MAX as f32) * 2.0 - 1.0
+    }
+
+    fn looper(&mut self, buf: &mut [f32], ctx: &FxCtx) {
+        let r = &mut self.lp;
+        let Some(beats) = self.loop_beats else {
+            r.state = LoopState::Idle;
+            return;
+        };
+        let len = (ctx.beat_frames(beats as f64) as usize).clamp(16, r.buf.len());
+        match r.state {
+            LoopState::Idle => r.state = LoopState::Armed,
+            // a shorter loop plays the start of the one already recorded (a roll speeding up);
+            // a longer one is recorded again
+            LoopState::Looping if len != r.len => {
+                if len <= r.rec {
+                    r.len = len;
+                    r.play %= len;
+                } else {
+                    r.state = LoopState::Armed;
+                }
+            }
+            _ => {}
+        }
+        let step = (beats as f64).max(1.0 / 32.0);
+        for (i, f) in buf.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+            if r.state == LoopState::Armed {
+                // start on the grid boundary of the loop length; the lane switches per block,
+                // so a boundary just passed (within 1/8 beat) also counts
+                let start = match ctx.beat {
+                    Some(b) => {
+                        let x0 = (b + ctx.beats_per_frame * (i as f64 - 1.0)) / step;
+                        let x1 = (b + ctx.beats_per_frame * i as f64) / step;
+                        x1.floor() != x0.floor() || (i == 0 && x1.fract() * step < 0.125)
+                    }
+                    None => true,
+                };
+                if start {
+                    r.state = LoopState::Recording;
+                    r.rec = 0;
+                    r.len = len;
+                }
+            }
+            match r.state {
+                LoopState::Recording => {
+                    r.buf[r.rec] = *f;
+                    r.rec += 1;
+                    if r.rec >= r.len {
+                        r.state = LoopState::Looping;
+                        r.play = 0;
+                    }
+                }
+                LoopState::Looping => {
+                    let s = r.buf[r.play];
+                    // tiny fade at the loop edges
+                    let edge = (r.play.min(r.len - 1 - r.play) as f32 / 32.0).min(1.0);
+                    f[0] = s[0] * edge;
+                    f[1] = s[1] * edge;
+                    r.play = (r.play + 1) % r.len;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn brake(&mut self, buf: &mut [f32], ctx: &FxCtx) {
+        let n = buf.len() / 2;
+        // let go at once: gliding back to 0 would play the audio held back meanwhile at
+        // almost full speed and level, and jump to the live audio after that
+        if self.brake <= 0.0 {
+            self.brake_amt.reset(0.0);
+        }
+        self.brake_amt.set(self.brake.clamp(0.0, 1.0));
+        let (b0, b1) = self.brake_amt.advance(n);
+        if b0 == 0.0 && b1 == 0.0 && self.lag == 0.0 && self.resume >= 1.0 {
+            // keep the tape running so a brake starts from the live audio
+            for f in buf.as_chunks::<2>().0 {
+                self.tape[self.tape_w] = *f;
+                self.tape_w = (self.tape_w + 1) % self.tape.len();
+            }
+            return;
+        }
+        let cap = self.tape.len();
+        let max_lag = (cap - 4) as f64;
+        let inv = if n > 1 { 1.0 / (n - 1) as f32 } else { 0.0 };
+        let fade = 1.0 - (-1.0 / (0.005 * ctx.sr)).exp();
+        for (i, f) in buf.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+            self.tape[self.tape_w] = *f;
+            self.tape_w = (self.tape_w + 1) % cap;
+            let amount = b0 + (b1 - b0) * i as f32 * inv;
+            if amount <= 0.0 {
+                if self.lag > 0.0 {
+                    // let go: back to the live audio, faded in so the jump doesn't click
+                    self.lag = 0.0;
+                    self.resume = 0.0;
+                }
+                self.resume += (1.0 - self.resume) * fade;
+                if self.resume > 0.999 {
+                    self.resume = 1.0;
+                }
+                f[0] *= self.resume;
+                f[1] *= self.resume;
+                continue;
+            }
+            let speed = 1.0 - amount.min(1.0);
+            self.lag = (self.lag + (1.0 - speed) as f64).min(max_lag);
+            // read `lag + 1` frames behind the write position, interpolated
+            let rp = (self.tape_w as f64 + cap as f64 - 1.0 - self.lag) % cap as f64;
+            let i0 = rp as usize % cap;
+            let i1 = (i0 + 1) % cap;
+            let fr = rp.fract() as f32;
+            let (a, b) = (self.tape[i0], self.tape[i1]);
+            // the level falls with the speed, as a record slowing down does
+            let g = speed.sqrt() * self.resume;
+            f[0] = (a[0] + (b[0] - a[0]) * fr) * g;
+            f[1] = (a[1] + (b[1] - a[1]) * fr) * g;
+        }
+    }
+
+    fn pump(&mut self, buf: &mut [f32], ctx: &FxCtx) {
+        let depth = self.pump.clamp(0.0, 1.0);
+        if depth == 0.0 && self.pump_env >= 1.0 {
+            return;
+        }
+        let attack = 1.0 - (-1.0 / (0.002 * ctx.sr)).exp();
+        for (i, f) in buf.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+            // duck on the beat and recover steadily up to the off-beat and a little beyond
+            let target = match ctx.beat {
+                Some(b) => {
+                    let ph = (b + ctx.beats_per_frame * i as f64).rem_euclid(1.0) as f32;
+                    1.0 - depth * (1.0 - ph / 0.7).max(0.0)
+                }
+                None => 1.0,
+            };
+            self.pump_env += (target - self.pump_env) * attack;
+            if (self.pump_env - 1.0).abs() < 1e-5 {
+                self.pump_env = 1.0;
+            }
+            f[0] *= self.pump_env;
+            f[1] *= self.pump_env;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -593,6 +914,79 @@ mod tests {
             }
         }
         assert!((best.0 as i64 - 22050).abs() <= 2, "echo at {}", best.0);
+    }
+
+    /// A playing deck at 120 BPM from beat 0, block by block.
+    fn run_lane_fx(fx: &mut LaneFx, blocks: usize, input: impl Fn(usize) -> f32, mut set: impl FnMut(&mut LaneFx, f64)) -> Vec<f32> {
+        let sr = 48000.0;
+        let n = 256;
+        let mut out = Vec::new();
+        let mut post = vec![0f32; n * 2];
+        for k in 0..blocks {
+            let beat = (k * n) as f64 * 2.0 / sr as f64;
+            set(fx, beat);
+            let ctx = FxCtx { sr, bpm: 120.0, beat: Some(beat), beats_per_frame: 2.0 / sr as f64 };
+            let mut buf: Vec<f32> = (0..n * 2).map(|i| input(k * n + i / 2)).collect();
+            fx.process_pre(&mut buf, &ctx);
+            post.copy_from_slice(&buf);
+            fx.process_post(&buf, &mut post, &ctx);
+            out.extend(post.iter().step_by(2));
+        }
+        out
+    }
+
+    fn rms(x: &[f32]) -> f32 {
+        (x.iter().map(|v| v * v).sum::<f32>() / x.len().max(1) as f32).sqrt()
+    }
+
+    #[test]
+    fn lane_brake_stops_the_track_and_lets_go_cleanly() {
+        let mut fx = LaneFx::new(48000.0);
+        let tone = |i: usize| (i as f32 * 0.05).sin() * 0.5;
+        // brake over beats 2..4 (0.5 s each at 120 BPM), stopped after, let go at beat 8
+        let out = run_lane_fx(&mut fx, 1000, tone, |fx, b| fx.brake = if b >= 8.0 { 0.0 } else { ((b - 2.0) / 2.0).clamp(0.0, 1.0) as f32 });
+        let at = |beat: f64| (beat * 24000.0) as usize;
+        assert!((rms(&out[at(0.5)..at(1.5)]) - 0.354).abs() < 0.02, "plays normally before");
+        assert!(rms(&out[at(4.5)..at(7.5)]) < 1e-3, "stopped");
+        assert!((rms(&out[at(9.0)..at(10.0)]) - 0.354).abs() < 0.02, "back to the live audio");
+        let jump = out.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0f32, f32::max);
+        assert!(jump < 0.06, "no clicks: largest step {jump}");
+    }
+
+    #[test]
+    fn lane_loop_repeats_one_bar_from_a_downbeat() {
+        let mut fx = LaneFx::new(48000.0);
+        // a ramp that never repeats: a loop makes it repeat
+        let out = run_lane_fx(&mut fx, 2000, |i| i as f32 * 1e-6, |fx, b| fx.loop_beats = (b >= 4.0).then_some(4.0));
+        let bar = 4 * 24000;
+        // the bar from beat 4 is recorded, then plays again from beat 8 and 12
+        for k in [1, 2] {
+            let (a, b) = (bar + 1000, bar * (k + 1) + 1000);
+            assert!((out[a] - out[b]).abs() < 1e-6, "{} vs {}", out[a], out[b]);
+        }
+        assert!(out[bar - 1000] < out[bar + 1000], "plays live before the loop");
+    }
+
+    #[test]
+    fn lane_pump_ducks_on_the_beat() {
+        let mut fx = LaneFx::new(48000.0);
+        let out = run_lane_fx(&mut fx, 400, |_| 0.5, |fx, _| fx.pump = 0.8);
+        // beat 1 starts at frame 24000: ducked just after it, recovered before beat 2
+        assert!(out[24000 + 500] < 0.2, "{}", out[24000 + 500]);
+        assert!((out[24000 + 20000] - 0.5).abs() < 1e-3, "{}", out[24000 + 20000]);
+    }
+
+    #[test]
+    fn lane_noise_and_reverb_add_sound_after_the_track() {
+        let mut fx = LaneFx::new(48000.0);
+        let silent = run_lane_fx(&mut fx, 200, |_| 0.0, |fx, _| fx.noise = 0.0);
+        assert!(rms(&silent) == 0.0);
+        let noise = run_lane_fx(&mut fx, 200, |_| 0.0, |fx, _| fx.noise = 0.7);
+        assert!(rms(&noise[20000..]) > 0.03, "{}", rms(&noise[20000..]));
+        // a burst through the reverb send keeps ringing once the burst and the send stop
+        let mut fx = LaneFx::new(48000.0);
+        let out = run_lane_fx(&mut fx, 300, |i| if i < 24000 { ((i as f32) * 0.3).sin() * 0.5 } else { 0.0 }, |fx, b| fx.reverb = if b < 1.0 { 1.0 } else { 0.0 });
+        assert!(rms(&out[30000..40000]) > 1e-3, "tail {}", rms(&out[30000..40000]));
     }
 
     #[test]

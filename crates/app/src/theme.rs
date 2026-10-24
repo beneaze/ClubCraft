@@ -19,6 +19,13 @@ pub const TEXT_DIM: Color32 = Color32::from_rgb(130, 136, 148);
 pub const SELECT: Color32 = Color32::from_rgb(66, 71, 83);
 pub const OK: Color32 = Color32::from_rgb(90, 220, 130);
 pub const WARN: Color32 = Color32::from_rgb(255, 190, 60);
+/// Transition effects in the transition editor: echo, reverb, noise, loop, brake, side-chain.
+pub const FX_ECHO: Color32 = Color32::from_rgb(255, 160, 90);
+pub const FX_REVERB: Color32 = Color32::from_rgb(120, 190, 255);
+pub const FX_NOISE: Color32 = Color32::from_rgb(200, 200, 210);
+pub const FX_LOOP: Color32 = Color32::from_rgb(110, 225, 170);
+pub const FX_BRAKE: Color32 = Color32::from_rgb(240, 110, 110);
+pub const FX_PUMP: Color32 = Color32::from_rgb(230, 130, 230);
 /// Groups of tracks linked by locked transitions (playlist), one colour per group in turn.
 pub const LINK_GROUPS: [Color32; 4] = [Color32::from_rgb(130, 170, 255), Color32::from_rgb(195, 145, 255), Color32::from_rgb(80, 210, 195), Color32::from_rgb(255, 145, 190)];
 /// Stem rows of a selected transition: the waveform over the stem's colour where it plays, the

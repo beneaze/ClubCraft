@@ -194,11 +194,16 @@ struct LaneValues {
     eq: [f32; 3],
     filter: f32,
     echo: f32,
+    reverb: f32,
+    noise: f32,
+    looping: f32,
+    brake: f32,
+    pump: f32,
 }
 
 impl LaneValues {
     fn neutral() -> Self {
-        LaneValues { volume: 1.0, stems: [1.0; 4], eq: [0.5; 3], filter: 0.5, echo: 0.0 }
+        LaneValues { volume: 1.0, stems: [1.0; 4], eq: [0.5; 3], filter: 0.5, echo: 0.0, reverb: 0.0, noise: 0.0, looping: 0.0, brake: 0.0, pump: 0.0 }
     }
 
     fn from_transition(t: &Transition, side: Side, x: f32) -> Self {
@@ -208,6 +213,11 @@ impl LaneValues {
             eq: [t.value(side, Param::EqLow, x), t.value(side, Param::EqMid, x), t.value(side, Param::EqHigh, x)],
             filter: t.value(side, Param::Filter, x),
             echo: t.value(side, Param::Echo, x),
+            reverb: t.value(side, Param::Reverb, x),
+            noise: t.value(side, Param::Noise, x),
+            looping: t.value(side, Param::Loop, x),
+            brake: t.value(side, Param::Brake, x),
+            pump: t.value(side, Param::Pump, x),
         }
     }
 }
@@ -586,7 +596,8 @@ impl Conductor {
                 // overrides the lane filter.
                 let lane = s.lanes[i % MIX_LANES];
                 let any_solo = s.sample_solo || s.lanes.iter().any(|l| l.solo);
-                if lane.mute || (any_solo && !lane.solo) {
+                let silenced = lane.mute || (any_solo && !lane.solo);
+                if silenced {
                     vol = 0.0;
                 }
                 let ch = &mut mixer.channels[d];
@@ -597,6 +608,12 @@ impl Conductor {
                 }
                 ch.filter_knob = if (lanes.filter - Param::Filter.neutral()).abs() > 1e-4 { lanes.filter } else { lane.filter };
                 ch.echo_send = lanes.echo;
+                // the reverb send and the noise don't pass the fader: a silenced lane silences them
+                ch.lane_fx.reverb = if silenced { 0.0 } else { lanes.reverb };
+                ch.lane_fx.noise = if silenced { 0.0 } else { lanes.noise };
+                ch.lane_fx.loop_beats = clubcraft_core::loop_beats(lanes.looping);
+                ch.lane_fx.brake = lanes.brake;
+                ch.lane_fx.pump = lanes.pump;
                 if fresh {
                     ch.snap_next = true;
                     deck.snap_stem_gains();

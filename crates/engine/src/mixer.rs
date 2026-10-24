@@ -1,9 +1,10 @@
-//! DJ mixer: per-deck channel strip (trim/auto-gain → 3-band EQ → filter → FX slots → PFL tap →
-//! channel fader → crossfader; post-fader automation echo send; VU) and the master section
+//! DJ mixer: per-deck channel strip (trim/auto-gain → automation loop, brake and pump → 3-band EQ
+//! → filter → FX slots → PFL tap → channel fader → crossfader; pre-fader automation reverb send,
+//! noise sweep and post-fader echo send; VU) and the master section
 //! (gain → true-peak limiter → VU; headphone cue/master blend).
 
 use crate::dsp::{db_to_gain, soft_clip, DjFilter, Eq3, Meter, Smoother, MAX_BLOCK};
-use crate::fx::{Echo, FxCtx, FxSlot};
+use crate::fx::{Echo, FxCtx, FxSlot, LaneFx};
 use crate::state::{FX_SLOTS, Levels};
 use serde::{Deserialize, Serialize};
 
@@ -93,6 +94,8 @@ pub struct Channel {
     pub echo_send: f32,
     send_amt: Smoother,
     send_buf: Vec<f32>,
+    /// Transition effects driven by the mix lanes (loop, brake, pump, reverb send, noise).
+    pub lane_fx: LaneFx,
 }
 
 impl Channel {
@@ -118,6 +121,7 @@ impl Channel {
             echo_send: 0.0,
             send_amt: Smoother::new(0.0, 0.01, sr),
             send_buf: vec![0.0; MAX_BLOCK * 2],
+            lane_fx: LaneFx::new(sr),
         }
     }
 
@@ -137,6 +141,7 @@ impl Channel {
         self.eq_knobs = [0.5; 3];
         self.filter_knob = 0.5;
         self.echo_send = 0.0;
+        self.lane_fx.reset();
     }
 
     /// `buf`: deck audio in; on return holds the pre-fader (post-FX) signal for PFL.
@@ -154,6 +159,11 @@ impl Channel {
                 f[1] *= g;
             }
         }
+        if self.snap_next {
+            self.lane_fx.snap();
+        }
+        // loop and brake act on the track itself, before EQ and filter
+        self.lane_fx.process_pre(buf, ctx);
         self.eq.set_knobs(self.eq_knobs[0], self.eq_knobs[1], self.eq_knobs[2]);
         if self.snap_next {
             self.eq.snap();
@@ -178,6 +188,8 @@ impl Channel {
             post[i * 2] = f[0] * g;
             post[i * 2 + 1] = f[1] * g;
         }
+        // reverb send taken before the fader (a track can dissolve into it), and the noise sweep
+        self.lane_fx.process_post(buf, &mut post[..n * 2], ctx);
         self.meter.process(&post[..n * 2]);
         // automation echo send (post-fader, keeps ringing after the fader closes)
         self.send_amt.set(self.echo_send.clamp(0.0, 1.0));

@@ -1,5 +1,5 @@
 //! Studio mixes: an ordered list of tracks joined by beat-matched transitions, each with
-//! automation lanes (volume, per-stem gains, EQ, filter, echo). The same model drives the
+//! automation lanes (volume, per-stem gains, EQ, filter and effects). The same model drives the
 //! offline renderer, the studio preview and the live-deck automix.
 
 use crate::analysis::{BeatGrid, StemKind};
@@ -29,6 +29,19 @@ pub enum Param {
     Filter,
     /// Echo send 0..1 (beat-synced 1/2 beat echo, feedback rises with the value).
     Echo,
+    /// Reverb send 0..1, taken before the fader: the track can dissolve into its reverb (or
+    /// emerge from it) while its volume moves.
+    Reverb,
+    /// White-noise sweep 0..1 over the transition: level and band-pass frequency rise with the
+    /// value (riser, downsweep, swoosh).
+    Noise,
+    /// Beat loop: 0 = off, above it the length of the loop the track repeats, from one bar
+    /// (0.2) halving to 1/4 beat (1.0). Captured on the track's beat grid.
+    Loop,
+    /// Vinyl brake 0..1: the track slows down (pitch with it) and stops at 1.
+    Brake,
+    /// Side-chain pump 0..1: the track ducks on every beat of its grid, by this depth.
+    Pump,
 }
 
 impl Param {
@@ -36,7 +49,7 @@ impl Param {
         match self {
             Param::Volume | Param::Stem(_) => 1.0,
             Param::EqLow | Param::EqMid | Param::EqHigh | Param::Filter => 0.5,
-            Param::Echo => 0.0,
+            Param::Echo | Param::Reverb | Param::Noise | Param::Loop | Param::Brake | Param::Pump => 0.0,
         }
     }
 
@@ -49,6 +62,11 @@ impl Param {
             Param::EqHigh => "High".into(),
             Param::Filter => "Filter".into(),
             Param::Echo => "Echo".into(),
+            Param::Reverb => "Reverb".into(),
+            Param::Noise => "Noise".into(),
+            Param::Loop => "Loop".into(),
+            Param::Brake => "Brake".into(),
+            Param::Pump => "Side-chain".into(),
         }
     }
 }
@@ -608,6 +626,7 @@ mod tests {
         let l = Lane::new(Side::Out, Param::Volume, &[(0.0, 1.0), (10.0, 0.0)]);
         assert!((l.value_at(5.0) - 0.5).abs() < 1e-6);
     }
+
 }
 
 #[cfg(test)]
@@ -727,8 +746,40 @@ pub enum Mode {
     SweepOut,
     /// Filter: low-pass sweep into the incoming track.
     SweepIn,
+    /// Filter: the outgoing track closes down with a low-pass.
+    FilterDown,
+    /// Filter: high-pass out of the outgoing and low-pass into the incoming track at once.
+    SweepBoth,
     /// Echo: the outgoing track echoes out over the last bar.
     EchoOut,
+    /// Echo: one beat of the outgoing track thrown into the echo just before the swap.
+    EchoThrow,
+    /// Echo: the echo send on the outgoing track builds up over the second half.
+    EchoBuild,
+    /// Reverb: the outgoing track dissolves into reverb over the last two bars.
+    ReverbOut,
+    /// Reverb: the incoming track emerges from reverb over the first half.
+    ReverbIn,
+    /// Reverb: both, the old track washes out while the new one emerges.
+    Wash,
+    /// Noise: a rising noise sweep over the second half, cut at the end.
+    Riser,
+    /// Noise: a falling noise sweep from the swap to the end.
+    Downsweep,
+    /// Noise: a short swell of noise around the swap.
+    Swoosh,
+    /// Loop: the outgoing track repeats one bar from the swap on.
+    LoopOut,
+    /// Loop: the outgoing track rolls over the last two bars (one bar, then shorter and shorter).
+    RollOut,
+    /// Loop: the incoming track repeats one bar until the swap.
+    LoopIn,
+    /// Brake: the outgoing track stops like a turntable over the last bar.
+    BrakeOut,
+    /// Brake: the outgoing track brakes over the half bar before the swap and stays stopped.
+    BrakeSwap,
+    /// Side-chain: the outgoing track pumps on every beat, deeper and deeper.
+    PumpOut,
 }
 
 impl Mode {
@@ -739,9 +790,25 @@ impl Mode {
             Mode::Crossfade => "Crossfade",
             Mode::Full => "Full",
             Mode::Half => "Second half",
-            Mode::SweepOut => "Sweep out",
-            Mode::SweepIn => "Sweep in",
+            Mode::SweepOut => "High-pass out",
+            Mode::SweepIn => "Low-pass in",
+            Mode::FilterDown => "Low-pass out",
+            Mode::SweepBoth => "Both",
             Mode::EchoOut => "Echo out",
+            Mode::EchoThrow => "Echo throw",
+            Mode::EchoBuild => "Echo build",
+            Mode::ReverbOut => "Reverb out",
+            Mode::ReverbIn => "Reverb in",
+            Mode::Wash => "Wash",
+            Mode::Riser => "Riser",
+            Mode::Downsweep => "Downsweep",
+            Mode::Swoosh => "Swoosh",
+            Mode::LoopOut => "Loop out",
+            Mode::RollOut => "Roll out",
+            Mode::LoopIn => "Loop in",
+            Mode::BrakeOut => "Brake out",
+            Mode::BrakeSwap => "Brake at swap",
+            Mode::PumpOut => "Pump out",
         }
     }
 
@@ -751,8 +818,13 @@ impl Mode {
             Param::Stem(_) => &[Mode::Off, Mode::Swap, Mode::Crossfade, Mode::Full],
             Param::EqLow | Param::EqMid | Param::EqHigh => &[Mode::Off, Mode::Swap, Mode::Crossfade],
             Param::Volume => &[Mode::Full, Mode::Crossfade, Mode::Half, Mode::Swap],
-            Param::Filter => &[Mode::Off, Mode::SweepOut, Mode::SweepIn],
-            Param::Echo => &[Mode::Off, Mode::EchoOut],
+            Param::Filter => &[Mode::Off, Mode::SweepOut, Mode::SweepIn, Mode::FilterDown, Mode::SweepBoth],
+            Param::Echo => &[Mode::Off, Mode::EchoOut, Mode::EchoThrow, Mode::EchoBuild],
+            Param::Reverb => &[Mode::Off, Mode::ReverbOut, Mode::ReverbIn, Mode::Wash],
+            Param::Noise => &[Mode::Off, Mode::Riser, Mode::Downsweep, Mode::Swoosh],
+            Param::Loop => &[Mode::Off, Mode::LoopOut, Mode::RollOut, Mode::LoopIn],
+            Param::Brake => &[Mode::Off, Mode::BrakeOut, Mode::BrakeSwap],
+            Param::Pump => &[Mode::Off, Mode::PumpOut, Mode::Crossfade, Mode::Swap],
         }
     }
 }
@@ -762,6 +834,7 @@ pub fn mode_lanes(param: Param, mode: Mode, len: f32) -> Vec<Lane> {
     use Side::*;
     let h = len * 0.5;
     let e = 0.01f32.min(len * 0.01);
+    let bar = 4.0f32.min(len * 0.25);
     let pair = |out: &[(f32, f32)], inc: &[(f32, f32)]| vec![Lane::new(Out, param, out), Lane::new(In, param, inc)];
     match (param, mode) {
         (Param::Stem(_), Mode::Off) => pair(&[(0.0, 0.0), (len, 0.0)], &[(0.0, 0.0), (len - e, 0.0), (len, 1.0)]),
@@ -773,12 +846,58 @@ pub fn mode_lanes(param: Param, mode: Mode, len: f32) -> Vec<Lane> {
         (Param::Volume, Mode::Half) => pair(&[(0.0, 1.0), (h, 1.0), (len, 0.0)], &[(0.0, 0.0), (h, 1.0)]),
         (Param::Filter, Mode::SweepOut) => vec![Lane::new(Out, param, &[(0.0, 0.5), (len, 0.92)])],
         (Param::Filter, Mode::SweepIn) => vec![Lane::new(In, param, &[(0.0, 0.08), (len, 0.5)])],
+        (Param::Filter, Mode::FilterDown) => vec![Lane::new(Out, param, &[(0.0, 0.5), (len, 0.08)])],
+        (Param::Filter, Mode::SweepBoth) => pair(&[(0.0, 0.5), (len, 0.92)], &[(0.0, 0.08), (len, 0.5)]),
         (Param::Echo, Mode::EchoOut) => {
             let s = len - 4.0f32.min(len);
             vec![Lane::new(Out, param, &[(0.0, 0.0), (s, 0.0), (s + e, 0.8)])]
         }
+        (Param::Echo, Mode::EchoThrow) => {
+            let s = (h - 1.0).max(0.0);
+            vec![Lane::new(Out, param, &[(0.0, 0.0), (s - e, 0.0), (s, 0.9), (h, 0.9), (h + e, 0.0)])]
+        }
+        (Param::Echo, Mode::EchoBuild) => vec![Lane::new(Out, param, &[(0.0, 0.0), (h, 0.0), (len, 0.9)])],
+        (Param::Reverb, Mode::ReverbOut) => vec![Lane::new(Out, param, &[(0.0, 0.0), (len - 2.0 * bar, 0.0), (len, 1.0)])],
+        (Param::Reverb, Mode::ReverbIn) => vec![Lane::new(In, param, &[(0.0, 1.0), (h, 0.0)])],
+        (Param::Reverb, Mode::Wash) => pair(&[(0.0, 0.0), (h, 0.0), (len, 1.0)], &[(0.0, 1.0), (h, 0.0)]),
+        // noise rides on the outgoing channel: it is one sound for the whole transition
+        (Param::Noise, Mode::Riser) => vec![Lane::new(Out, param, &[(0.0, 0.0), (h, 0.0), (len - e, 1.0), (len, 0.0)])],
+        (Param::Noise, Mode::Downsweep) => vec![Lane::new(Out, param, &[(0.0, 0.0), (h - e, 0.0), (h, 1.0), (len, 0.0)])],
+        (Param::Noise, Mode::Swoosh) => vec![Lane::new(Out, param, &[(0.0, 0.0), (h - bar, 0.0), (h, 1.0), (h + bar, 0.0)])],
+        (Param::Loop, Mode::LoopOut) => vec![Lane::new(Out, param, &[(0.0, 0.0), (h - e, 0.0), (h, loop_value(4.0))])],
+        (Param::Loop, Mode::RollOut) => {
+            // one bar, then two beats, one beat and half a beat, each over half the time before
+            let r = len - 2.0 * bar;
+            let mut pts = vec![(0.0, 0.0)];
+            let mut prev = 0.0;
+            for (at, beats) in [(r, 4.0), (r + bar, 2.0), (r + 1.5 * bar, 1.0), (r + 1.75 * bar, 0.5)] {
+                pts.extend([(at - e, prev), (at, loop_value(beats))]);
+                prev = loop_value(beats);
+            }
+            vec![Lane::new(Out, param, &pts)]
+        }
+        (Param::Loop, Mode::LoopIn) => vec![Lane::new(In, param, &[(0.0, loop_value(4.0)), (h - e, loop_value(4.0)), (h, 0.0)])],
+        (Param::Brake, Mode::BrakeOut) => vec![Lane::new(Out, param, &[(0.0, 0.0), (len - bar, 0.0), (len, 1.0)])],
+        (Param::Brake, Mode::BrakeSwap) => vec![Lane::new(Out, param, &[(0.0, 0.0), (h - bar * 0.5, 0.0), (h, 1.0)])],
+        (Param::Pump, Mode::PumpOut) => vec![Lane::new(Out, param, &[(0.0, 0.0), (len, 0.85)])],
+        (Param::Pump, Mode::Crossfade) => pair(&[(0.0, 0.0), (len, 0.85)], &[(0.0, 0.85), (len, 0.0)]),
+        (Param::Pump, Mode::Swap) => pair(&[(0.0, 0.0), (h - e, 0.0), (h, 0.85)], &[(0.0, 0.85), (h - e, 0.85), (h, 0.0)]),
         _ => vec![], // Off / Full: neutral
     }
+}
+
+/// Loop lane value for a loop of `beats` (4, 2, 1, 1/2 or 1/4 beats).
+pub fn loop_value(beats: f32) -> f32 {
+    0.2 + 0.2 * (4.0 / beats.max(0.25)).log2().round().clamp(0.0, 4.0)
+}
+
+/// Loop length (beats) a [`Param::Loop`] value stands for, `None` when the loop is off.
+pub fn loop_beats(v: f32) -> Option<f32> {
+    if v < 0.1 {
+        return None;
+    }
+    let steps = ((v - 0.2) / 0.2).round().clamp(0.0, 4.0);
+    Some(4.0 / 2f32.powf(steps))
 }
 
 impl Transition {
@@ -822,5 +941,30 @@ mod mode_tests {
         assert_eq!(t.style, TransitionStyle::Custom);
         t.set_mode(Param::Volume, Mode::Half);
         assert_eq!(t.mode(Param::Volume), Some(Mode::Half));
+        // every effect mode is told apart from the others, at every length
+        for beats in [16, 32, 64] {
+            let mut t = Transition::new(TransitionStyle::Crossfade, beats);
+            for p in [Param::Filter, Param::Echo, Param::Reverb, Param::Noise, Param::Loop, Param::Brake, Param::Pump] {
+                assert_eq!(t.mode(p), Some(Mode::Off), "{p:?}");
+                for &m in Mode::for_param(p) {
+                    t.set_mode(p, m);
+                    assert_eq!(t.mode(p), Some(m), "{p:?} {m:?} over {beats} beats");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn loop_values_name_their_lengths() {
+        assert_eq!(loop_beats(0.0), None);
+        for beats in [4.0, 2.0, 1.0, 0.5, 0.25] {
+            assert_eq!(loop_beats(loop_value(beats)), Some(beats));
+        }
+        // a roll out ends on the shortest step before the end and is off before it starts
+        let mut t = Transition::new(TransitionStyle::Crossfade, 32);
+        t.set_mode(Param::Loop, Mode::RollOut);
+        assert_eq!(loop_beats(t.value(Side::Out, Param::Loop, 10.0)), None);
+        assert_eq!(loop_beats(t.value(Side::Out, Param::Loop, 25.0)), Some(4.0));
+        assert_eq!(loop_beats(t.value(Side::Out, Param::Loop, 31.9)), Some(0.5));
     }
 }

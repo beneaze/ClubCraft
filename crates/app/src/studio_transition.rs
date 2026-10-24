@@ -17,16 +17,18 @@ pub enum ParamGroup {
     Volume,
     Eq,
     FilterFx,
+    Rhythm,
 }
 
 impl ParamGroup {
-    const ALL: [ParamGroup; 4] = [ParamGroup::Stems, ParamGroup::Volume, ParamGroup::Eq, ParamGroup::FilterFx];
+    const ALL: [ParamGroup; 5] = [ParamGroup::Stems, ParamGroup::Volume, ParamGroup::Eq, ParamGroup::FilterFx, ParamGroup::Rhythm];
     fn label(self) -> &'static str {
         match self {
             ParamGroup::Stems => "Stems",
             ParamGroup::Volume => "Volume",
             ParamGroup::Eq => "EQ",
-            ParamGroup::FilterFx => "Filter & Echo",
+            ParamGroup::FilterFx => "Filter & FX",
+            ParamGroup::Rhythm => "Rhythm FX",
         }
     }
     fn params(self) -> Vec<(Param, &'static str, Color32)> {
@@ -34,8 +36,14 @@ impl ParamGroup {
             ParamGroup::Stems => [StemKind::Vocals, StemKind::Other, StemKind::Bass, StemKind::Drums].iter().map(|k| (Param::Stem(*k), k.label(), theme::stem_color(*k))).collect(),
             ParamGroup::Volume => vec![(Param::Volume, "Volume", VOLUME_COLOR)],
             ParamGroup::Eq => vec![(Param::EqHigh, "High", EQ_COLORS[2]), (Param::EqMid, "Mid", EQ_COLORS[1]), (Param::EqLow, "Low", EQ_COLORS[0])],
-            ParamGroup::FilterFx => vec![(Param::Filter, "Filter", FILTER_COLOR), (Param::Echo, "Echo", Color32::from_rgb(255, 160, 90))],
+            ParamGroup::FilterFx => TCategory::Effects.columns(),
+            ParamGroup::Rhythm => TCategory::Rhythm.columns(),
         }
+    }
+
+    /// The group whose curve editor holds `p`.
+    fn of(p: Param) -> ParamGroup {
+        ParamGroup::ALL.into_iter().find(|g| g.params().iter().any(|c| c.0 == p)).unwrap_or_default()
     }
 }
 
@@ -48,16 +56,19 @@ pub enum TCategory {
     /// Volume and the three EQ bands side by side (as DJ.Studio's Equalizer category).
     Equalizer,
     Effects,
+    /// Effects that work on the beat: loop, brake, side-chain pump.
+    Rhythm,
     Curves,
 }
 
 impl TCategory {
-    pub const ALL: [TCategory; 4] = [TCategory::Stems, TCategory::Equalizer, TCategory::Effects, TCategory::Curves];
+    pub const ALL: [TCategory; 5] = [TCategory::Stems, TCategory::Equalizer, TCategory::Effects, TCategory::Rhythm, TCategory::Curves];
     fn label(self) -> &'static str {
         match self {
             TCategory::Stems => "Stems",
             TCategory::Equalizer => "Equalizer",
             TCategory::Effects => "Effects",
+            TCategory::Rhythm => "Rhythm FX",
             TCategory::Curves => "Curves (draw)",
         }
     }
@@ -68,7 +79,8 @@ impl TCategory {
         match self {
             TCategory::Stems => [StemKind::Drums, StemKind::Bass, StemKind::Other, StemKind::Vocals].into_iter().map(|k| (Param::Stem(k), k.label(), theme::stem_color(k))).collect(),
             TCategory::Equalizer => vec![(Param::Volume, "Volume", Color32::from_gray(220)), (Param::EqLow, "Low", EQ_COLORS[0]), (Param::EqMid, "Mid", EQ_COLORS[1]), (Param::EqHigh, "High", EQ_COLORS[2])],
-            TCategory::Effects => vec![(Param::Filter, "Filter", FILTER_COLOR), (Param::Echo, "Echo", Color32::from_rgb(255, 160, 90))],
+            TCategory::Effects => vec![(Param::Filter, "Filter", FILTER_COLOR), (Param::Echo, "Echo", theme::FX_ECHO), (Param::Reverb, "Reverb", theme::FX_REVERB), (Param::Noise, "Noise", theme::FX_NOISE)],
+            TCategory::Rhythm => vec![(Param::Loop, "Loop", theme::FX_LOOP), (Param::Brake, "Vinyl brake", theme::FX_BRAKE), (Param::Pump, "Side-chain", theme::FX_PUMP)],
             TCategory::Curves => vec![],
         }
     }
@@ -80,6 +92,8 @@ fn mode_help(p: Param, m: Mode) -> &'static str {
         (Param::Stem(_), Mode::Swap) => "The old track's stem plays until the middle, then the new one's",
         (Param::Stem(_), Mode::Crossfade) => "Handed over between 40 % and 60 % of the transition",
         (Param::Stem(_), Mode::Full) => "Both tracks keep it for the whole transition",
+        (Param::Pump, Mode::Crossfade) => "The old track pumps deeper and deeper on every beat while the new one stops pumping",
+        (Param::Pump, Mode::Swap) => "The new track pumps until the middle, the old one from the middle on",
         (_, Mode::Off) => "No change",
         (_, Mode::Swap) => "Switch at the middle of the transition",
         (_, Mode::Crossfade) => "Gradual handover",
@@ -87,7 +101,23 @@ fn mode_help(p: Param, m: Mode) -> &'static str {
         (_, Mode::Half) => "Old track fades over the second half, new one comes up over the first",
         (_, Mode::SweepOut) => "High-pass sweep out of the old track",
         (_, Mode::SweepIn) => "Low-pass sweep into the new track",
+        (_, Mode::FilterDown) => "The old track closes down with a low-pass",
+        (_, Mode::SweepBoth) => "High-pass out of the old track while the new one opens from a low-pass",
         (_, Mode::EchoOut) => "The old track echoes out over the last bar",
+        (_, Mode::EchoThrow) => "The beat before the middle is thrown into the echo and repeats over the swap",
+        (_, Mode::EchoBuild) => "The echo on the old track builds up over the second half",
+        (_, Mode::ReverbOut) => "The old track dissolves into reverb over the last two bars (best when its volume fades)",
+        (_, Mode::ReverbIn) => "The new track rises out of reverb over the first half",
+        (_, Mode::Wash) => "The old track washes out in reverb while the new one rises out of it",
+        (_, Mode::Riser) => "Noise sweeps up over the second half and cuts off at the end",
+        (_, Mode::Downsweep) => "Noise falls away from the middle to the end",
+        (_, Mode::Swoosh) => "A short swell of noise around the middle",
+        (_, Mode::LoopOut) => "From the middle on, the old track repeats one bar",
+        (_, Mode::RollOut) => "The old track rolls over the last two bars: one bar, then 2, 1 and ½ beat",
+        (_, Mode::LoopIn) => "The new track repeats its first bar until the middle",
+        (_, Mode::BrakeOut) => "The old track stops like a turntable over the last bar (best with volume Full or Swap)",
+        (_, Mode::BrakeSwap) => "The old track brakes over the half bar before the middle and stays stopped",
+        (_, Mode::PumpOut) => "The old track ducks on every beat, deeper and deeper, so the new kick comes through",
     }
 }
 
@@ -399,7 +429,7 @@ impl StudioView {
                 Some(t) => self.curve_target = t,
                 None => {
                     self.tcat = TCategory::Curves;
-                    self.tgroup = ParamGroup::FilterFx;
+                    self.tgroup = ParamGroup::of(p);
                 }
             }
         }

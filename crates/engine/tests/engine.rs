@@ -1109,3 +1109,48 @@ fn crossfader_mixes_assigned_decks_and_a_mix_gives_them_back() {
     assert!(during > 0.1, "a mix plays its decks through, whatever the crossfader");
     assert!(after < 1e-3, "after the mix deck A is on side A again ({after})");
 }
+
+#[test]
+fn transition_effect_modes_play_through_the_mix() {
+    use clubcraft_core::{Mode, Param};
+    // the outgoing track is a steady tone, the incoming one silence: what is heard in the
+    // transition is the outgoing track and its effects
+    let n = SR as usize * 60;
+    let tone: Vec<f32> = (0..n).map(|i| 0.5 * (i as f32 * 440.0 * std::f32::consts::TAU / SR as f32).sin()).collect();
+    let z = vec![0f32; n];
+    let (a, b) = (track(&tone, 120.0, 0.0), track(&z, 120.0, 0.0));
+    let tr = |id: i64| Some(if id == 1 { a.clone() } else { b.clone() });
+    let render = |param: Param, mode: Mode| {
+        let mut mix = two_track_mix(TransitionStyle::Crossfade, true);
+        let mut t = Transition::new(TransitionStyle::Cut, 32);
+        t.set_mode(param, mode);
+        mix.transitions[0] = t;
+        let opts = RenderOptions { limiter: false, tail_secs: 2.0, ..Default::default() };
+        let (r, rep) = render_mix_to_vec(&mix, &|id| tr(id).map(|t| t.analysis()), &tr, &opts).unwrap();
+        let x = rep.timeline.transitions[0].clone();
+        let beat = move |k: f64| rep.timeline.sec_at_beat(x.start_beat + k);
+        let level = move |b0: f64, b1: f64| {
+            let (i0, i1) = ((beat(b0) * SR as f64) as usize * 2, (beat(b1) * SR as f64) as usize * 2);
+            (r[i0..i1].iter().map(|v| (v * v) as f64).sum::<f64>() / (i1 - i0) as f64).sqrt()
+        };
+        level
+    };
+    let full = 0.5 / 2f64.sqrt();
+    // brake out: playing until the last bar, stopped at its end
+    let brake = render(Param::Brake, Mode::BrakeOut);
+    assert!((brake(20.0, 26.0) / full - 1.0).abs() < 0.1);
+    assert!(brake(31.0, 31.9) < full * 0.4, "{}", brake(31.0, 31.9));
+    // brake at the swap: silent from the middle on
+    let brake = render(Param::Brake, Mode::BrakeSwap);
+    assert!(brake(17.0, 30.0) < 1e-3, "{}", brake(17.0, 30.0));
+    // side-chain pump: the level drops on average as the ducking deepens
+    let pump = render(Param::Pump, Mode::PumpOut);
+    assert!(pump(28.0, 32.0) < full * 0.8 && pump(0.0, 2.0) > full * 0.95, "{} {}", pump(28.0, 32.0), pump(0.0, 2.0));
+    // reverb out: the old track keeps ringing after its last beat
+    let reverb = render(Param::Reverb, Mode::ReverbOut);
+    assert!(reverb(32.5, 34.0) > 0.01, "tail {}", reverb(32.5, 34.0));
+    assert!(render(Param::Reverb, Mode::Off)(32.5, 34.0) < 1e-3);
+    // riser: noise on top of the old track over the second half
+    let riser = render(Param::Noise, Mode::Riser);
+    assert!(riser(28.0, 31.5) > full * 1.05 && (riser(4.0, 12.0) / full - 1.0).abs() < 0.05);
+}
