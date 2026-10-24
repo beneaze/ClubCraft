@@ -17,12 +17,14 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 /// Decks used by the studio preview (the live decks stay untouched).
 pub const STUDIO_DECKS: [usize; 2] = [2, 3];
 pub const LIVE_DECKS: [usize; 2] = [0, 1];
 
-/// Memory budget for decoded tracks that are not in use (bytes).
+/// Memory budget for decoded tracks that are not in use (bytes). Tracks in use (on a deck, in
+/// a preview's residency window) don't count: they stay in memory anyway.
 const CACHE_BUDGET: usize = 1024 * 1024 * 1024;
 
 /// Approximate memory held by a loaded track (audio + stems).
@@ -34,11 +36,33 @@ pub fn track_bytes(t: &LoadedTrack) -> usize {
 /// Decoded tracks shared by decks, previews and renders.
 #[derive(Clone, Default)]
 pub struct TrackCache {
-    inner: Arc<Mutex<HashMap<TrackId, Arc<LoadedTrack>>>>,
+    inner: Arc<Mutex<HashMap<TrackId, Cached>>>,
     /// Tracks [`Self::warm`] is loading, or failed to load (not tried again).
     warming: Arc<Mutex<std::collections::HashSet<TrackId>>>,
     /// Tracks [`Self::load`] is decoding; another load of the same track waits for that one.
     loading: Arc<(Mutex<std::collections::HashSet<TrackId>>, parking_lot::Condvar)>,
+}
+
+struct Cached {
+    track: Arc<LoadedTrack>,
+    /// Last fetched, or last seen in use by the pinner.
+    used: Instant,
+}
+
+/// Drop the tracks nobody else holds, least recently used first, until those left take at
+/// most `budget` bytes. The track the preview just let go of (stepping back to the previous
+/// song) is the most recent one, so it stays.
+fn evict(m: &mut HashMap<TrackId, Cached>, budget: usize) {
+    let mut idle: Vec<(Instant, TrackId, usize)> = m.iter().filter(|(_, c)| Arc::strong_count(&c.track) == 1).map(|(k, c)| (c.used, *k, track_bytes(&c.track))).collect();
+    let mut total: usize = idle.iter().map(|x| x.2).sum();
+    idle.sort_by_key(|x| x.0);
+    for (_, k, bytes) in idle {
+        if total <= budget {
+            break;
+        }
+        m.remove(&k);
+        total -= bytes;
+    }
 }
 
 /// Marks a track as being loaded until dropped.
@@ -53,26 +77,16 @@ impl Drop for Loading<'_> {
 
 impl TrackCache {
     pub fn get(&self, id: TrackId) -> Option<Arc<LoadedTrack>> {
-        self.inner.lock().get(&id).cloned()
+        self.inner.lock().get_mut(&id).map(|c| {
+            c.used = Instant::now();
+            c.track.clone()
+        })
     }
 
     pub fn insert(&self, id: TrackId, t: Arc<LoadedTrack>) {
         let mut m = self.inner.lock();
-        m.insert(id, t);
-        // Bound memory: evict tracks nobody else holds (decks, players) beyond a budget.
-        let mut total: usize = m.values().map(|v| track_bytes(v)).sum();
-        if total > CACHE_BUDGET {
-            let mut idle: Vec<TrackId> = m.iter().filter(|(k, v)| **k != id && Arc::strong_count(v) == 1).map(|(k, _)| *k).collect();
-            idle.sort();
-            for k in idle {
-                if total <= CACHE_BUDGET {
-                    break;
-                }
-                if let Some(v) = m.remove(&k) {
-                    total -= track_bytes(&v);
-                }
-            }
-        }
+        m.insert(id, Cached { track: t, used: Instant::now() });
+        evict(&mut m, CACHE_BUDGET);
     }
 
     /// Keep the tracks that decks and players hold locked in RAM, so the audio thread never
@@ -82,10 +96,19 @@ impl TrackCache {
         let _ = std::thread::Builder::new().name("track-pinner".into()).spawn(move || {
             let mut pinner = clubcraft_engine::pin::MemoryPinner::default();
             loop {
-                let snapshot: Vec<Arc<LoadedTrack>> = inner.lock().values().cloned().collect();
+                let snapshot: Vec<(TrackId, Arc<LoadedTrack>)> = inner.lock().iter().map(|(k, c)| (*k, c.track.clone())).collect();
                 // references: the cache, this snapshot, the pinner (if locked), then the users
-                let in_use: Vec<Arc<LoadedTrack>> = snapshot.iter().filter(|t| Arc::strong_count(t) > 2 + pinner.holds(t) as usize).cloned().collect();
+                let (in_use, ids): (Vec<Arc<LoadedTrack>>, Vec<TrackId>) = snapshot.iter().filter(|(_, t)| Arc::strong_count(t) > 2 + pinner.holds(t) as usize).map(|(k, t)| (t.clone(), *k)).unzip();
                 drop(snapshot);
+                // a track in use counts as used until it is let go
+                let now = Instant::now();
+                let mut m = inner.lock();
+                for k in &ids {
+                    if let Some(c) = m.get_mut(k) {
+                        c.used = now;
+                    }
+                }
+                drop(m);
                 pinner.update(&in_use);
                 drop(in_use);
                 std::thread::sleep(std::time::Duration::from_millis(250));
@@ -856,5 +879,35 @@ fn db_knob(db: f32, unity: f32) -> f32 {
         unity * 10f32.powf(db / 40.0)
     } else {
         unity + db / 6.0 * (1.0 - unity)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn track() -> Arc<LoadedTrack> {
+        Arc::new(LoadedTrack::new("t", Arc::new(clubcraft_audio::AudioBuffer::new(clubcraft_core::SAMPLE_RATE, vec![0.0; 1000], vec![0.0; 1000]))))
+    }
+
+    #[test]
+    fn eviction_keeps_tracks_in_use_and_the_most_recent_idle_ones() {
+        let t0 = Instant::now();
+        let mut m = HashMap::new();
+        let held: Vec<Arc<LoadedTrack>> = (0..3).map(|_| track()).collect();
+        // three tracks in use (a preview's window), used long ago: they don't count
+        for (i, t) in held.iter().enumerate() {
+            m.insert(i as TrackId, Cached { track: t.clone(), used: t0 });
+        }
+        // idle tracks 10, 11, 12, the last one let go most recently (the previous song)
+        for i in 0..3 {
+            m.insert(10 + i, Cached { track: track(), used: t0 + Duration::from_secs(1 + i as u64) });
+        }
+        let one = track_bytes(&held[0]);
+        evict(&mut m, 2 * one);
+        let mut left: Vec<TrackId> = m.keys().copied().collect();
+        left.sort();
+        assert_eq!(left, vec![0, 1, 2, 11, 12], "the oldest idle track goes, nothing in use");
     }
 }
