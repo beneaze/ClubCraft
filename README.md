@@ -15,7 +15,7 @@
   <img alt="macOS · Windows · Linux" src="https://img.shields.io/badge/macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-native-2f7bf5?style=flat-square">
   <img alt="Stems: HTDemucs + Mel-Band RoFormer" src="https://img.shields.io/badge/stems-HTDemucs%20%2B%20RoFormer-5ac87a?style=flat-square">
   <img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-3a3a3a?style=flat-square">
-  <img alt="Status: early alpha" src="https://img.shields.io/badge/status-early%20alpha-d69e2e?style=flat-square">
+  <img alt="Status: beta" src="https://img.shields.io/badge/status-beta-d69e2e?style=flat-square">
 </p>
 
 <br>
@@ -274,7 +274,7 @@ The separation models (≈ 3 GB) aren't in git. Export them once from the offici
 Your library, stems, waveforms, exports and recordings live in `~/Music/ClubCraft` (`CLUBCRAFT_HOME` changes that).
 
 > [!IMPORTANT]
-> **Status:** ClubCraft is in early alpha. The studio, live decks, stems and analysis work end to end and are tested, but expect rough edges. Back up your music folders, and keep VirtualDJ closed while ClubCraft writes to its database.
+> **Status:** ClubCraft is in beta. The studio, live decks, stems and analysis work end to end and are tested, but expect rough edges. Back up your music folders, and keep VirtualDJ closed while ClubCraft writes to its database.
 
 ## Downloads
 
