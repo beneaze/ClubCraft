@@ -615,9 +615,9 @@ impl StudioView {
                 let ns = if no_stems { " · no stems" } else { "" };
                 let label = [format!("{} · {bars} bars{keys}{ns}", tr.style.label()), format!("{} · {bars} bars{ns}", tr.style.label()), format!("{} · {bars}", tr.style.label()), format!("{abbrev} {bars}"), format!("{bars}")]
                     .into_iter()
-                    .find(|l| ui.fonts_mut(|f| f.layout_no_wrap(l.clone(), font.clone(), Color32::WHITE).size().x) < chip.width() - 30.0)
+                    .find(|l| ui.fonts_mut(|f| f.layout_no_wrap(l.clone(), font.clone(), Color32::WHITE).size().x) < chip.width() - 48.0)
                     .unwrap_or_default();
-                p.with_clip_rect(chip).text(chip.center() - vec2(9.0, 0.0), egui::Align2::CENTER_CENTER, label, font, if sel { Color32::BLACK } else { Color32::WHITE });
+                p.with_clip_rect(chip).text(chip.center() - vec2(18.0, 0.0), egui::Align2::CENTER_CENTER, label, font, if sel { Color32::BLACK } else { Color32::WHITE });
             }
             // the bar (chip) moves the transition, its edges change the length: like DJ.Studio
             let locked = self.mix.transitions[k].locked;
@@ -661,6 +661,27 @@ impl StudioView {
                 widgets::lock_icon(&p, lock_r.shrink(3.0), locked, if sel { Color32::BLACK } else { Color32::WHITE });
                 if lr.on_hover_text(if locked { "Locked: click to unlock" } else { "Lock this transition (harmonize and automatic mix points leave it alone, and it can't be dragged)" }).clicked() {
                     self.mix.transitions[k].locked = !locked;
+                    self.selection = Selection::Transition(k);
+                    self.changed();
+                }
+            }
+            // the to-do flag, left of the lock: an amber badge while set, so it shows at a glance
+            let flagged = self.mix.transitions[k].flagged;
+            let flag_r = lock_r.translate(vec2(-18.0, 0.0));
+            let show_flag = flagged || sel || chip_r.hovered() || ui.rect_contains_pointer(flag_r);
+            if show_flag && bar_r.width() > 58.0 {
+                let fr = ui.interact(flag_r, Id::new(("tflag", k)), Sense::click());
+                if flagged {
+                    p.rect_filled(flag_r, 4.0, if fr.hovered() { theme::blend(theme::FLAG, Color32::WHITE, 0.25) } else { theme::FLAG });
+                } else if fr.hovered() {
+                    p.rect_filled(flag_r, 4.0, Color32::from_black_alpha(90));
+                }
+                if fr.hovered() {
+                    ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                }
+                widgets::flag_icon(&p, flag_r.shrink(3.5), if flagged || sel { Color32::BLACK } else { Color32::WHITE });
+                if fr.on_hover_text(if flagged { "Flagged: this transition still needs work. Click when it's done" } else { "Flag this transition as one you still need to work on" }).clicked() {
+                    self.mix.transitions[k].flagged = !flagged;
                     self.selection = Selection::Transition(k);
                     self.changed();
                 }

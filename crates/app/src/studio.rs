@@ -510,6 +510,9 @@ impl StudioView {
                 planned.tracks[k + 1].mix_in = old.tracks[j + 1].mix_in;
                 planned.tracks[k + 1].key_shift = planned.tracks[k].key_shift + (old.tracks[j + 1].key_shift - old.tracks[j].key_shift);
                 planned.transitions[k] = old.transitions[j].clone();
+            } else if (0..old.transitions.len()).any(|j| old.transitions[j].flagged && old.tracks[j].track_id == a && old.tracks[j + 1].track_id == b) {
+                // a new plan for a pair that still needs work still needs work
+                planned.transitions[k].flagged = true;
             }
         }
         self.mix = planned;
@@ -701,6 +704,8 @@ impl StudioView {
                 planned.tracks[k + 1].mix_in = old.tracks[j + 1].mix_in;
                 planned.tracks[k + 1].key_shift = planned.tracks[k].key_shift + (old.tracks[j + 1].key_shift - old.tracks[j].key_shift);
                 planned.transitions[k] = old.transitions[j].clone();
+            } else if (0..old.transitions.len()).any(|j| old.transitions[j].flagged && old.tracks[j].track_id == a && old.tracks[j + 1].track_id == b) {
+                planned.transitions[k].flagged = true;
             }
         }
         // tracks keep their own gain
@@ -869,8 +874,24 @@ impl StudioView {
                                 if i > 0 {
                                     if let Some(tr) = self.mix.transitions.get(i - 1) {
                                         let c = theme::style_color(tr.style);
-                                        let txt = format!("{}{} · {}", if tr.locked { "🔒 " } else { "" }, tr.style.label(), tr.beats / 4);
-                                        if ui.add(egui::Button::new(RichText::new(txt).size(11.5).color(Color32::WHITE)).fill(theme::blend(theme::PANEL, c, 0.5)).min_size(vec2(120.0, 20.0))).on_hover_text("Edit this transition").clicked() {
+                                        let txt = format!("{} · {}", tr.style.label(), tr.beats / 4);
+                                        // painted lock and flag before the label
+                                        let (lock_id, flag_id) = (egui::Id::new(("pl_lock", i)), egui::Id::new(("pl_flag", i)));
+                                        let mut atoms = egui::Atoms::new(RichText::new(txt).size(11.5).color(Color32::WHITE));
+                                        if tr.flagged {
+                                            atoms.push_left(egui::Atom::custom(flag_id, vec2(10.0, 10.0)));
+                                        }
+                                        if tr.locked {
+                                            atoms.push_left(egui::Atom::custom(lock_id, vec2(10.0, 10.0)));
+                                        }
+                                        let b = egui::Button::new(atoms).fill(theme::blend(theme::PANEL, c, 0.5)).min_size(vec2(120.0, 20.0)).atom_ui(ui);
+                                        if let Some(r) = b.rect(lock_id) {
+                                            crate::widgets::lock_icon(ui.painter(), r, true, Color32::WHITE);
+                                        }
+                                        if let Some(r) = b.rect(flag_id) {
+                                            crate::widgets::flag_icon(ui.painter(), r, theme::FLAG);
+                                        }
+                                        if b.response.on_hover_text(if tr.flagged { "Edit this transition (flagged: it still needs work)" } else { "Edit this transition" }).clicked() {
                                             select = Some(Selection::Transition(i - 1));
                                         }
                                     }

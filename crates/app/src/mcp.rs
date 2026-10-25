@@ -448,6 +448,8 @@ fn mix_view(lib: &Library, mix: &Mix, analyses: &HashMap<TrackId, Analysis>) -> 
                 "to_track": i + 1,
                 "style": style_id(tr.style),
                 "beats": tr.beats,
+                "locked": tr.locked,
+                "flagged": tr.flagged,
                 "starts_at_sec": at.map(|t| r2(t.start_sec)),
                 "ends_at_sec": at.map(|t| r2(t.end_sec)),
                 "key_match": played_key(i).zip(played_key(i + 1)).map(|(a, b)| a.compatibility(b)),

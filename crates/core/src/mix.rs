@@ -442,6 +442,9 @@ pub struct Transition {
     /// points, and not editable until unlocked.
     #[serde(default)]
     pub locked: bool,
+    /// Flagged by the DJ as still needing work. Only a reminder: it changes nothing in the mix.
+    #[serde(default)]
+    pub flagged: bool,
     /// Mix tempo during the transition (BPM, [`TempoMode::Glide`] only): held at `[0]` over the
     /// first half and ramping linearly (in beats) to `[1]` over the second half. `None` (the
     /// default) = the outgoing track's tempo, ramping to the incoming track's tempo. Imported
@@ -453,7 +456,7 @@ pub struct Transition {
 
 impl Transition {
     pub fn new(style: TransitionStyle, beats: u32) -> Self {
-        Transition { style, beats, lanes: style.lanes(beats as f32), locked: false, tempo: None }
+        Transition { style, beats, lanes: style.lanes(beats as f32), locked: false, flagged: false, tempo: None }
     }
 
     /// Change the length to `beats`, keeping the shape of every curve (points scale with the
@@ -548,7 +551,7 @@ impl Transition {
                 }
             }
         }
-        Transition { style: self.style, beats: self.beats, lanes, locked: self.locked, tempo: self.tempo }
+        Transition { style: self.style, beats: self.beats, lanes, locked: self.locked, flagged: self.flagged, tempo: self.tempo }
     }
 }
 
@@ -1069,7 +1072,7 @@ mod stemless_tests {
     fn each_stem_transition_keeps_its_own_shape() {
         use StemKind::*;
         let side = |d: &[(f32, f32)], rest: f32| {
-            let mut t = Transition { style: TransitionStyle::StemBlend, beats: 32, lanes: vec![], locked: false, tempo: None };
+            let mut t = Transition { style: TransitionStyle::StemBlend, beats: 32, lanes: vec![], locked: false, flagged: false, tempo: None };
             t.lanes.push(Lane::new(Side::Out, Param::Stem(Drums), d));
             for k in [Bass, Other, Vocals] {
                 t.lanes.push(Lane::new(Side::Out, Param::Stem(k), &[(0.0, rest)]));

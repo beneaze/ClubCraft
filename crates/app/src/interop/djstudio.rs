@@ -489,7 +489,7 @@ pub(crate) fn convert_project(root: &Path, version: &str, tracks: &LibTracks, ow
                     }
                     t
                 }
-                None => Transition { style: TransitionStyle::Custom, beats: 32, lanes: Vec::new(), locked: false, tempo: None },
+                None => Transition { style: TransitionStyle::Custom, beats: 32, lanes: Vec::new(), locked: false, flagged: false, tempo: None },
             }
         };
         mix.transitions.push(t);
@@ -815,7 +815,7 @@ fn transition(root: &Path, project: &str, e: &Value, notes: &mut Vec<String>) ->
             }
         }
     }
-    Transition { style: TransitionStyle::Custom, beats, lanes, locked: flag(e, "locked", false), tempo: None }
+    Transition { style: TransitionStyle::Custom, beats, lanes, locked: flag(e, "locked", false), flagged: false, tempo: None }
 }
 
 /// Lane of a generated (not hand-drawn) stem effect for one side (§5.4). `None` = the stem plays

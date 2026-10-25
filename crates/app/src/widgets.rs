@@ -182,6 +182,26 @@ pub fn pad(ui: &mut Ui, label: &str, sub: &str, color: Color32, lit: bool, size:
 /// Small on/off toggle. All toggles share one look: graphite when on, with the colour as the
 /// label, outline and an "LED" bar along the bottom edge (no large coloured fills).
 pub fn toggle(ui: &mut Ui, on: bool, label: &str, color: Color32, size: egui::Vec2) -> Response {
+    let (rect, resp, tc) = toggle_frame(ui, on, color, size);
+    ui.painter().text(rect.center() - egui::vec2(0.0, if on { 0.5 } else { 0.0 }), egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(11.5), tc);
+    resp
+}
+
+/// [`toggle`] with a small painted symbol before the label (`icon` draws into the rect it gets,
+/// in the colour it gets).
+pub fn icon_toggle(ui: &mut Ui, on: bool, label: &str, color: Color32, size: egui::Vec2, icon: impl FnOnce(&egui::Painter, Rect, Color32)) -> Response {
+    let (rect, resp, tc) = toggle_frame(ui, on, color, size);
+    let p = ui.painter();
+    let galley = p.layout_no_wrap(label.to_owned(), egui::FontId::proportional(11.5), tc);
+    let (ic, gap) = (11.0, 4.0);
+    let c = rect.center() - egui::vec2(0.0, if on { 0.5 } else { 0.0 });
+    let x = c.x - (ic + gap + galley.size().x) / 2.0;
+    icon(p, Rect::from_min_size(pos2(x, c.y - ic / 2.0), vec2(ic, ic)), tc);
+    p.galley(pos2(x + ic + gap, c.y - galley.size().y / 2.0), galley, tc);
+    resp
+}
+
+fn toggle_frame(ui: &mut Ui, on: bool, color: Color32, size: egui::Vec2) -> (Rect, Response, Color32) {
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     let p = ui.painter();
     let fill = if on { theme::SELECT } else if resp.hovered() { Color32::from_rgb(46, 50, 60) } else { theme::PANEL_HI };
@@ -192,8 +212,7 @@ pub fn toggle(ui: &mut Ui, on: bool, label: &str, color: Color32, size: egui::Ve
         p.rect_filled(led, 1.0, color);
     }
     let tc = if on { theme::blend(color, Color32::WHITE, 0.3) } else { theme::TEXT };
-    p.text(rect.center() - egui::vec2(0.0, if on { 0.5 } else { 0.0 }), egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(11.5), tc);
-    resp
+    (rect, resp, tc)
 }
 
 /// Stereo VU meter (values are linear peak 0..~1.2).
@@ -315,28 +334,39 @@ pub fn stem_icon(p: &egui::Painter, r: Rect, stem: clubcraft_core::StemKind, col
     }
 }
 
-/// A padlock, closed or open, drawn into `r`.
+/// A padlock, closed or open, drawn flat into `r` (square, about 10 px): a solid body and a
+/// round shackle, raised and open on the right when unlocked.
 pub fn lock_icon(p: &egui::Painter, r: Rect, locked: bool, color: Color32) {
-    let w = r.width();
-    let body = Rect::from_min_max(pos2(r.left() + w * 0.12, r.top() + r.height() * 0.45), pos2(r.right() - w * 0.12, r.bottom()));
-    p.rect_filled(body, w * 0.12, color);
-    // shackle: a half ring above the body (shifted up and open on the right when unlocked)
-    let (cx, top, rad) = (body.center().x, body.top(), body.width() * 0.32);
-    let lift = if locked { 0.0 } else { r.height() * 0.14 };
-    let n = 14;
-    let pts: Vec<egui::Pos2> = (0..=n)
-        .filter_map(|i| {
-            let a = std::f32::consts::PI * i as f32 / n as f32;
-            if !locked && i < 3 {
-                return None; // open on the right
-            }
-            Some(pos2(cx + rad * a.cos(), top - lift - rad * a.sin() * 1.15))
-        })
-        .collect();
-    let stroke = Stroke::new((w * 0.14).max(1.2), color);
-    p.add(egui::Shape::line(pts, stroke));
-    p.line_segment([pos2(cx - rad, top - lift), pos2(cx - rad, top + 1.0)], stroke);
-    if locked {
-        p.line_segment([pos2(cx + rad, top), pos2(cx + rad, top + 1.0)], stroke);
-    }
+    let (w, h) = (r.width(), r.height());
+    let body = Rect::from_min_max(pos2(r.left() + w * 0.1, r.top() + h * 0.5), pos2(r.right() - w * 0.1, r.bottom()));
+    p.rect_filled(body, w * 0.14, color);
+    let sw = (w * 0.13).max(1.2);
+    let (cx, rad) = (body.center().x, w * 0.25);
+    let yc = body.top() - h * if locked { 0.1 } else { 0.24 };
+    let mut pts = vec![pos2(cx - rad, body.top() + 1.0), pos2(cx - rad, yc)];
+    let n = 12;
+    pts.extend((1..n).map(|i| {
+        let a = std::f32::consts::PI * (1.0 - i as f32 / n as f32);
+        pos2(cx + rad * a.cos(), yc - rad * a.sin())
+    }));
+    pts.push(pos2(cx + rad, yc));
+    // the right leg goes into the body when locked, it stays a short stub above it when open
+    pts.push(pos2(cx + rad, if locked { body.top() + 1.0 } else { yc + h * 0.06 }));
+    p.add(egui::Shape::line(pts, Stroke::new(sw, color)));
+}
+
+/// A flag on a pole, drawn flat into `r` (square, about 10 px): the mark for a transition that
+/// still needs work.
+pub fn flag_icon(p: &egui::Painter, r: Rect, color: Color32) {
+    let (w, h) = (r.width(), r.height());
+    let x = r.left() + w * 0.16;
+    p.line_segment([pos2(x, r.top()), pos2(x, r.bottom())], Stroke::new((w * 0.12).max(1.2), color));
+    // a swallowtail flag: two convex halves meeting at the notch; the lower one reaches a little
+    // into the upper one so no anti-aliased seam shows between them
+    let (right, top, bottom) = (r.right() - w * 0.02, r.top(), r.top() + h * 0.6);
+    let (mid, notch) = ((top + bottom) / 2.0, right - w * 0.26);
+    let o = 0.6;
+    let notch_up = notch - o * (right - notch) / (bottom - mid);
+    p.add(egui::Shape::convex_polygon(vec![pos2(x, top), pos2(right, top), pos2(notch, mid), pos2(x, mid)], color, Stroke::NONE));
+    p.add(egui::Shape::convex_polygon(vec![pos2(x, mid - o), pos2(notch_up, mid - o), pos2(right, bottom), pos2(x, bottom)], color, Stroke::NONE));
 }
