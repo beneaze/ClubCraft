@@ -87,8 +87,9 @@ pub fn paint_wave(p: &Painter, rect: Rect, w: &WaveParams, t0: f64, t1: f64, mir
     // only the columns the painter shows: zoomed in, a clip is many screens wide (on the same
     // column grid as the whole rect, so scrolling doesn't make the columns shimmer)
     let clip = p.clip_rect();
-    let first = ((clip.left() - rect.left()) / col_w).floor().max(0.0) as usize;
-    let last = (((clip.right() - rect.left()) / col_w).ceil().max(0.0) as usize + 1).min(cols);
+    // capped as floats: an unbounded clip rect gives an infinite column index
+    let first = ((clip.left() - rect.left()) / col_w).floor().clamp(0.0, cols as f32) as usize;
+    let last = (((clip.right() - rect.left()) / col_w).ceil() + 1.0).clamp(0.0, cols as f32) as usize;
     for c in first..last {
         let ta = t0 + c as f64 * spp;
         let tb = ta + spp;
@@ -260,4 +261,25 @@ pub fn overview(ui: &mut egui::Ui, size: egui::Vec2, w: &WaveParams, pos: f64, d
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unbounded_clip_rect_paints_without_overflow() {
+        let n = 400;
+        let wf = Waveform { rate: 100.0, peak: vec![200; n], low: vec![120; n], mid: vec![80; n], high: vec![40; n], stems: None };
+        let w = WaveParams { wf: &wf, grid: None, cues: &[], sections: &[], style: WaveStyle::Bands, stem_gains: [1.0; 4], loop_region: None, accent: Color32::WHITE, volume: 1.0 };
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let rect = Rect::from_min_size(pos2(10.0, 10.0), vec2(300.0, 60.0));
+            for clip in [Rect::EVERYTHING, Rect::NOTHING, Rect::from_min_max(pos2(f32::NEG_INFINITY, 0.0), pos2(150.0, 100.0))] {
+                let p = Painter::new(ui.ctx().clone(), ui.layer_id(), clip);
+                paint_wave(&p, rect, &w, 0.0, 4.0, true);
+            }
+        });
+        out.textures_delta.clear();
+    }
 }
