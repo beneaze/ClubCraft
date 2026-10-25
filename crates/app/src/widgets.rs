@@ -334,24 +334,24 @@ pub fn stem_icon(p: &egui::Painter, r: Rect, stem: clubcraft_core::StemKind, col
     }
 }
 
-/// A padlock, closed or open, drawn flat into `r` (square, about 10 px): a solid body and a
-/// round shackle, raised and open on the right when unlocked.
+/// A padlock, drawn flat into `r` (square, about 10 px): a solid body and a round shackle.
+/// Closed, it fills `r` from top to bottom like [`flag_icon`], so the two match side by side;
+/// open, the shackle is raised a little above `r` and open on the right.
 pub fn lock_icon(p: &egui::Painter, r: Rect, locked: bool, color: Color32) {
     let (w, h) = (r.width(), r.height());
-    let body = Rect::from_min_max(pos2(r.left() + w * 0.1, r.top() + h * 0.5), pos2(r.right() - w * 0.1, r.bottom()));
+    let body = Rect::from_min_max(pos2(r.left() + w * 0.1, r.top() + h * 0.46), pos2(r.right() - w * 0.1, r.bottom()));
     p.rect_filled(body, w * 0.14, color);
     let sw = (w * 0.13).max(1.2);
     let (cx, rad) = (body.center().x, w * 0.25);
-    let yc = body.top() - h * if locked { 0.1 } else { 0.24 };
+    let yc = r.top() + sw / 2.0 + rad - if locked { 0.0 } else { h * 0.14 };
     let mut pts = vec![pos2(cx - rad, body.top() + 1.0), pos2(cx - rad, yc)];
     let n = 12;
     pts.extend((1..n).map(|i| {
         let a = std::f32::consts::PI * (1.0 - i as f32 / n as f32);
         pos2(cx + rad * a.cos(), yc - rad * a.sin())
     }));
-    pts.push(pos2(cx + rad, yc));
-    // the right leg goes into the body when locked, it stays a short stub above it when open
-    pts.push(pos2(cx + rad, if locked { body.top() + 1.0 } else { yc + h * 0.06 }));
+    // the right leg goes into the body when locked, it stays a short stub when open
+    pts.extend([pos2(cx + rad, yc), pos2(cx + rad, if locked { body.top() + 1.0 } else { yc + h * 0.06 })]);
     p.add(egui::Shape::line(pts, Stroke::new(sw, color)));
 }
 

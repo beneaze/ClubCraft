@@ -215,13 +215,17 @@ impl StudioView {
             if ui.add_enabled(k + 1 < n_tr, egui::Button::new("›").min_size(vec2(24.0, 24.0))).on_hover_text("Next transition (])").clicked() {
                 self.selection = crate::studio::Selection::Transition(k + 1);
             }
-            let lock_txt = if locked { "Locked" } else { "Lock" };
-            if crate::widgets::icon_toggle(ui, locked, lock_txt, theme::accent(), vec2(78.0, 22.0), |p, r, c| crate::widgets::lock_icon(p, r, locked, c)).on_hover_text("A locked transition keeps its mix points, length and curves when you harmonize or recompute mix points, and can't be edited or dragged").clicked() {
+            // the symbol only shows while it's on, as on the timeline
+            let lock_size = vec2(78.0, 22.0);
+            let lock = if locked { crate::widgets::icon_toggle(ui, true, "Locked", theme::accent(), lock_size, |p, r, c| crate::widgets::lock_icon(p, r, true, c)) } else { crate::widgets::toggle(ui, false, "Lock", theme::accent(), lock_size) };
+            if lock.on_hover_text("A locked transition keeps its mix points, length and curves when you harmonize or recompute mix points, and can't be edited or dragged").clicked() {
                 self.mix.transitions[k].locked = !locked;
                 changed = true;
             }
             let flagged = self.mix.transitions[k].flagged;
-            if crate::widgets::icon_toggle(ui, flagged, if flagged { "To do" } else { "Flag" }, theme::FLAG, vec2(70.0, 22.0), crate::widgets::flag_icon).on_hover_text("Flag this transition as one you still need to work on (a reminder only, it changes nothing in the mix)").clicked() {
+            let flag_size = vec2(70.0, 22.0);
+            let flag = if flagged { crate::widgets::icon_toggle(ui, true, "To do", theme::FLAG, flag_size, crate::widgets::flag_icon) } else { crate::widgets::toggle(ui, false, "Flag", theme::FLAG, flag_size) };
+            if flag.on_hover_text("Flag this transition as one you still need to work on (a reminder only, it changes nothing in the mix)").clicked() {
                 self.mix.transitions[k].flagged = !flagged;
                 changed = true;
             }

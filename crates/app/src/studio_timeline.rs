@@ -649,39 +649,49 @@ impl StudioView {
             if chip_r.drag_stopped() {
                 self.drag = None;
             }
-            // lock / unlock on the bar (shown when locked, or when the bar is hovered or selected)
-            let lock_r = Rect::from_center_size(pos2(bar_r.right() - 10.0, tstrip.center().y), vec2(16.0, 16.0));
-            let show_lock = locked || sel || chip_r.hovered() || ui.rect_contains_pointer(lock_r);
-            if show_lock && bar_r.width() > 40.0 {
-                let lr = ui.interact(lock_r, Id::new(("tlock", k)), Sense::click());
-                if lr.hovered() {
-                    p.rect_filled(lock_r, 4.0, Color32::from_black_alpha(90));
-                    ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
-                }
-                widgets::lock_icon(&p, lock_r.shrink(3.0), locked, if sel { Color32::BLACK } else { Color32::WHITE });
-                if lr.on_hover_text(if locked { "Locked: click to unlock" } else { "Lock this transition (harmonize and automatic mix points leave it alone, and it can't be dragged)" }).clicked() {
-                    self.mix.transitions[k].locked = !locked;
-                    self.selection = Selection::Transition(k);
-                    self.changed();
-                }
-            }
-            // the to-do flag, left of the lock: an amber badge while set, so it shows at a glance
+            // lock (right end) and flag (left of it) on the bar: shown while set, and on a hovered or
+            // selected bar so a click can set them (an open lock, a plain flag)
             let flagged = self.mix.transitions[k].flagged;
-            let flag_r = lock_r.translate(vec2(-18.0, 0.0));
-            let show_flag = flagged || sel || chip_r.hovered() || ui.rect_contains_pointer(flag_r);
-            if show_flag && bar_r.width() > 58.0 {
-                let fr = ui.interact(flag_r, Id::new(("tflag", k)), Sense::click());
-                if flagged {
-                    p.rect_filled(flag_r, 4.0, if fr.hovered() { theme::blend(theme::FLAG, Color32::WHITE, 0.25) } else { theme::FLAG });
-                } else if fr.hovered() {
-                    p.rect_filled(flag_r, 4.0, Color32::from_black_alpha(90));
+            let ink = if sel { Color32::BLACK } else { Color32::WHITE };
+            for slot in 0..2 {
+                let on = if slot == 0 { locked } else { flagged };
+                let r = Rect::from_center_size(pos2(bar_r.right() - 10.0 - 18.0 * slot as f32, tstrip.center().y), vec2(16.0, 16.0));
+                let reveal = sel || chip_r.hovered() || ui.rect_contains_pointer(r);
+                if !(on || reveal) || bar_r.width() <= 40.0 + 18.0 * slot as f32 {
+                    continue;
                 }
-                if fr.hovered() {
+                let resp = ui.interact(r, Id::new(("tmark", k, slot)), Sense::click());
+                if resp.hovered() {
                     ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
                 }
-                widgets::flag_icon(&p, flag_r.shrink(3.5), if flagged || sel { Color32::BLACK } else { Color32::WHITE });
-                if fr.on_hover_text(if flagged { "Flagged: this transition still needs work. Click when it's done" } else { "Flag this transition as one you still need to work on" }).clicked() {
-                    self.mix.transitions[k].flagged = !flagged;
+                let col = if slot == 1 && on {
+                    // an amber badge, so a flagged transition shows at a glance
+                    p.rect_filled(r, 4.0, if resp.hovered() { theme::blend(theme::FLAG, Color32::WHITE, 0.25) } else { theme::FLAG });
+                    Color32::BLACK
+                } else {
+                    if resp.hovered() {
+                        p.rect_filled(r, 4.0, Color32::from_black_alpha(90));
+                    }
+                    ink
+                };
+                if slot == 0 {
+                    widgets::lock_icon(&p, r.shrink(3.0), on, col);
+                } else {
+                    widgets::flag_icon(&p, r.shrink(3.0), col);
+                }
+                let tip = match (slot, on) {
+                    (0, true) => "Locked: click to unlock",
+                    (0, false) => "Lock this transition (harmonize and automatic mix points leave it alone, and it can't be dragged)",
+                    (_, true) => "Flagged: this transition still needs work. Click when it's done",
+                    (_, false) => "Flag this transition as one you still need to work on",
+                };
+                if resp.on_hover_text(tip).clicked() {
+                    let tr = &mut self.mix.transitions[k];
+                    if slot == 0 {
+                        tr.locked = !on;
+                    } else {
+                        tr.flagged = !on;
+                    }
                     self.selection = Selection::Transition(k);
                     self.changed();
                 }
