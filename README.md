@@ -135,7 +135,7 @@ Every screenshot here is the real app at work on a 23-track mix. ClubCraft captu
     </td>
     <td width="50%" valign="top">
       <h3>Keyboard first</h3>
-      <b>Studio:</b> Space play · ← → bar (⇧ 8 bars) · [ ] transitions · F follow · + − zoom · ⌘Z / ⇧⌘Z undo / redo · ⌘S save · ⌫ remove the selection.<br>
+      <b>Studio:</b> Space play · ← → bar (⇧ 8 bars) · [ ] transitions · F follow · + − zoom · ⌘Z / ⇧⌘Z undo / redo · ⌘S save · ⌫ remove the selection · ⌘C / ⌘X / ⌘V copy, cut, paste sample clips (at the playhead).<br>
       <b>Live:</b> Z X C and M , . cue/play/sync · 1–8 hot cues (⇧ deck B) · ← → crossfader.<br>
       MIDI controllers map with MIDI learn.
     </td>

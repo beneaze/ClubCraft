@@ -1816,7 +1816,7 @@ impl StudioView {
                     ui.close();
                 }
             });
-            resp.on_hover_text(format!("{name} · {:.1} s · drag to move (snaps to the beat grid, finer when zoomed in; Shift: free) · drag an edge to cut it or, if cut from a track, extend it · Backspace deletes it · right-click for more", dur));
+            resp.on_hover_text(format!("{name} · {:.1} s · drag to move (snaps to the beat grid, finer when zoomed in; Shift: free) · drag an edge to cut it or, if cut from a track, extend it · Backspace deletes it · ⌘C / ⌘X copy or cut it, ⌘V pastes at the playhead · right-click for more", dur));
         }
         moved.sort_unstable();
         moved.dedup();

@@ -278,6 +278,12 @@ struct ExtractDone {
     label: String,
 }
 
+/// Sample clips on the clipboard, named so other text isn't taken for them.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SampleClipboard {
+    clubcraft_samples: Vec<clubcraft_core::SampleClip>,
+}
+
 enum ExtractThen {
     /// It was saved as a file.
     Saved,
@@ -589,6 +595,7 @@ impl StudioView {
         let mut seek: Option<f64> = None;
         let mut remove: Option<Selection> = None;
         let (mut undo, mut redo) = (false, false);
+        let (mut copy, mut cut, mut paste) = (false, false, None::<String>);
         let (cmd, shift) = ctx.input(|i| (i.modifiers.command, i.modifiers.shift));
         ctx.input_mut(|i| {
             if i.consume_key(egui::Modifiers::NONE, Key::Space) {
@@ -643,6 +650,15 @@ impl StudioView {
             if cmd && i.key_pressed(Key::S) {
                 out.push(StudioAction::SaveMix);
             }
+            // ⌘C / ⌘X / ⌘V arrive as clipboard events, not keys
+            for e in &i.events {
+                match e {
+                    egui::Event::Copy => copy = true,
+                    egui::Event::Cut => (copy, cut) = (true, true),
+                    egui::Event::Paste(s) => paste = Some(s.clone()),
+                    _ => {}
+                }
+            }
             if cmd && i.key_pressed(Key::Z) {
                 if shift {
                     redo = true;
@@ -656,6 +672,17 @@ impl StudioView {
         }
         if redo {
             self.redo();
+        }
+        if let Some(text) = copy.then(|| self.copy_samples()).flatten() {
+            ctx.copy_text(text);
+            // cut takes out the clips it copied, not tracks selected with them
+            if cut {
+                self.multi.tracks.clear();
+                remove = Some(self.selection);
+            }
+        }
+        if let Some(text) = paste {
+            self.paste_samples(&text);
         }
         match remove {
             Some(_) if !self.multi.is_empty() => self.remove_multi(sh),
@@ -1037,6 +1064,60 @@ impl StudioView {
             other => other,
         };
         self.changed();
+    }
+
+    /// The selected sample clips as clipboard text (their starts from the first one's), if any.
+    pub(crate) fn copy_samples(&self) -> Option<String> {
+        let picked: Vec<usize> = match self.selection {
+            Selection::Sample(j) if self.multi.is_empty() => vec![j],
+            _ => self.multi.samples.iter().copied().collect(),
+        };
+        let mut clips: Vec<clubcraft_core::SampleClip> = picked.iter().filter_map(|&j| self.mix.samples.get(j).cloned()).collect();
+        if clips.is_empty() {
+            return None;
+        }
+        let first = clips.iter().map(|c| c.start_beat).fold(f64::INFINITY, f64::min);
+        for c in &mut clips {
+            c.start_beat -= first;
+        }
+        serde_json::to_string(&SampleClipboard { clubcraft_samples: clips }).ok()
+    }
+
+    /// Paste clips copied with [`Self::copy_samples`] at the playhead and select them. False when
+    /// `text` isn't clips.
+    pub(crate) fn paste_samples(&mut self, text: &str) -> bool {
+        let Ok(board) = serde_json::from_str::<SampleClipboard>(text) else { return false };
+        if board.clubcraft_samples.is_empty() {
+            return false;
+        }
+        let at = self.timeline.beat_at_sec(self.position);
+        let n0 = self.mix.samples.len();
+        for mut c in board.clubcraft_samples {
+            c.start_beat = (at + c.start_beat).max(0.0);
+            c.lane = c.lane.min(clubcraft_core::SAMPLE_LANES as u8 - 1);
+            // still locked only when pasted over its track (it may come from another mix)
+            let sec = self.timeline.sec_at_beat(c.start_beat);
+            let track = c.lock.and_then(|l| self.mix.tracks.iter().position(|t| t.track_id == l.track_id)).filter(|&i| self.timeline.tracks.get(i).is_some_and(|t| t.start_sec <= sec + 1e-6 && sec < t.end_sec));
+            match (track, c.lock.as_mut()) {
+                (Some(i), Some(l)) => l.pos = self.timeline.track_pos(i, c.start_beat),
+                _ => c.lock = None,
+            }
+            if let Some(open) = self.sample_open.get_mut(c.lane as usize) {
+                *open = true;
+            }
+            self.mix.samples.push(c);
+        }
+        let n = self.mix.samples.len();
+        if n - n0 == 1 {
+            self.selection = Selection::Sample(n0);
+            self.multi = MultiSel::default();
+        } else {
+            self.selection = Selection::None;
+            self.multi = MultiSel { samples: (n0..n).collect(), ..Default::default() };
+        }
+        self.message = format!("Pasted {} sample clip{}", n - n0, if n - n0 == 1 { "" } else { "s" });
+        self.changed();
+        true
     }
 
     /// Take the `i`-th track out of the mix; the transitions around it are planned again.
@@ -1882,6 +1963,33 @@ mod tests {
         s.undo();
         s.refresh_timeline(&sh);
         assert!((s.mix.samples[0].start_beat - before).abs() < 1e-6);
+    }
+
+    #[test]
+    fn copied_samples_paste_at_the_playhead() {
+        let sh = Shared::default();
+        let mut s = StudioView::default();
+        let mut m = mix();
+        let mut a = clubcraft_core::SampleClip::new(0, "/tmp/a.wav".into(), 8.0);
+        a.lock = Some(clubcraft_core::SampleLock { track_id: 1, pos: 4.0 });
+        m.samples = vec![a, clubcraft_core::SampleClip::new(1, "/tmp/b.wav".into(), 12.0)];
+        s.set_mix(m);
+        s.refresh_timeline(&sh);
+        assert!(s.copy_samples().is_none(), "nothing selected");
+        s.multi.samples = [0, 1].into();
+        let Some(text) = s.copy_samples() else { panic!("nothing copied") };
+        // 120 BPM fallback grids: 20 s = beat 40, still in the first track
+        s.position = 20.0;
+        assert!(s.paste_samples(&text));
+        assert_eq!(s.mix.samples.len(), 4);
+        let (p, q) = (&s.mix.samples[2], &s.mix.samples[3]);
+        assert!((p.start_beat - 40.0).abs() < 1e-6 && (q.start_beat - 44.0).abs() < 1e-6, "{} {}", p.start_beat, q.start_beat);
+        assert_eq!((p.lane, q.lane), (0, 1));
+        assert!((p.lock.unwrap().pos - 20.0).abs() < 1e-6, "locked at its new place");
+        assert_eq!(s.multi.samples, [2, 3].into());
+        // other text on the clipboard isn't pasted
+        assert!(!s.paste_samples("hello"));
+        assert_eq!(s.mix.samples.len(), 4);
     }
 
     #[test]
