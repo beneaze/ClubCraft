@@ -1153,12 +1153,22 @@ impl StudioView {
         let Some(c) = self.mix.samples.get(j) else { return };
         let Some(src) = c.source.clone() else { return };
         let (lo, hi) = src.file_bounds();
-        let (s0, s1) = (c.offset.max(lo), (c.offset + c.secs(file_secs)).min(hi));
+        // every clip on this file moves to the new one (a duplicate shares its file), so the new
+        // file covers them all; cut for this clip alone, the others would end up past it and be
+        // cut again for themselves, back and forth
+        let (a, b) = self.mix.samples.iter().filter(|d| d.path == c.path).fold((c.offset, c.offset + c.secs(file_secs)), |(a, b), d| (a.min(d.offset), b.max(d.offset + d.secs(file_secs))));
+        let (s0, s1) = (a.max(lo), b.min(hi));
         let inside = s0 > -1e-4 && s1 < file_secs + 1e-4;
         if (inside && !force) || s1 <= s0 || self.recutting.contains(&c.path) {
             return;
         }
-        let (t0, t1) = src.track_range(c.offset, c.secs(file_secs));
+        let (t0, t1) = src.track_range(a, b - a);
+        // on the longer file, those playing all of this one would play more
+        let path = c.path.clone();
+        for d in self.mix.samples.iter_mut().filter(|d| d.path == path && d.length.is_none()) {
+            d.length = Some(file_secs);
+        }
+        let Some(c) = self.mix.samples.get(j) else { return };
         // a new name: the engine and the timeline cache files by path
         let stem = c.path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
         let base = stem.split(" @").next().unwrap_or(&stem).to_string();
@@ -1872,5 +1882,39 @@ mod tests {
         s.undo();
         s.refresh_timeline(&sh);
         assert!((s.mix.samples[0].start_beat - before).abs() < 1e-6);
+    }
+
+    #[test]
+    fn extending_a_duplicate_cuts_for_both() {
+        let sh = Shared::default();
+        let mut s = StudioView::default();
+        let mut m = mix();
+        // 4 s file cut from 10 s into a track; nothing is written (the track doesn't exist)
+        let dir = std::env::temp_dir().join(format!("clubcraft-recut-{}", std::process::id()));
+        let src = clubcraft_core::SampleSource { audio_path: dir.join("track.wav"), hash: "h".into(), stems: None, t0: 10.0, track_secs: 100.0, rate: 1.0, semis: 0.0, model: None };
+        let mut a = clubcraft_core::SampleClip::new(0, dir.join("cut.wav"), 0.0);
+        a.source = Some(src);
+        // the duplicate plays the whole file; the original was cut at the start, then extended
+        let dup = a.clone();
+        (a.offset, a.length) = (2.0, Some(4.0));
+        m.samples = vec![a, dup];
+        s.set_mix(m);
+        s.recut_sample(0, 4.0, false);
+        let Ok(done) = s.extract_rx.recv_timeout(std::time::Duration::from_secs(10)) else { panic!("no extraction") };
+        let ExtractThen::Recut { old, s0, source, better } = done.then else { panic!("not a recut") };
+        // the new file starts where the duplicate does, not where the extended clip does
+        assert_eq!(s0, 0.0);
+        assert_eq!(source.t0, 10.0);
+        // it comes out 6 s long: both clips fit in it and nothing is cut again
+        let new = dir.join("cut @10.00-16.00s.wav");
+        s.recutting.clear();
+        s.recutting.insert(old.clone());
+        let _ = s.extract_tx.send(ExtractDone { result: Ok((new.clone(), 6.0, None)), then: ExtractThen::Recut { old, s0, source, better }, label: "cut".into() });
+        s.extracting += 1;
+        s.tick_samples(&sh);
+        assert!(s.mix.samples.iter().all(|c| c.path == new));
+        assert_eq!((s.mix.samples[0].offset, s.mix.samples[0].length), (2.0, Some(4.0)));
+        assert_eq!((s.mix.samples[1].offset, s.mix.samples[1].length), (0.0, Some(4.0)));
+        assert!(s.recutting.is_empty(), "cut again: {:?}", s.recutting);
     }
 }
