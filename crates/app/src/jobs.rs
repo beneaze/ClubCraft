@@ -36,11 +36,16 @@ enum Job {
 struct Queue {
     jobs: Mutex<VecDeque<Job>>,
     cv: parking_lot::Condvar,
+    /// Stops the job the queue's worker is running. Set and cleared under the `jobs` lock, so
+    /// "Stop" cancels exactly the jobs that were running or queued when it was pressed: with
+    /// one flag cleared only once everything was idle, a separation started shortly after a
+    /// Stop was cancelled at its first progress report.
+    cancel: AtomicBool,
 }
 
 impl Queue {
     fn new() -> Arc<Queue> {
-        Arc::new(Queue { jobs: Mutex::new(VecDeque::new()), cv: parking_lot::Condvar::new() })
+        Arc::new(Queue { jobs: Mutex::new(VecDeque::new()), cv: parking_lot::Condvar::new(), cancel: AtomicBool::new(false) })
     }
     fn push(&self, j: Job, front: bool) {
         let mut q = self.jobs.lock();
@@ -55,6 +60,7 @@ impl Queue {
         let mut q = self.jobs.lock();
         loop {
             if let Some(j) = q.pop_front() {
+                self.cancel.store(false, Ordering::SeqCst);
                 return j;
             }
             self.cv.wait(&mut q);
@@ -79,7 +85,6 @@ pub struct Jobs {
     pub settings: Arc<Mutex<pipeline::Settings>>,
     pub active: HashMap<Option<TrackId>, JobStatus>,
     pub log: VecDeque<String>,
-    cancel: Arc<AtomicBool>,
 }
 
 impl Jobs {
@@ -88,24 +93,23 @@ impl Jobs {
         let cpu = Queue::new();
         let gpu = Queue::new();
         let settings = Arc::new(Mutex::new(settings));
-        let cancel = Arc::new(AtomicBool::new(false));
         // Analysis / import workers.
         // One analysis worker: with stems and the structure model an analysis holds ~1-3 GB.
         // Separation and analysis additionally share HEAVY so they never run at the same time.
         for i in 0..1 {
-            let (q, g, tx, st, cn) = (cpu.clone(), gpu.clone(), tx.clone(), settings.clone(), cancel.clone());
+            let (q, g, tx, st) = (cpu.clone(), gpu.clone(), tx.clone(), settings.clone());
             std::thread::Builder::new()
                 .name(format!("cc-analysis-{i}"))
-                .spawn(move || worker(q, g, tx, st, cn, false))
+                .spawn(move || worker(q, g, tx, st, false))
                 .map_err(|e| log::error!("cannot start the analysis worker: {e}"))
                 .ok();
         }
         // One separation worker: the GPU is the bottleneck, and models are large.
         {
-            let (q, c, tx, st, cn) = (gpu.clone(), cpu.clone(), tx.clone(), settings.clone(), cancel.clone());
-            std::thread::Builder::new().name("cc-stems".into()).spawn(move || worker(q, c, tx, st, cn, true)).map_err(|e| log::error!("cannot start the stems worker: {e}")).ok();
+            let (q, c, tx, st) = (gpu.clone(), cpu.clone(), tx.clone(), settings.clone());
+            std::thread::Builder::new().name("cc-stems".into()).spawn(move || worker(q, c, tx, st, true)).map_err(|e| log::error!("cannot start the stems worker: {e}")).ok();
         }
-        Jobs { tx, rx, cpu, gpu, settings, active: HashMap::new(), log: VecDeque::new(), cancel }
+        Jobs { tx, rx, cpu, gpu, settings, active: HashMap::new(), log: VecDeque::new() }
     }
 
     pub fn sender(&self) -> Sender<Event> {
@@ -173,9 +177,11 @@ impl Jobs {
     }
 
     pub fn cancel_all(&self) {
-        self.cpu.jobs.lock().clear();
-        self.gpu.jobs.lock().clear();
-        self.cancel.store(true, Ordering::SeqCst);
+        for q in [&self.cpu, &self.gpu] {
+            let mut jobs = q.jobs.lock();
+            jobs.clear();
+            q.cancel.store(true, Ordering::SeqCst);
+        }
     }
 
     /// Drain events; returns them for the app to react to.
@@ -201,9 +207,6 @@ impl Jobs {
                 _ => {}
             }
             out.push(e);
-        }
-        if self.cpu.len() + self.gpu.len() == 0 && self.active.is_empty() {
-            self.cancel.store(false, Ordering::SeqCst);
         }
         out
     }
@@ -231,7 +234,8 @@ pub fn heavy() -> HeavyGuard {
     HeavyGuard { _lock: lock, _file: file }
 }
 
-fn worker(q: Arc<Queue>, other: Arc<Queue>, tx: Sender<Event>, settings: Arc<Mutex<pipeline::Settings>>, cancel: Arc<AtomicBool>, gpu: bool) {
+fn worker(q: Arc<Queue>, other: Arc<Queue>, tx: Sender<Event>, settings: Arc<Mutex<pipeline::Settings>>, gpu: bool) {
+    clubcraft_engine::background_priority();
     let lib = match clubcraft_core::Library::open_default() {
         Ok(l) => l,
         Err(e) => {
@@ -288,7 +292,7 @@ fn worker(q: Arc<Queue>, other: Arc<Queue>, tx: Sender<Event>, settings: Arc<Mut
                     Some(q) => pipeline::Settings { quality: q, ..s.clone() },
                     None => s.clone(),
                 };
-                let r = pipeline::separate(&lib, &mut ctx, id, &s, &cancel, &mut |frac, label| {
+                let r = pipeline::separate(&lib, &mut ctx, id, &s, &q.cancel, &mut |frac, label| {
                     let _ = tx.send(Event::Progress { track: Some(id), frac, label: label.to_string() });
                 });
                 match r {
@@ -306,7 +310,7 @@ fn worker(q: Arc<Queue>, other: Arc<Queue>, tx: Sender<Event>, settings: Arc<Mut
             Job::SeparateRegions(id, regions, quality) => {
                 let _heavy = heavy();
                 let quality = quality.map(|q| clubcraft_stems::Quality::parse(&q).unwrap_or(clubcraft_stems::Quality::Best));
-                let r = pipeline::separate_regions(&lib, &mut ctx, id, &regions, quality, &cancel, &mut |frac, label| {
+                let r = pipeline::separate_regions(&lib, &mut ctx, id, &regions, quality, &q.cancel, &mut |frac, label| {
                     let _ = tx.send(Event::Progress { track: Some(id), frac, label: label.to_string() });
                 });
                 match r {

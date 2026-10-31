@@ -39,7 +39,7 @@ reason:
 | `crates/stems/src/backend/coreml.rs` | CoreML (objc2) FFI and reading its output buffers |
 | `crates/stems/src/backend/onnx.rs` | ONNX Runtime allocator registration |
 | `crates/engine/src/stretch.rs` | FFI to the vendored Signalsmith Stretch |
-| `crates/engine/src/sys.rs` | OS calls: page-fault counter, `mlock` |
+| `crates/engine/src/sys.rs` | OS calls: page-fault counter, `mlock`, thread priority |
 | `crates/app/src/window_chrome.rs` | AppKit view hierarchy for the window buttons |
 
 Every `unsafe` block carries a `// SAFETY:` comment saying why it is sound

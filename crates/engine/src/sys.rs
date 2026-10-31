@@ -46,3 +46,18 @@ pub fn unlock<T>(v: &[T]) {
         }
     }
 }
+
+/// Give the calling thread a lower CPU priority, for background work (stem separation,
+/// analysis) that must not starve the audio thread; threads it starts later, like ONNX
+/// Runtime's pool, inherit it. On Linux the audio thread has no real-time priority (cpal only
+/// asks for it on raw ALSA devices, not through PipeWire's or PulseAudio's ALSA plugin), so a
+/// separation on every core caused underruns. Elsewhere the audio thread is real-time already.
+pub fn background_priority() {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: setpriority takes no pointers; on Linux `who = 0` is the calling thread.
+        if unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, 10) } != 0 {
+            log::warn!("lower thread priority: {}", std::io::Error::last_os_error());
+        }
+    }
+}

@@ -45,7 +45,7 @@ pub mod samples;
 pub mod state;
 #[allow(unsafe_code)] // FFI to the vendored Signalsmith Stretch
 pub mod stretch;
-#[allow(unsafe_code)] // the few OS calls: page-fault counter, mlock
+#[allow(unsafe_code)] // the few OS calls: page-fault counter, mlock, thread priority
 mod sys;
 pub mod track;
 pub mod wav;
@@ -61,6 +61,7 @@ pub use mixer::{CrossfaderAssign, CrossfaderCurve, FaderCurve};
 pub use player::{CommandSink, MixPlayer, PrefetchStatus, TrackLoader};
 pub use render::{render_mix, render_mix_to_vec, RenderOptions, RenderReport};
 pub use state::*;
+pub use sys::background_priority;
 pub mod pin;
 pub mod prof;
 pub use track::LoadedTrack;
