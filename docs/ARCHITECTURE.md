@@ -25,6 +25,9 @@ automix with the planned mix points.
 
 Dependency direction: `core` ← `audio` ← (`stems`, `analysis`, `engine`) ← `app`.
 
+Live output can use one multichannel device or separate master/cue devices. See
+[audio outputs](audio-output.md) for format negotiation, clock drift, alignment and recovery.
+
 ## Conventions
 
 * Internal audio: **44 100 Hz, stereo, f32**. Positions in **seconds** of the original track

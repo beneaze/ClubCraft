@@ -10,6 +10,20 @@ use eframe::egui::{self, RichText, Ui};
 use parking_lot::Mutex;
 use std::sync::Arc;
 
+fn device_choice(d: &DeviceInfo, devices: &[DeviceInfo]) -> String {
+    if devices.iter().filter(|other| other.name == d.name).count() > 1 {
+        format!("{} ({} ch) · {}", d.name, d.max_channels, d.id)
+    } else { format!("{} ({} ch)", d.name, d.max_channels) }
+}
+
+fn device_label(devices: &[DeviceInfo], selected: Option<&str>, empty: &str) -> String {
+    match selected {
+        None => empty.into(),
+        Some(id) => devices.iter().find(|d| d.id == id || d.name == id).map(|d| device_choice(d, devices))
+            .unwrap_or_else(|| format!("Unavailable: {id}")),
+    }
+}
+
 pub fn mapping_path() -> std::path::PathBuf {
     clubcraft_core::paths::data_dir().join("midi-mapping.json")
 }
@@ -59,6 +73,8 @@ const LEARN: &[(&str, &str, bool)] = &[
 pub struct Settings {
     pub open: bool,
     pub audio: AudioConfig,
+    audio_draft: AudioConfig,
+    pub restart_audio: bool,
     devices: Vec<DeviceInfo>,
     midi_ports: Vec<String>,
     pub midi_port: Option<String>,
@@ -105,7 +121,9 @@ impl Settings {
         let mapper = MidiMapper::new(mapping).unwrap_or_else(|_| MidiMapper::unmapped("My controller"));
         Settings {
             open: false,
+            audio_draft: audio.clone(),
             audio,
+            restart_audio: false,
             devices: vec![],
             midi_ports: vec![],
             midi_port,
@@ -115,6 +133,11 @@ impl Settings {
             message: String::new(),
             tab: Tab::General,
         }
+    }
+
+    pub fn sync_audio(&mut self, audio: AudioConfig) {
+        self.audio_draft = audio.clone();
+        self.audio = audio;
     }
 
     pub fn connect_midi(&mut self, handle: Option<&EngineHandle>) {
@@ -215,18 +238,23 @@ impl Settings {
         if self.devices.is_empty() {
             self.devices = clubcraft_engine::devices().unwrap_or_default();
         }
-        let mut cfg = self.audio.clone();
+        let mut cfg = self.audio_draft.clone();
         egui::Grid::new("audio").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
-            ui.label("Device");
-            egui::ComboBox::from_id_salt("dev").width(300.0).selected_text(cfg.device.clone().unwrap_or("System default".into())).show_ui(ui, |ui| {
-                ui.selectable_value(&mut cfg.device, None, "System default");
-                for d in &self.devices {
-                    ui.selectable_value(&mut cfg.device, Some(d.name.clone()), format!("{} ({} ch)", d.name, d.max_channels));
+            ui.label("Master device");
+            ui.horizontal(|ui| {
+                let label = device_label(&self.devices, cfg.device.as_deref(), "System default");
+                egui::ComboBox::from_id_salt("dev").width(300.0).selected_text(label).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut cfg.device, None, "System default");
+                    for d in &self.devices {
+                        ui.add_enabled_ui(!d.id.is_empty(), |ui| {
+                            ui.selectable_value(&mut cfg.device, Some(d.id.clone()), device_choice(d, &self.devices));
+                        });
+                    }
+                });
+                if ui.small_button("↻").on_hover_text("Rescan devices").clicked() {
+                    self.devices = clubcraft_engine::devices().unwrap_or_default();
                 }
             });
-            if ui.small_button("↻").on_hover_text("Rescan devices").clicked() {
-                self.devices = clubcraft_engine::devices().unwrap_or_default();
-            }
             ui.end_row();
             ui.label("Sample rate");
             egui::ComboBox::from_id_salt("sr").selected_text(cfg.sample_rate.map(|r| format!("{r} Hz")).unwrap_or("Auto".into())).show_ui(ui, |ui| {
@@ -238,7 +266,8 @@ impl Settings {
             ui.label("Buffer");
             egui::ComboBox::from_id_salt("buf").selected_text(cfg.buffer_frames.map(|b| format!("{b} frames")).unwrap_or("Device default".into())).show_ui(ui, |ui| {
                 for b in [128u32, 256, 512, 1024] {
-                    ui.selectable_value(&mut cfg.buffer_frames, Some(b), format!("{b} frames ({:.1} ms)", b as f32 / 44.1));
+                    let sr = cfg.sample_rate.or_else(|| handle.map(|h| h.stream_info().sample_rate)).unwrap_or(44100);
+                    ui.selectable_value(&mut cfg.buffer_frames, Some(b), format!("{b} frames ({:.1} ms)", b as f64 * 1000.0 / sr as f64));
                 }
                 ui.selectable_value(&mut cfg.buffer_frames, None, "Device default");
             });
@@ -249,6 +278,7 @@ impl Settings {
                 HeadphoneRouting::Off => "Off".into(),
                 HeadphoneRouting::Split => "Split cable (master L / cue R)".into(),
                 HeadphoneRouting::Channels { master, cue } => format!("Master {}/{} · Cue {}/{}", master[0] + 1, master[1] + 1, cue[0] + 1, cue[1] + 1),
+                HeadphoneRouting::SeparateDevice => "Separate device (stereo cue)".into(),
             };
             egui::ComboBox::from_id_salt("hp").width(300.0).selected_text(label).show_ui(ui, |ui| {
                 ui.selectable_value(&mut cfg.headphones, HeadphoneRouting::Auto, "Auto (outputs 3/4 if available)");
@@ -256,9 +286,32 @@ impl Settings {
                 ui.selectable_value(&mut cfg.headphones, HeadphoneRouting::Split, "Split cable (master L / cue R)");
                 ui.selectable_value(&mut cfg.headphones, HeadphoneRouting::Channels { master: [0, 1], cue: [2, 3] }, "Master 1/2 · Cue 3/4");
                 ui.selectable_value(&mut cfg.headphones, HeadphoneRouting::Channels { master: [2, 3], cue: [0, 1] }, "Master 3/4 · Cue 1/2");
+                ui.selectable_value(&mut cfg.headphones, HeadphoneRouting::SeparateDevice, "Separate device (stereo cue)");
             });
             ui.end_row();
+            if cfg.headphones == HeadphoneRouting::SeparateDevice {
+                ui.label("Headphone device");
+                let label = device_label(&self.devices, cfg.headphone_device.as_deref(), "Select device…");
+                egui::ComboBox::from_id_salt("cue_device").width(300.0).selected_text(label).show_ui(ui, |ui| {
+                    for d in &self.devices {
+                        ui.add_enabled_ui(!d.id.is_empty(), |ui| {
+                            ui.selectable_value(&mut cfg.headphone_device, Some(d.id.clone()), device_choice(d, &self.devices));
+                        });
+                    }
+                });
+                ui.end_row();
+                ui.label("Alignment correction");
+                ui.add(egui::DragValue::new(&mut cfg.alignment_ms).range(-500.0..=500.0).speed(0.1).suffix(" ms"))
+                    .on_hover_text("Positive: headphones lag further, so delay master. Negative: delay headphones. Saved for this device pair, rate and buffer.");
+                ui.end_row();
+            }
         });
+        let before = &self.audio_draft;
+        if cfg.device != before.device || cfg.headphone_device != before.headphone_device || cfg.headphones != before.headphones
+            || cfg.sample_rate != before.sample_rate || cfg.buffer_frames != before.buffer_frames {
+            cfg.alignment_ms = 0.0;
+            cfg.alignment_key = None;
+        }
         if let Some(h) = handle {
             let i = h.stream_info();
             ui.label(RichText::new(format!("Running: {} · {} Hz · {} ch · buffer {}{}", i.device, i.sample_rate, i.channels, i.buffer_frames.map(|b| b.to_string()).unwrap_or("default".into()), if i.cue_channels.is_some() { " · headphone cue on" } else { "" })).size(11.0).color(theme::TEXT_DIM));
@@ -266,16 +319,43 @@ impl Settings {
             let txt = format!("Audio callback: {} frames · peak load {:.0} % · dropouts {}", a.buffer_frames, a.peak_load * 100.0, a.overruns + a.late);
             let col = if a.overruns + a.late > 0 { theme::WARN } else { theme::TEXT_DIM };
             ui.label(RichText::new(txt).size(11.0).color(col)).on_hover_text("Dropouts = callbacks that took longer than their buffer or started late. If they keep rising while playing, pick a larger buffer.");
+            for (name, endpoint) in std::iter::once(("Master", &i.master)).chain(i.headphones.as_ref().map(|e| ("Headphones", e))) {
+                let buffer = endpoint.observed_buffer_frames.map(|n| n.to_string()).unwrap_or_else(|| "waiting".into());
+                let latency = endpoint.estimated_latency_ms.map(|n| format!("{n:.1} ms")).unwrap_or_else(|| "unavailable".into());
+                ui.label(RichText::new(format!("{name}: {} · {} Hz · {} · {} ch · callback {buffer} frames · driver latency {latency} · errors {}{}",
+                    endpoint.device, endpoint.sample_rate, endpoint.sample_format, endpoint.channels, endpoint.errors,
+                    if endpoint.failed { " · OUTPUT STOPPED — Apply to retry" } else { "" }))
+                    .size(11.0).color(if endpoint.failed { theme::WARN } else { theme::TEXT_DIM }));
+            }
+            if i.headphones.is_some() {
+                let estimate = i.estimated_offset_ms.map(|v| format!("estimated cue lag {v:.1} ms"))
+                    .unwrap_or_else(|| "automatic estimate unavailable; manual correction only".into());
+                hint(ui, &format!("Alignment: {estimate}. Added delay: master {:.1} ms, cue {:.1} ms. Cue underruns {}, overflows {}.",
+                    i.master_delay_ms, i.cue_delay_ms, i.cue_underruns, i.cue_overflows));
+                hint(ui, "Driver timing is an estimate. Aligning slower headphones adds master latency; verify by listening and adjust the correction.");
+            }
+            if let Some(warning) = &i.warning { ui.colored_label(theme::WARN, warning); }
         }
-        if cfg != self.audio {
-            self.audio = cfg.clone();
-            if let Some(h) = handle {
-                match h.set_audio_config(cfg) {
-                    Ok(()) => self.message = "Audio output changed".into(),
-                    Err(e) => self.message = format!("Audio: {e:#}"),
+        self.audio_draft = cfg.clone();
+        ui.horizontal(|ui| {
+            if ui.button("Apply").clicked() {
+                if let Some(h) = handle {
+                    match h.set_audio_config(cfg) {
+                        Ok(()) => {
+                            self.sync_audio(h.audio_config());
+                            self.message = "Audio output changed".into();
+                        }
+                        Err(e) => self.message = format!("Audio: {e:#}"),
+                    }
+                } else {
+                    self.audio = cfg;
+                    self.restart_audio = true;
                 }
             }
-        }
+            if ui.add_enabled(self.audio_draft != self.audio, egui::Button::new("Discard changes")).clicked() {
+                self.audio_draft = self.audio.clone();
+            }
+        });
     }
 
     fn midi_ui(&mut self, ui: &mut egui::Ui, handle: Option<&EngineHandle>) {

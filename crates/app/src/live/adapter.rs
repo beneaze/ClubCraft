@@ -390,8 +390,11 @@ pub struct LiveEngine {
 impl LiveEngine {
     pub fn start(config: AudioConfig) -> LiveEngine {
         let (tx, rx) = unbounded();
-        let (handle, error) = match Engine::start(config).or_else(|_| Engine::start(AudioConfig::default())) {
-            Ok(h) => (Some(h), None),
+        let (handle, error) = match Engine::start(config) {
+            Ok(h) => {
+                let warning = h.stream_info().warning;
+                (Some(h), warning)
+            }
             Err(e) => (None, Some(format!("Audio output unavailable: {e:#}"))),
         };
         if let Some(h) = &handle {
@@ -897,7 +900,15 @@ pub fn mixer_ui(st: &EngineState, eng: &LiveEngine) -> MixerUi {
         automix: eng.live_player.is_some() || (eng.loading_mix.is_some()),
         output_name: eng.handle.as_ref().map(|h| {
             let i = h.stream_info();
-            format!("{} · {} Hz", i.device, i.sample_rate)
+            if i.master.failed {
+                "Master output stopped · open Audio settings to retry".into()
+            } else if i.headphones.as_ref().is_some_and(|cue| cue.failed) {
+                format!("{} · headphones stopped · open Audio settings", i.device)
+            } else if let Some(warning) = i.warning {
+                format!("{} · {warning}", i.device)
+            } else {
+                format!("{} · {} Hz", i.device, i.sample_rate)
+            }
         }).or_else(|| eng.error.clone()).unwrap_or_default(),
     }
 }
