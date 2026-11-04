@@ -329,7 +329,7 @@ impl Settings {
             }
             if i.headphones.is_some() {
                 let estimate = i.estimated_offset_ms.map(|v| format!("estimated cue lag {v:.1} ms"))
-                    .unwrap_or_else(|| "automatic estimate unavailable; manual correction only".into());
+                    .unwrap_or_else(|| "driver estimate unavailable; internal cue buffering compensated".into());
                 hint(ui, &format!("Alignment: {estimate}. Added delay: master {:.1} ms, cue {:.1} ms. Cue underruns {}, overflows {}.",
                     i.master_delay_ms, i.cue_delay_ms, i.cue_underruns, i.cue_overflows));
                 hint(ui, "Driver timing is an estimate. Aligning slower headphones adds master latency; verify by listening and adjust the correction.");

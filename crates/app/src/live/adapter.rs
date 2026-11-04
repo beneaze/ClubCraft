@@ -387,12 +387,70 @@ pub struct LiveEngine {
     pub prefs: crate::prefs::Prefs,
 }
 
+// Keep the legacy startup recovery for one-device setups. SeparateDevice must
+// never substitute the selected master or reroute cue onto the system speakers.
+fn start_audio<T>(config: AudioConfig, mut open: impl FnMut(AudioConfig) -> anyhow::Result<T>) -> anyhow::Result<(T, Option<String>)> {
+    let separate = config.headphones == clubcraft_engine::HeadphoneRouting::SeparateDevice;
+    open(config).map(|handle| (handle, None)).or_else(|error| {
+        if separate { return Err(error); }
+        log::warn!("Saved audio setup unavailable; trying system default: {error:#}");
+        open(AudioConfig::default()).map(|handle| (handle, Some(format!("Saved audio setup unavailable; using system default: {error:#}"))))
+            .map_err(|fallback| fallback.context(format!("saved audio setup failed: {error:#}")))
+    })
+}
+
+#[cfg(test)]
+mod audio_start_tests {
+    use super::*;
+    use clubcraft_engine::HeadphoneRouting;
+
+    #[test]
+    fn missing_single_device_retries_system_default_and_reports_fallback() {
+        for routing in [HeadphoneRouting::Auto, HeadphoneRouting::Off, HeadphoneRouting::Split,
+            HeadphoneRouting::Channels { master: [2, 3], cue: [0, 1] }] {
+            let config = AudioConfig { device: Some("disconnected".into()), headphones: routing, ..AudioConfig::default() };
+            let mut attempts = Vec::new();
+            let ((), warning) = start_audio(config.clone(), |candidate| {
+                attempts.push(candidate.clone());
+                if candidate.device.is_some() { anyhow::bail!("device missing"); }
+                Ok(())
+            }).unwrap();
+            assert_eq!(attempts, [config, AudioConfig::default()]);
+            assert!(warning.unwrap().contains("using system default"));
+        }
+    }
+
+    #[test]
+    fn separate_device_never_substitutes_system_default() {
+        let config = AudioConfig { headphones: HeadphoneRouting::SeparateDevice, ..AudioConfig::default() };
+        let mut attempts = 0;
+        let result = start_audio::<()>(config, |_| {
+            attempts += 1;
+            anyhow::bail!("master unavailable")
+        });
+        assert!(result.is_err());
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn working_setup_is_not_reopened_and_double_failure_is_reported() {
+        let config = AudioConfig::default();
+        let mut attempts = 0;
+        let ((), warning) = start_audio(config.clone(), |_| { attempts += 1; Ok(()) }).unwrap();
+        assert_eq!(attempts, 1);
+        assert!(warning.is_none());
+        let failure = start_audio::<()>(config, |_| anyhow::bail!("device missing")).unwrap_err();
+        assert!(format!("{failure:#}").contains("saved audio setup failed"));
+    }
+}
+
 impl LiveEngine {
     pub fn start(config: AudioConfig) -> LiveEngine {
         let (tx, rx) = unbounded();
-        let (handle, error) = match Engine::start(config) {
-            Ok(h) => {
-                let warning = h.stream_info().warning;
+        let started = start_audio(config, Engine::start);
+        let (handle, error) = match started {
+            Ok((h, fallback_warning)) => {
+                let warning = fallback_warning.or_else(|| h.stream_info().warning);
                 (Some(h), warning)
             }
             Err(e) => (None, Some(format!("Audio output unavailable: {e:#}"))),

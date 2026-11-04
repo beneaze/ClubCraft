@@ -43,7 +43,8 @@ pub enum HeadphoneRouting {
 pub struct AudioConfig {
     /// Output device ID (legacy names are accepted); `None` = system default.
     pub device: Option<String>,
-    /// Required sample rate. `None` = common 44.1 kHz if supported, else common 48 kHz.
+    /// Preferred rate for one device; required for SeparateDevice.
+    /// `None` = 44.1 kHz if supported, else 48 kHz (then device default for one device).
     pub sample_rate: Option<u32>,
     /// Requested buffer size in frames (`None` = device default). 256 ≈ 5.8 ms at 44.1 kHz.
     pub buffer_frames: Option<u32>,
@@ -260,7 +261,13 @@ pub struct Engine;
 
 impl Engine {
     /// Open the output device and start the engine.
-    pub fn start(mut config: AudioConfig) -> Result<EngineHandle> {
+    pub fn start(config: AudioConfig) -> Result<EngineHandle> {
+        Self::start_with_commands(config, std::iter::empty())
+    }
+
+    /// Apply initial settings before starting either output callback. Diagnostic
+    /// tools can set minimum gains without racing a running audio stream.
+    pub fn start_with_commands(mut config: AudioConfig, commands: impl IntoIterator<Item = Command>) -> Result<EngineHandle> {
         let prepared = prepare(&config);
         let (prepared, warning) = match prepared {
             Ok(p) => (p, None),
@@ -281,6 +288,7 @@ impl Engine {
         let mut core = Box::new(EngineCore::new(prepared.sr, config.decks));
         core.set_garbage(gp);
         core.set_state_output(sin);
+        for command in commands { core.apply(command); }
         let side = Box::new(AudioSide { core, cmds: cc, master: vec![0.0; SCRATCH_FRAMES * 2], cue: vec![0.0; SCRATCH_FRAMES * 2] });
         let errors = Arc::new(AtomicU32::new(0));
         let health = Arc::new(OutputHealth::default());
@@ -406,15 +414,26 @@ fn prepare(config: &AudioConfig) -> Result<Prepared> {
         Some(cue)
     } else { None };
     let cue_ranges = cue_device.as_ref().map(|d| d.supported_output_configs().map(|r| r.collect::<Vec<_>>())).transpose()?;
-    let (channels, sr) = choose_format(&ranges, cue_ranges.as_deref(), config, want_ch)?;
+    let format = choose_format(&ranges, cue_ranges.as_deref(), config, want_ch);
+    let (channels, sr) = match format {
+        Ok(format) => format,
+        Err(_) if config.headphones != HeadphoneRouting::SeparateDevice => {
+            let default = device.default_output_config()?;
+            default_format(&ranges, want_ch, default.sample_rate())?
+        }
+        Err(error) => return Err(error),
+    };
     Ok(Prepared { device, cue_device, channels, sr, master_ch, cue_ch, split })
 }
 
 fn choose_format(ranges: &[cpal::SupportedStreamConfigRange], cue_ranges: Option<&[cpal::SupportedStreamConfigRange]>, config: &AudioConfig, want_ch: u16) -> Result<(u16, u32)> {
+    let strict = config.headphones == HeadphoneRouting::SeparateDevice || cue_ranges.is_some();
     let master_ok = |c: &cpal::SupportedStreamConfigRange, sr| c.sample_format() == cpal::SampleFormat::F32
-        && c.channels() >= want_ch && (cue_ranges.is_none() || c.channels() == 2) && c.contains_rate(sr) && supports_buffer(c, config.buffer_frames);
+        && c.channels() >= want_ch && (!strict || c.channels() == 2) && c.contains_rate(sr)
+        && (!strict || supports_buffer(c, config.buffer_frames));
     let preferred: Vec<u32> = match config.sample_rate {
-        Some(r) => vec![r],
+        Some(r) if strict => vec![r],
+        Some(r) => vec![r, 44100, 48000],
         None => vec![44100, 48000],
     };
     let chosen = preferred
@@ -427,6 +446,13 @@ fn choose_format(ranges: &[cpal::SupportedStreamConfigRange], cue_ranges: Option
     let channels = ranges.iter().filter(|c| master_ok(c, sr))
         .map(|c| c.channels()).min().ok_or_else(|| anyhow!("no supported output channel count"))?;
     Ok((channels, sr))
+}
+
+fn default_format(ranges: &[cpal::SupportedStreamConfigRange], want_ch: u16, rate: u32) -> Result<(u16, u32)> {
+    let channels = ranges.iter().filter(|c| c.sample_format() == cpal::SampleFormat::F32
+        && c.channels() >= want_ch && c.contains_rate(rate))
+        .map(|c| c.channels()).min().ok_or_else(|| anyhow!("device default has no compatible F32 channel layout"))?;
+    Ok((channels, rate))
 }
 
 fn supports_buffer(c: &cpal::SupportedStreamConfigRange, frames: Option<u32>) -> bool {
@@ -480,13 +506,13 @@ fn open_stream(
         let stream = d.build_output_stream::<f32, _, _>(
             cpal::StreamConfig { channels: 2, sample_rate: sr, buffer_size },
             move |data, info| {
+                failed.cue.heartbeat(data.len() / 2);
                 if halted.load(Ordering::Acquire) || failed.cue.failed.load(Ordering::Relaxed) || failed.master.failed.load(Ordering::Relaxed) {
                     data.fill(0.0);
                 } else { output.render(data, info); }
             },
-            move |_| {
-                err_health.cue.errors.fetch_add(1, Ordering::Relaxed);
-                err_health.cue.failed.store(true, Ordering::Release);
+            move |error| {
+                err_health.cue.report_error(error.kind());
                 cue_errors.fetch_add(1, Ordering::Relaxed);
             }, Some(Duration::from_secs(3))).context("open headphone output")?;
         Some(stream)
@@ -502,6 +528,7 @@ fn open_stream(
     let data_cb = move |data: &mut [f32], callback: &cpal::OutputCallbackInfo| {
         let t0 = Instant::now();
         let faults0 = major_faults();
+        master_health.master.heartbeat(data.len() / ch);
         if stopped.load(Ordering::Acquire) || master_health.master.failed.load(Ordering::Acquire) {
             data.fill(0.0);
             return;
@@ -594,9 +621,8 @@ fn open_stream(
         side.core.stream_errors = err2.load(Ordering::Relaxed);
     };
     let opening_health = health.clone();
-    let err_cb = move |_: cpal::Error| {
-        health.master.errors.fetch_add(1, Ordering::Relaxed);
-        health.master.failed.store(true, Ordering::Release);
+    let err_cb = move |error: cpal::Error| {
+        health.master.report_error(error.kind());
         errors.fetch_add(1, Ordering::Relaxed);
     };
     let stream = device
@@ -662,6 +688,7 @@ impl EngineHandle {
         let rt = self.runtime.lock();
         let mut info = self.info.lock().clone();
         fn update(i: &mut EndpointInfo, h: &output::EndpointHealth) {
+            h.log_errors(&i.device);
             i.observed_buffer_frames = match h.frames.load(Ordering::Relaxed) { 0 => None, n => Some(n) };
             i.estimated_latency_ms = match h.latency_us.load(Ordering::Relaxed) { 0 => None, n => Some(n as f64 / 1000.0) };
             i.failed = h.check_stalled(i.sample_rate);
@@ -885,6 +912,21 @@ mod tests {
             cpal::SupportedBufferSize::Unknown, cpal::SampleFormat::I16)];
         assert!(choose_format(&master, Some(&integer_cue), &config, 2).is_err());
         assert!(choose_format(&master, Some(&[range(1, 44100, 48000)]), &config, 2).is_err());
+    }
+
+    #[test]
+    fn single_device_rates_remain_preferences_and_buffers_are_validated_by_the_driver() {
+        for routing in [HeadphoneRouting::Auto, HeadphoneRouting::Off, HeadphoneRouting::Split,
+            HeadphoneRouting::Channels { master: [0, 1], cue: [2, 3] }] {
+            let config = AudioConfig { headphones: routing, sample_rate: Some(96000), buffer_frames: Some(64), ..AudioConfig::default() };
+            let channels = if matches!(routing, HeadphoneRouting::Channels { .. }) { 4 } else { 2 };
+            assert_eq!(choose_format(&[range(channels, 48000, 48000)], None, &config, channels).unwrap(), (channels, 48000));
+            assert_eq!(choose_format(&[range(channels, 44100, 48000)], None, &config, channels).unwrap(), (channels, 44100));
+        }
+        assert_eq!(default_format(&[range(2, 96000, 96000)], 2, 96000).unwrap(), (2, 96000));
+        assert!(default_format(&[range(2, 96000, 96000)], 4, 96000).is_err());
+        let strict = AudioConfig { headphones: HeadphoneRouting::SeparateDevice, sample_rate: Some(96000), ..AudioConfig::default() };
+        assert!(choose_format(&[range(2, 48000, 48000)], Some(&[range(2, 48000, 48000)]), &strict, 2).is_err());
     }
 
     #[test]

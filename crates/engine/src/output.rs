@@ -7,12 +7,40 @@ use std::time::Instant;
 
 const TAPS: usize = 32;
 const PHASES: usize = 512;
+// Leave a transition band below Nyquist for the 32-tap filter at +/-0.5% drift.
+const SINC_CUTOFF: f64 = 0.94;
+// Queue error is measured in frames: 500 frames asks for 1000 ppm proportional
+// correction. The integral removes steady clock error over tens of seconds.
+const SERVO_PROPORTIONAL: f64 = 2e-6;
+const SERVO_INTEGRAL: f64 = 1e-7;
+// Two seconds rejects callback jitter. Reserve 4000 ppm for integral trim and
+// cap total correction at 5000 ppm, comfortably above the tested +/-1000 ppm.
+const SERVO_TAU_SECONDS: f64 = 2.0;
+const SERVO_INTEGRAL_LIMIT: f64 = 0.004;
+const SERVO_RATIO_LIMIT: f64 = 0.005;
+const ERROR_KINDS: [cpal::ErrorKind; 14] = [
+    cpal::ErrorKind::DeviceBusy,
+    cpal::ErrorKind::DeviceChanged,
+    cpal::ErrorKind::DeviceNotAvailable,
+    cpal::ErrorKind::HostUnavailable,
+    cpal::ErrorKind::InvalidInput,
+    cpal::ErrorKind::PermissionDenied,
+    cpal::ErrorKind::RealtimeDenied,
+    cpal::ErrorKind::ResourceExhausted,
+    cpal::ErrorKind::StreamInvalidated,
+    cpal::ErrorKind::UnsupportedConfig,
+    cpal::ErrorKind::UnsupportedOperation,
+    cpal::ErrorKind::Xrun,
+    cpal::ErrorKind::BackendError,
+    cpal::ErrorKind::Other,
+];
 
 pub(crate) struct EndpointHealth {
     pub frames: AtomicU32,
     pub latency_us: AtomicU32,
     pub errors: AtomicU32,
     pub failed: AtomicBool,
+    pending_errors: AtomicU32,
     created: Instant,
     last_callback_us: AtomicU64,
     armed: AtomicBool,
@@ -25,6 +53,7 @@ impl Default for EndpointHealth {
             latency_us: AtomicU32::new(0),
             errors: AtomicU32::new(0),
             failed: AtomicBool::new(false),
+            pending_errors: AtomicU32::new(0),
             created: Instant::now(),
             last_callback_us: AtomicU64::new(0),
             armed: AtomicBool::new(false),
@@ -33,6 +62,41 @@ impl Default for EndpointHealth {
 }
 
 impl EndpointHealth {
+    /// Error callbacks may run on the audio thread: keep diagnostics allocation-free.
+    pub fn report_error(&self, kind: cpal::ErrorKind) {
+        self.errors.fetch_add(1, Ordering::Relaxed);
+        let index = ERROR_KINDS.iter().position(|k| *k == kind).unwrap_or(ERROR_KINDS.len() - 1);
+        self.pending_errors.fetch_or(1 << index, Ordering::Relaxed);
+        // BackendError has no reliable fatality classification. Let callback
+        // liveness diagnose it rather than permanently muting a healthy stream.
+        if !matches!(
+            kind,
+            cpal::ErrorKind::Xrun
+                | cpal::ErrorKind::DeviceChanged
+                | cpal::ErrorKind::RealtimeDenied
+                | cpal::ErrorKind::DeviceBusy
+                | cpal::ErrorKind::ResourceExhausted
+                | cpal::ErrorKind::BackendError
+        ) {
+            self.failed.store(true, Ordering::Release);
+        }
+    }
+
+    /// Called only outside audio callbacks; coalesce repeated xruns between polls.
+    pub fn log_errors(&self, name: &str) {
+        let pending = self.pending_errors.swap(0, Ordering::Relaxed);
+        for (index, kind) in ERROR_KINDS.iter().enumerate() {
+            if pending & (1 << index) != 0 {
+                log::warn!("Audio output {name}: {kind}");
+            }
+        }
+    }
+
+    pub fn heartbeat(&self, frames: usize) {
+        self.last_callback_us.store(self.created.elapsed().as_micros() as u64, Ordering::Relaxed);
+        self.frames.store(frames as u32, Ordering::Relaxed);
+    }
+
     pub fn arm(&self) {
         self.last_callback_us.store(self.created.elapsed().as_micros() as u64, Ordering::Relaxed);
         self.armed.store(true, Ordering::Release);
@@ -41,10 +105,9 @@ impl EndpointHealth {
     pub fn check_stalled(&self, sr: u32) -> bool {
         let budget_us = self.frames.load(Ordering::Relaxed) as u64 * 1_000_000 / sr.max(1) as u64;
         let age = (self.created.elapsed().as_micros() as u64).saturating_sub(self.last_callback_us.load(Ordering::Relaxed));
-        if self.armed.load(Ordering::Acquire) && age > (budget_us * 8).max(2_000_000) {
-            self.failed.store(true, Ordering::Release);
-        }
-        self.failed.load(Ordering::Acquire)
+        // A stall is a live observation, not a terminal error. A resumed callback
+        // updates the heartbeat and immediately restores this status.
+        self.failed.load(Ordering::Acquire) || (self.armed.load(Ordering::Acquire) && age > (budget_us * 8).max(2_000_000))
     }
 }
 
@@ -62,8 +125,7 @@ pub(crate) struct OutputHealth {
 
 /// Zero means unavailable, including backends which supply zero timestamps.
 pub(crate) fn observe(info: &cpal::OutputCallbackInfo, frames: usize, health: &EndpointHealth) -> Option<u64> {
-    health.last_callback_us.store(health.created.elapsed().as_micros() as u64, Ordering::Relaxed);
-    health.frames.store(frames as u32, Ordering::Relaxed);
+    health.heartbeat(frames);
     let t = info.timestamp();
     let us = t
         .playback
@@ -82,11 +144,14 @@ pub(crate) struct CueFrame {
     pub master_ns: u64,
 }
 
-/// A bounded fractional stereo delay. Changing the tap slews rather than clicks.
+/// A bounded fractional stereo delay with fixed read positions. A tap change
+/// crossfades over 128 frames; moving a read position would bend the pitch.
 pub(crate) struct Delay {
     frames: Vec<[f32; 2]>,
     write: usize,
     delay: f64,
+    previous: f64,
+    fade: f32,
 }
 
 impl Delay {
@@ -95,22 +160,35 @@ impl Delay {
             frames: vec![[0.0; 2]; sr as usize * 2 + 2],
             write: 0,
             delay: 0.0,
+            previous: 0.0,
+            fade: 1.0,
         }
     }
 
     pub fn process(&mut self, frame: [f32; 2], target: f64) -> [f32; 2] {
         let target = target.clamp(0.0, (self.frames.len() - 2) as f64);
-        self.delay += (target - self.delay).clamp(-0.25, 0.25);
+        if target != self.delay {
+            self.previous = self.delay;
+            self.delay = target;
+            self.fade = 0.0;
+        }
         self.frames[self.write] = frame;
-        let read = (self.write as f64 - self.delay).rem_euclid(self.frames.len() as f64);
+        let current = self.read(self.delay);
+        let previous = self.read(self.previous);
+        self.fade = (self.fade + 1.0 / 128.0).min(1.0);
+        let out = std::array::from_fn(|i| previous[i] + (current[i] - previous[i]) * self.fade);
+        self.write = (self.write + 1) % self.frames.len();
+        out
+    }
+
+    fn read(&self, delay: f64) -> [f32; 2] {
+        let read = (self.write as f64 - delay).rem_euclid(self.frames.len() as f64);
         let base = read.floor();
         // rem_euclid may round a tiny negative input up to exactly len.
         let a = base as usize % self.frames.len();
         let b = (a + 1) % self.frames.len();
         let t = (read - base) as f32;
-        let out = std::array::from_fn(|i| self.frames[a][i] + (self.frames[b][i] - self.frames[a][i]) * t);
-        self.write = (self.write + 1) % self.frames.len();
-        out
+        std::array::from_fn(|i| self.frames[a][i] + (self.frames[b][i] - self.frames[a][i]) * t)
     }
 }
 
@@ -124,11 +202,11 @@ struct ClockServo {
 
 impl ClockServo {
     fn update(&mut self, error: f64, seconds: f64) -> f64 {
-        let a = 1.0 - (-seconds / 2.0).exp();
-        self.error += (error - self.error) * a;
-        self.integral = (self.integral + self.error * seconds * 0.0000001).clamp(-0.004, 0.004);
-        let want = (self.error * 0.000002 + self.integral).clamp(-0.005, 0.005);
-        self.ratio += (want - self.ratio) * a;
+        let smoothing = 1.0 - (-seconds / SERVO_TAU_SECONDS).exp();
+        self.error += (error - self.error) * smoothing;
+        self.integral = (self.integral + self.error * seconds * SERVO_INTEGRAL).clamp(-SERVO_INTEGRAL_LIMIT, SERVO_INTEGRAL_LIMIT);
+        let desired_ratio = (self.error * SERVO_PROPORTIONAL + self.integral).clamp(-SERVO_RATIO_LIMIT, SERVO_RATIO_LIMIT);
+        self.ratio += (desired_ratio - self.ratio) * smoothing;
         1.0 + self.ratio
     }
 }
@@ -154,6 +232,7 @@ pub(crate) struct CueOutput {
     last: [f32; 2],
     delay: Delay,
     offset_ns: Option<f64>,
+    alignment_set: bool,
 }
 
 impl CueOutput {
@@ -164,12 +243,14 @@ impl CueOutput {
                 let mut row = std::array::from_fn(|k| {
                     let x = k as f64 - (TAPS / 2 - 1) as f64 - frac;
                     let sinc = if x.abs() < 1e-10 {
-                        0.94
+                        SINC_CUTOFF
                     } else {
-                        (std::f64::consts::PI * x * 0.94).sin() / (std::f64::consts::PI * x)
+                        (std::f64::consts::PI * x * SINC_CUTOFF).sin() / (std::f64::consts::PI * x)
                     };
-                    let w = 0.42 + 0.5 * (std::f64::consts::PI * x / 16.0).cos() + 0.08 * (2.0 * std::f64::consts::PI * x / 16.0).cos();
-                    (sinc * w) as f32
+                    // Blackman window limits sidelobes of the short sinc kernel.
+                    let angle = std::f64::consts::PI * x / (TAPS / 2) as f64;
+                    let window = 0.42 + 0.5 * angle.cos() + 0.08 * (2.0 * angle).cos();
+                    (sinc * window) as f32
                 });
                 let sum: f32 = row.iter().sum();
                 for c in &mut row {
@@ -194,6 +275,7 @@ impl CueOutput {
             last: [0.0; 2],
             delay: Delay::new(sr),
             offset_ns: None,
+            alignment_set: false,
         }
     }
 
@@ -255,15 +337,15 @@ impl CueOutput {
                 }
             }
             if self.started {
-                let pf = self.phase * PHASES as f64;
-                let p = pf as usize;
-                let t = (pf - p as f64) as f32;
+                let phase_position = self.phase * PHASES as f64;
+                let phase_index = phase_position as usize;
+                let phase_blend = (phase_position - phase_index as f64) as f32;
                 let mut sample = [0.0; 2];
                 for k in 0..TAPS {
-                    let h = self.history[(self.head + k) % TAPS];
-                    let c = self.kernel[p][k] + (self.kernel[p + 1][k] - self.kernel[p][k]) * t;
-                    sample[0] += h.samples[0] * c;
-                    sample[1] += h.samples[1] * c;
+                    let frame = self.history[(self.head + k) % TAPS];
+                    let coefficient = self.kernel[phase_index][k] + (self.kernel[phase_index + 1][k] - self.kernel[phase_index][k]) * phase_blend;
+                    sample[0] += frame.samples[0] * coefficient;
+                    sample[1] += frame.samples[1] * coefficient;
                 }
                 if !measured {
                     let h = self.history[(self.head + TAPS / 2 - 1) % TAPS];
@@ -273,15 +355,15 @@ impl CueOutput {
                         let filtered = self.offset_ns.map(|old| old + (offset - old) * a).unwrap_or(offset);
                         self.offset_ns = Some(filtered);
                         self.health.offset_us.store((filtered / 1000.0) as i32, Ordering::Relaxed);
-                        let (m, c) = alignment(filtered, self.correction_ms, self.sr);
-                        self.health.master_delay.store(m.round() as u32, Ordering::Relaxed);
-                        self.health.cue_delay.store(c.round() as u32, Ordering::Relaxed);
+                        self.set_alignment(filtered);
                     } else {
                         self.offset_ns = None;
                         self.health.offset_us.store(i32::MIN, Ordering::Relaxed);
-                        let (m, c) = alignment(0.0, self.correction_ms, self.sr);
-                        self.health.master_delay.store(m.round() as u32, Ordering::Relaxed);
-                        self.health.cue_delay.store(c.round() as u32, Ordering::Relaxed);
+                        // Without driver timing we still know the queued frames
+                        // ahead of the sample at the sinc center. Include all of
+                        // them, not just the configured target fill.
+                        let queued = self.input.slots() as f64 + (TAPS / 2 + 1) as f64 - self.phase;
+                        self.set_alignment(queued * 1e9 / self.sr as f64);
                     }
                     measured = true;
                 }
@@ -292,6 +374,18 @@ impl CueOutput {
             self.gain += (want - self.gain).clamp(-1.0 / 128.0, 1.0 / 128.0);
             let delayed = self.delay.process(self.last, self.health.cue_delay.load(Ordering::Relaxed) as f64);
             *out = delayed.map(|s| s * self.gain);
+        }
+    }
+
+    fn set_alignment(&mut self, offset_ns: f64) {
+        // Latch once per opened stream. Queue jitter and rebuffering must never
+        // move the master tap. Apply (including correction changes) recalibrates;
+        // all continuous clock correction stays in the cue resampler.
+        if !self.alignment_set {
+            let (master, cue) = alignment(offset_ns, self.correction_ms, self.sr);
+            self.health.master_delay.store(master.round() as u32, Ordering::Relaxed);
+            self.health.cue_delay.store(cue.round() as u32, Ordering::Relaxed);
+            self.alignment_set = true;
         }
     }
 }
@@ -312,6 +406,84 @@ mod tests {
             ..EndpointHealth::default()
         };
         assert!(stale.check_stalled(48000));
+        assert!(!stale.failed.load(Ordering::Acquire));
+        stale.heartbeat(256);
+        assert!(!stale.check_stalled(48000));
+        stale.report_error(cpal::ErrorKind::StreamInvalidated);
+        stale.heartbeat(256);
+        assert!(stale.check_stalled(48000));
+    }
+
+    #[test]
+    fn transient_errors_keep_both_outputs_running_and_terminal_errors_stay_failed() {
+        let health = OutputHealth::default();
+        for endpoint in [&health.master, &health.cue] {
+            endpoint.arm();
+            for kind in [
+                cpal::ErrorKind::Xrun,
+                cpal::ErrorKind::DeviceChanged,
+                cpal::ErrorKind::RealtimeDenied,
+                cpal::ErrorKind::DeviceBusy,
+                cpal::ErrorKind::ResourceExhausted,
+                cpal::ErrorKind::BackendError,
+            ] {
+                endpoint.report_error(kind);
+                endpoint.heartbeat(256);
+                assert!(!endpoint.check_stalled(48000), "{kind:?}");
+            }
+            assert_eq!(endpoint.errors.load(Ordering::Relaxed), 6);
+            assert_ne!(endpoint.pending_errors.load(Ordering::Relaxed), 0);
+            endpoint.log_errors("test output");
+            assert_eq!(endpoint.pending_errors.load(Ordering::Relaxed), 0);
+        }
+        health.cue.report_error(cpal::ErrorKind::DeviceNotAvailable);
+        assert!(health.cue.check_stalled(48000));
+        assert!(!health.master.check_stalled(48000));
+        for kind in [
+            cpal::ErrorKind::DeviceNotAvailable,
+            cpal::ErrorKind::StreamInvalidated,
+            cpal::ErrorKind::HostUnavailable,
+            cpal::ErrorKind::PermissionDenied,
+            cpal::ErrorKind::Other,
+        ] {
+            let endpoint = EndpointHealth::default();
+            endpoint.report_error(kind);
+            endpoint.heartbeat(256);
+            assert!(endpoint.check_stalled(48000), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn master_alignment_does_not_follow_jitter_or_rebuffering() {
+        let health = Arc::new(OutputHealth::default());
+        let (_, input) = rtrb::RingBuffer::new(96000);
+        let mut cue = CueOutput::new(input, health.clone(), Instant::now(), 48000, 5.0);
+        cue.set_alignment(25_000_000.0);
+        let delay = health.master_delay.load(Ordering::Relaxed);
+        assert_eq!(delay, 1440);
+        for offset in [35_000_000.0, -10_000_000.0, 120_000_000.0] {
+            cue.set_alignment(offset);
+            health.reset.store(true, Ordering::Relaxed);
+            cue.render_at(&mut [0.0; 512], None);
+            assert_eq!(health.master_delay.load(Ordering::Relaxed), delay);
+        }
+    }
+
+    #[test]
+    fn a_master_delay_change_crossfades_fixed_taps_without_resampling() {
+        let mut delay = Delay::new(48000);
+        for frame in 0..2000 {
+            let sample = (frame as f32 * 0.13).sin();
+            delay.process([sample; 2], 0.0);
+        }
+        for frame in 2000..2500 {
+            let sample = (frame as f32 * 0.13).sin();
+            let out = delay.process([sample; 2], 1200.0);
+            let blend = ((frame - 2000 + 1) as f32 / 128.0).min(1.0);
+            let delayed = ((frame - 1200) as f32 * 0.13).sin();
+            assert!((out[0] - (sample + (delayed - sample) * blend)).abs() < 1e-6);
+            assert_eq!(delay.delay, 1200.0);
+        }
     }
 
     #[test]
@@ -407,8 +579,10 @@ mod tests {
         let mut cue = CueOutput::new(rx, health.clone(), Instant::now(), 48000, -10.0);
         cue.render_at(&mut [0.0; 512], None);
         assert_eq!(health.offset_us.load(Ordering::Relaxed), i32::MIN);
-        assert_eq!(health.master_delay.load(Ordering::Relaxed), 0);
-        assert_eq!(health.cue_delay.load(Ordering::Relaxed), 480);
+        // At the first rendered sample there are 2368 frames still queued and
+        // 17 frames of sinc history ahead. The -10 ms correction removes 480.
+        assert_eq!(health.master_delay.load(Ordering::Relaxed), 2368 + 17 - 480);
+        assert_eq!(health.cue_delay.load(Ordering::Relaxed), 0);
     }
 
     #[test]
