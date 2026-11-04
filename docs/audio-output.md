@@ -9,7 +9,10 @@ left and mono cue right. Explicit channel pairs must not overlap.
 For these single-device modes the saved sample rate remains a preference: the
 engine tries it, then 44.1/48 kHz, then the device default. Fixed buffer requests
 are validated by the driver. If a saved setup cannot start, the app retries the
-system default setup and shows a warning.
+system default setup and shows a warning. This temporary fallback never replaces
+the saved device or format, including on exit or a restart from Settings. A later
+launch retries the original choice. Successful explicit Apply still saves the
+selected configuration.
 
 ## Two devices
 
@@ -40,10 +43,14 @@ The cue queue targets at least 20 ms or two callbacks, whichever is larger.
 Each cue frame carries the undelayed master presentation estimate in a shared
 monotonic epoch. The cue callback compares this with its own driver presentation
 estimate, accounting for the queue and resampler lookahead. These estimates are
-smoothed for diagnostics. The first usable estimate sets fixed output delays for
-the lifetime of the opened streams. Queue jitter and rebuffering never move the
-master delay; continuous drift correction happens only in the cue resampler.
-Apply recalibrates the delay, including after a correction change. A tap change
+smoothed before calibration. The engine collects two seconds of rendered cue
+audio before fixing output delays for the lifetime of the opened streams. The
+first second uses a sample-weighted average, followed by a one-second low pass,
+so one irregular startup callback does not dominate the result. Rebuffering or
+a timing-source change before calibration restarts the warmup. Queue jitter and
+rebuffering after calibration never move the master delay; continuous drift
+correction happens only in the cue resampler.
+Apply restarts this calibration, including after a correction change. A tap change
 crossfades fixed read positions over 128 frames instead of bending the pitch.
 Added delay is bounded to two seconds per output. Fixed calibration can leave
 residual alignment error as device latency or queue fill changes; use Apply to

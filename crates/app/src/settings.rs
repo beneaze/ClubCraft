@@ -332,7 +332,7 @@ impl Settings {
                     .unwrap_or_else(|| "driver estimate unavailable; internal cue buffering compensated".into());
                 hint(ui, &format!("Alignment: {estimate}. Added delay: master {:.1} ms, cue {:.1} ms. Cue underruns {}, overflows {}.",
                     i.master_delay_ms, i.cue_delay_ms, i.cue_underruns, i.cue_overflows));
-                hint(ui, "Driver timing is an estimate. Aligning slower headphones adds master latency; verify by listening and adjust the correction.");
+                hint(ui, "Delay calibrates after two seconds of cue audio. Driver timing is an estimate; verify by listening and adjust the correction.");
             }
             if let Some(warning) = &i.warning { ui.colored_label(theme::WARN, warning); }
         }

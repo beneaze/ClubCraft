@@ -18,6 +18,9 @@ const SERVO_INTEGRAL: f64 = 1e-7;
 const SERVO_TAU_SECONDS: f64 = 2.0;
 const SERVO_INTEGRAL_LIMIT: f64 = 0.004;
 const SERVO_RATIO_LIMIT: f64 = 0.005;
+// Count rendered cue time rather than wall time: waiting for a device or
+// rebuffering must not make the first irregular callback the final calibration.
+const ALIGNMENT_WARMUP_SECONDS: u64 = 2;
 const ERROR_KINDS: [cpal::ErrorKind; 14] = [
     cpal::ErrorKind::DeviceBusy,
     cpal::ErrorKind::DeviceChanged,
@@ -232,6 +235,8 @@ pub(crate) struct CueOutput {
     last: [f32; 2],
     delay: Delay,
     offset_ns: Option<f64>,
+    estimate_frames: u64,
+    estimate_has_timestamps: Option<bool>,
     alignment_set: bool,
 }
 
@@ -275,6 +280,8 @@ impl CueOutput {
             last: [0.0; 2],
             delay: Delay::new(sr),
             offset_ns: None,
+            estimate_frames: 0,
+            estimate_has_timestamps: None,
             alignment_set: false,
         }
     }
@@ -303,7 +310,7 @@ impl CueOutput {
                 self.health.overflows.fetch_add(1, Ordering::Relaxed);
             }
             self.started = false;
-            self.offset_ns = None;
+            self.reset_estimate();
             while self.input.slots() > target + frames + TAPS {
                 let _ = self.input.pop();
             }
@@ -315,7 +322,7 @@ impl CueOutput {
             self.head = 0;
             self.phase = 0.0;
             self.servo = ClockServo::default();
-            self.offset_ns = None;
+            self.reset_estimate();
             self.started = true;
         }
         let ratio = self
@@ -351,19 +358,13 @@ impl CueOutput {
                     let h = self.history[(self.head + TAPS / 2 - 1) % TAPS];
                     if let Some(playback) = playback_ns.filter(|_| h.master_ns != 0) {
                         let offset = playback as f64 + (f as f64 - self.phase) * 1e9 / self.sr as f64 - h.master_ns as f64;
-                        let a = 1.0 - (-(frames as f64 / self.sr as f64) / 1.0).exp();
-                        let filtered = self.offset_ns.map(|old| old + (offset - old) * a).unwrap_or(offset);
-                        self.offset_ns = Some(filtered);
-                        self.health.offset_us.store((filtered / 1000.0) as i32, Ordering::Relaxed);
-                        self.set_alignment(filtered);
+                        self.set_alignment(offset, frames, true);
                     } else {
-                        self.offset_ns = None;
-                        self.health.offset_us.store(i32::MIN, Ordering::Relaxed);
                         // Without driver timing we still know the queued frames
                         // ahead of the sample at the sinc center. Include all of
                         // them, not just the configured target fill.
                         let queued = self.input.slots() as f64 + (TAPS / 2 + 1) as f64 - self.phase;
-                        self.set_alignment(queued * 1e9 / self.sr as f64);
+                        self.set_alignment(queued * 1e9 / self.sr as f64, frames, false);
                     }
                     measured = true;
                 }
@@ -377,12 +378,35 @@ impl CueOutput {
         }
     }
 
-    fn set_alignment(&mut self, offset_ns: f64) {
-        // Latch once per opened stream. Queue jitter and rebuffering must never
+    fn reset_estimate(&mut self) {
+        self.offset_ns = None;
+        self.estimate_frames = 0;
+        self.estimate_has_timestamps = None;
+    }
+
+    fn set_alignment(&mut self, offset_ns: f64, frames: usize, has_timestamps: bool) {
+        if frames == 0 {
+            return;
+        }
+        if self.estimate_has_timestamps != Some(has_timestamps) {
+            self.reset_estimate();
+            self.estimate_has_timestamps = Some(has_timestamps);
+        }
+        self.estimate_frames = self.estimate_frames.saturating_add(frames as u64);
+        // Average the first second by sample count, then use a one-second low
+        // pass. This prevents the first callback from dominating the estimate
+        // while giving startup irregularities two seconds to settle.
+        let smoothing = (frames as f64 / self.estimate_frames.min(self.sr as u64) as f64).min(1.0);
+        let filtered = self.offset_ns.map(|old| old + (offset_ns - old) * smoothing).unwrap_or(offset_ns);
+        self.offset_ns = Some(filtered);
+        self.health
+            .offset_us
+            .store(if has_timestamps { (filtered / 1000.0) as i32 } else { i32::MIN }, Ordering::Relaxed);
+        // Latch once after warmup. Queue jitter and rebuffering must never
         // move the master tap. Apply (including correction changes) recalibrates;
         // all continuous clock correction stays in the cue resampler.
-        if !self.alignment_set {
-            let (master, cue) = alignment(offset_ns, self.correction_ms, self.sr);
+        if !self.alignment_set && self.estimate_frames >= self.sr as u64 * ALIGNMENT_WARMUP_SECONDS {
+            let (master, cue) = alignment(filtered, self.correction_ms, self.sr);
             self.health.master_delay.store(master.round() as u32, Ordering::Relaxed);
             self.health.cue_delay.store(cue.round() as u32, Ordering::Relaxed);
             self.alignment_set = true;
@@ -458,15 +482,57 @@ mod tests {
         let health = Arc::new(OutputHealth::default());
         let (_, input) = rtrb::RingBuffer::new(96000);
         let mut cue = CueOutput::new(input, health.clone(), Instant::now(), 48000, 5.0);
-        cue.set_alignment(25_000_000.0);
+        cue.set_alignment(25_000_000.0, 48000, true);
+        assert_eq!(health.master_delay.load(Ordering::Relaxed), 0);
+        cue.set_alignment(25_000_000.0, 48000, true);
         let delay = health.master_delay.load(Ordering::Relaxed);
         assert_eq!(delay, 1440);
         for offset in [35_000_000.0, -10_000_000.0, 120_000_000.0] {
-            cue.set_alignment(offset);
+            cue.set_alignment(offset, 256, true);
             health.reset.store(true, Ordering::Relaxed);
             cue.render_at(&mut [0.0; 512], None);
             assert_eq!(health.master_delay.load(Ordering::Relaxed), delay);
         }
+    }
+
+    #[test]
+    fn alignment_averages_startup_outliers_and_waits_for_two_seconds() {
+        let health = Arc::new(OutputHealth::default());
+        let (_, input) = rtrb::RingBuffer::new(96000);
+        let mut cue = CueOutput::new(input, health.clone(), Instant::now(), 48000, 0.0);
+        cue.set_alignment(120_000_000.0, 256, true);
+        for _ in 1..374 {
+            cue.set_alignment(20_000_000.0, 256, true);
+            assert!(!cue.alignment_set);
+            assert_eq!(health.master_delay.load(Ordering::Relaxed), 0);
+        }
+        cue.set_alignment(20_000_000.0, 256, true);
+        assert!(cue.alignment_set);
+        let frames = health.master_delay.load(Ordering::Relaxed);
+        assert!((frames as f64 / 48.0 - 20.0).abs() < 1.0);
+        cue.set_alignment(120_000_000.0, 96000, true);
+        assert_eq!(health.master_delay.load(Ordering::Relaxed), frames);
+    }
+
+    #[test]
+    fn calibration_warmup_restarts_on_rebuffering_or_timing_source_change() {
+        let health = Arc::new(OutputHealth::default());
+        let (_, input) = rtrb::RingBuffer::new(96000);
+        let mut cue = CueOutput::new(input, health.clone(), Instant::now(), 48000, -10.0);
+        cue.set_alignment(100_000_000.0, 72000, true);
+        health.reset.store(true, Ordering::Relaxed);
+        cue.render_at(&mut [0.0; 512], None);
+        assert_eq!(cue.estimate_frames, 0);
+        cue.set_alignment(100_000_000.0, 72000, true);
+        cue.set_alignment(30_000_000.0, 48000, false);
+        assert!(!cue.alignment_set);
+        assert_eq!(cue.estimate_frames, 48000);
+        assert_eq!(health.offset_us.load(Ordering::Relaxed), i32::MIN);
+        cue.set_alignment(30_000_000.0, 48000, false);
+        assert_eq!(health.master_delay.load(Ordering::Relaxed), 960);
+        // Losing timestamps after calibration affects diagnostics, not the master tap.
+        cue.set_alignment(200_000_000.0, 96000, true);
+        assert_eq!(health.master_delay.load(Ordering::Relaxed), 960);
     }
 
     #[test]
@@ -551,6 +617,12 @@ mod tests {
                 .unwrap();
             }
             cue.render_at(&mut [0.0; 512], Some(1_200_000_000));
+            assert!(!cue.alignment_set);
+            let measured = cue.offset_ns.unwrap();
+            for _ in 1..375 {
+                cue.set_alignment(measured, 256, true);
+            }
+            assert!(cue.alignment_set);
             let m = health.master_delay.load(Ordering::Relaxed) as f64;
             let c = health.cue_delay.load(Ordering::Relaxed) as f64;
             let residual = (200.0 - 15.0 / 48.0 + correction) - (m - c) / 48.0;
@@ -579,6 +651,11 @@ mod tests {
         let mut cue = CueOutput::new(rx, health.clone(), Instant::now(), 48000, -10.0);
         cue.render_at(&mut [0.0; 512], None);
         assert_eq!(health.offset_us.load(Ordering::Relaxed), i32::MIN);
+        assert!(!cue.alignment_set);
+        let measured = cue.offset_ns.unwrap();
+        for _ in 1..375 {
+            cue.set_alignment(measured, 256, false);
+        }
         // At the first rendered sample there are 2368 frames still queued and
         // 17 frames of sinc history ahead. The -10 ms correction removes 480.
         assert_eq!(health.master_delay.load(Ordering::Relaxed), 2368 + 17 - 480);

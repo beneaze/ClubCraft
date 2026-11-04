@@ -365,6 +365,9 @@ pub struct Export {
 pub struct LiveEngine {
     pub handle: Option<EngineHandle>,
     pub error: Option<String>,
+    /// Canonical settings only when the requested setup started. A temporary
+    /// system-default fallback must never replace the user's persisted choice.
+    pub startup_audio_config: Option<AudioConfig>,
     pub cache: TrackCache,
     pub sep: Arc<LiveSeparator>,
     tx: Sender<LoadResult>,
@@ -389,12 +392,26 @@ pub struct LiveEngine {
 
 // Keep the legacy startup recovery for one-device setups. SeparateDevice must
 // never substitute the selected master or reroute cue onto the system speakers.
-fn start_audio<T>(config: AudioConfig, mut open: impl FnMut(AudioConfig) -> anyhow::Result<T>) -> anyhow::Result<(T, Option<String>)> {
+struct AudioStartup<T> {
+    handle: T,
+    warning: Option<String>,
+    used_fallback: bool,
+}
+
+impl<T> AudioStartup<T> {
+    fn config_to_save(&self, resolved: AudioConfig) -> Option<AudioConfig> {
+        if self.used_fallback { None } else { Some(resolved) }
+    }
+}
+
+fn start_audio<T>(config: AudioConfig, mut open: impl FnMut(AudioConfig) -> anyhow::Result<T>) -> anyhow::Result<AudioStartup<T>> {
     let separate = config.headphones == clubcraft_engine::HeadphoneRouting::SeparateDevice;
-    open(config).map(|handle| (handle, None)).or_else(|error| {
+    open(config).map(|handle| AudioStartup { handle, warning: None, used_fallback: false }).or_else(|error| {
         if separate { return Err(error); }
         log::warn!("Saved audio setup unavailable; trying system default: {error:#}");
-        open(AudioConfig::default()).map(|handle| (handle, Some(format!("Saved audio setup unavailable; using system default: {error:#}"))))
+        open(AudioConfig::default()).map(|handle| AudioStartup {
+            handle, warning: Some(format!("Saved audio setup unavailable; using system default: {error:#}")), used_fallback: true,
+        })
             .map_err(|fallback| fallback.context(format!("saved audio setup failed: {error:#}")))
     })
 }
@@ -410,14 +427,43 @@ mod audio_start_tests {
             HeadphoneRouting::Channels { master: [2, 3], cue: [0, 1] }] {
             let config = AudioConfig { device: Some("disconnected".into()), headphones: routing, ..AudioConfig::default() };
             let mut attempts = Vec::new();
-            let ((), warning) = start_audio(config.clone(), |candidate| {
+            let started = start_audio(config.clone(), |candidate| {
                 attempts.push(candidate.clone());
                 if candidate.device.is_some() { anyhow::bail!("device missing"); }
                 Ok(())
             }).unwrap();
             assert_eq!(attempts, [config, AudioConfig::default()]);
-            assert!(warning.unwrap().contains("using system default"));
+            assert!(started.warning.as_ref().unwrap().contains("using system default"));
+            assert!(started.used_fallback);
         }
+    }
+
+    #[test]
+    fn fallback_keeps_saved_config_across_exit_and_retries_the_original_device() {
+        let original = AudioConfig { device: Some("external-interface".into()), sample_rate: Some(48000),
+            buffer_frames: Some(512), headphones: HeadphoneRouting::Split, ..AudioConfig::default() };
+        let mut saved = original.clone();
+        // Both initial startup and a restart from Settings use the same optional
+        // canonical config; neither may sync the fallback into persisted audio.
+        for _ in 0..2 {
+            let started = start_audio(saved.clone(), |candidate| {
+                if candidate.device.is_some() { anyhow::bail!("interface unplugged"); }
+                Ok(candidate)
+            }).unwrap();
+            assert_eq!(started.handle, AudioConfig::default());
+            if let Some(config) = started.config_to_save(started.handle.clone()) { saved = config; }
+            saved = serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+            assert_eq!(saved, original);
+        }
+        let recovered = start_audio(saved.clone(), |candidate| {
+            assert_eq!(candidate.device, original.device);
+            let mut resolved = candidate;
+            resolved.device = Some("resolved-interface-id".into());
+            Ok(resolved)
+        }).unwrap();
+        let canonical = recovered.config_to_save(recovered.handle.clone()).unwrap();
+        assert_eq!(canonical.device.as_deref(), Some("resolved-interface-id"));
+        assert_eq!(canonical.sample_rate, original.sample_rate);
     }
 
     #[test]
@@ -436,10 +482,11 @@ mod audio_start_tests {
     fn working_setup_is_not_reopened_and_double_failure_is_reported() {
         let config = AudioConfig::default();
         let mut attempts = 0;
-        let ((), warning) = start_audio(config.clone(), |_| { attempts += 1; Ok(()) }).unwrap();
+        let started = start_audio(config.clone(), |_| { attempts += 1; Ok(()) }).unwrap();
         assert_eq!(attempts, 1);
-        assert!(warning.is_none());
-        let failure = start_audio::<()>(config, |_| anyhow::bail!("device missing")).unwrap_err();
+        assert!(started.warning.is_none());
+        assert!(!started.used_fallback);
+        let failure = start_audio::<()>(config, |_| anyhow::bail!("device missing")).err().unwrap();
         assert!(format!("{failure:#}").contains("saved audio setup failed"));
     }
 }
@@ -448,12 +495,13 @@ impl LiveEngine {
     pub fn start(config: AudioConfig) -> LiveEngine {
         let (tx, rx) = unbounded();
         let started = start_audio(config, Engine::start);
-        let (handle, error) = match started {
-            Ok((h, fallback_warning)) => {
-                let warning = fallback_warning.or_else(|| h.stream_info().warning);
-                (Some(h), warning)
+        let (handle, error, startup_audio_config) = match started {
+            Ok(started) => {
+                let config_to_save = started.config_to_save(started.handle.audio_config());
+                let warning = started.warning.or_else(|| started.handle.stream_info().warning);
+                (Some(started.handle), warning, config_to_save)
             }
-            Err(e) => (None, Some(format!("Audio output unavailable: {e:#}"))),
+            Err(e) => (None, Some(format!("Audio output unavailable: {e:#}")), None),
         };
         if let Some(h) = &handle {
             let _ = h.send(Command::SetAutoGain(true));
@@ -466,6 +514,7 @@ impl LiveEngine {
         LiveEngine {
             handle,
             error,
+            startup_audio_config,
             cache,
             sep: Arc::new(LiveSeparator::new()),
             tx,
