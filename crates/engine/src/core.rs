@@ -109,6 +109,10 @@ impl EngineCore {
 
     /// Change the output rate. Rebuilds the mixer and FX (allocates) — not for the audio thread.
     /// Deck state (tracks, positions, cues, loops) is preserved.
+    pub fn set_shared_output(&mut self, shared: bool) {
+        self.mixer.shared_output = shared;
+    }
+
     pub fn set_sample_rate(&mut self, sr: u32) {
         if sr == self.sr {
             return;
@@ -132,6 +136,7 @@ impl EngineCore {
         self.mixer.headphone_gain_db = old.headphone_gain_db;
         self.mixer.auto_gain = old.auto_gain;
         self.mixer.preview_output = old.preview_output;
+        self.mixer.shared_output = old.shared_output;
         self.mixer.limiter.enabled = old.limiter.enabled;
         self.mixer.limiter.set_ceiling_db(crate::dsp::gain_to_db(old.limiter.ceiling()));
         for d in self.decks.iter_mut() {

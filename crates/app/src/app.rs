@@ -674,7 +674,7 @@ impl App {
                 self.sh.preview.item = Some(item);
                 self.sh.preview.mix_serial = self.studio.mix_serial;
                 self.sh.preview.mashup_revision = self.studio.mashup.revision;
-                self.status = format!("Preview in {}: {}", self.prefs.preview_output.label(), self.sh.track(item.track).map(|t| t.display_name()).unwrap_or_default());
+                self.status = format!("Preview in {}: {}", self.sh.preview.output_label(), self.sh.track(item.track).map(|t| t.display_name()).unwrap_or_default());
             }
             Err(e) => self.status = format!("Preview: {e:#}"),
         }
@@ -699,6 +699,7 @@ impl App {
 
     fn reconcile_preview(&mut self) {
         use crate::preview::PreviewSource as P;
+        self.sh.preview.main_output = self.eng.handle.as_ref().is_some_and(|h| h.audio_config().headphones == clubcraft_engine::HeadphoneRouting::MainOutput);
         let Some(item) = self.sh.preview.item else { return; };
         let visible = match item.source {
             P::Library { playlist, mix } => self.view == View::Library && playlist == self.library.playlist && mix == self.library.mix,
@@ -1484,6 +1485,7 @@ impl eframe::App for App {
         self.handle_home_actions(home_actions);
         let mut sa = Vec::new();
         self.settings.ui(&ctx, self.eng.handle.as_ref(), &mut sa, &mut self.prefs);
+        if std::mem::take(&mut self.settings.stop_preview) { self.stop_preview(); }
         if std::mem::take(&mut self.settings.restart_audio) && self.eng.handle.is_none() {
             self.eng = crate::live::adapter::LiveEngine::start(self.settings.audio.clone());
             if self.eng.handle.is_some() {

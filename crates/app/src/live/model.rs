@@ -110,6 +110,7 @@ pub struct MixerUi {
     pub crossfader: f32,
     pub master: f32,
     pub headphone_mix: f32,
+    pub shared_output: bool,
     pub headphone_vol: f32,
     pub master_vu: [f32; 2],
     pub recording: bool,
@@ -191,6 +192,6 @@ pub enum LiveAction {
 
 impl Default for MixerUi {
     fn default() -> Self {
-        MixerUi { crossfader: 0.0, master: 0.8, headphone_mix: 0.0, headphone_vol: 0.7, master_vu: [0.0; 2], recording: false, record_secs: 0.0, master_bpm: None, automix: false, output_name: String::new() }
+        MixerUi { crossfader: 0.0, master: 0.8, headphone_mix: 0.0, shared_output: false, headphone_vol: 0.7, master_vu: [0.0; 2], recording: false, record_secs: 0.0, master_bpm: None, automix: false, output_name: String::new() }
     }
 }

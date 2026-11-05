@@ -1028,6 +1028,7 @@ pub fn mixer_ui(st: &EngineState, eng: &LiveEngine) -> MixerUi {
         crossfader: st.master.crossfader * 2.0 - 1.0,
         master: db_knob(st.master.gain_db, 0.8),
         headphone_mix: st.master.headphone_mix,
+        shared_output: eng.handle.as_ref().is_some_and(|h| h.audio_config().headphones == clubcraft_engine::HeadphoneRouting::MainOutput),
         headphone_vol: db_knob(st.master.headphone_gain_db, 0.7),
         master_vu: st.master.level.peak,
         recording: st.recording.active,

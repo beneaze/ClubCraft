@@ -227,6 +227,7 @@ pub struct Mixer {
     pub limiter: crate::dsp::Limiter,
     master_meter: Meter,
     pub headphone_mix: f32,
+    pub shared_output: bool,
     pub headphone_gain_db: f32,
     hp_meter: Meter,
     pub auto_gain: bool,
@@ -259,6 +260,7 @@ impl Mixer {
             limiter: crate::dsp::Limiter::new(sr),
             master_meter: Meter::new(sr),
             headphone_mix: 0.0,
+            shared_output: false,
             headphone_gain_db: 0.0,
             hp_meter: Meter::new(sr),
             auto_gain: true,
@@ -328,7 +330,7 @@ impl Mixer {
         self.process_channels(decks, ctxs, active, n, master, cue);
         let master = &mut master[..n * 2];
         let cue = &mut cue[..n * 2];
-        if self.preview_output == crate::command::PreviewOutput::Master {
+        if !self.shared_output && self.preview_output == crate::command::PreviewOutput::Master {
             for (m, p) in master.iter_mut().zip(&self.preview[..n * 2]) { *m += *p; }
         }
         self.master_gain.set(db_to_gain(self.master_gain_db));
@@ -340,10 +342,10 @@ impl Mixer {
         self.limiter.process(master);
         self.master_meter.process(master);
         // Only the Cue/Master control determines master monitoring, even with no PFL selected.
-        let mix = self.headphone_mix.clamp(0.0, 1.0);
+        let mix = if self.shared_output { 0.0 } else { self.headphone_mix.clamp(0.0, 1.0) };
         let hg = db_to_gain(self.headphone_gain_db);
         for ((c, m), p) in cue.iter_mut().zip(master.iter()).zip(&self.preview[..n * 2]) {
-            let preview = if self.preview_output == crate::command::PreviewOutput::Headphones { *p } else { 0.0 };
+            let preview = if self.shared_output || self.preview_output == crate::command::PreviewOutput::Headphones { *p } else { 0.0 };
             *c = soft_clip((*c * (1.0 - mix) + *m * mix + preview) * hg);
         }
         self.hp_meter.process(cue);
@@ -388,6 +390,24 @@ mod tests {
         mixer.channels[0].pfl = false;
         let (_, cue) = render(&mut mixer);
         assert!(cue.iter().all(|v| *v == 0.0));
+    }
+
+    #[test]
+    fn shared_output_never_duplicates_master_and_keeps_pfl_independent() {
+        let mut mixer = Mixer::new(44100.0, 1);
+        mixer.shared_output = true;
+        for blend in [0.0, 0.5, 1.0] {
+            mixer.headphone_mix = blend;
+            let (master, cue) = render(&mut mixer);
+            assert!(master.iter().any(|v| v.abs() > 0.01));
+            assert!(cue.iter().all(|v| *v == 0.0));
+        }
+        mixer.channels[0].fader = 0.0;
+        for _ in 0..20 { render(&mut mixer); }
+        mixer.channels[0].pfl = true;
+        let (master, cue) = render(&mut mixer);
+        assert!(master.iter().all(|v| v.abs() < 1e-6));
+        assert!(cue.iter().any(|v| v.abs() > 0.01));
     }
 
     #[test]

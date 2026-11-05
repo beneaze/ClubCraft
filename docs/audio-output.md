@@ -119,10 +119,20 @@ alignment accuracy.
 
 ## Browser previews
 
-Settings > Audio output > Preview output selects Master (the default, including older
-preferences) or Headphones. Headphone preview is an explicit opt-in. Changing this preference stops the current preview and does not
-restart the output device. It applies to Library, Studio Playlist and Mashups, Add tracks,
-and the Live browser and Automix queue.
+Settings > Audio output contains Master and Preview / headphones sections, with a device
+and channel pair for each output. Main output uses the master's physical device and channels
+while keeping MASTER and PHONES volumes independent. List previews and selected deck CUE
+are summed with master only at the physical output, after recording, with a final limiter.
+CUE/MIX is unavailable in this mode, so master is never added twice. Deck CUE can make an
+already audible deck louder; all monitoring on this output is audible to the audience.
+New installations use Main output by default. Existing settings are preserved until Apply.
+Selecting a separate device supports its available stereo channel pairs; on the same device,
+master and cue pairs must not overlap. No setting silently moves the master channel pair.
+Sample rate, buffer and alignment correction are under Advanced audio settings.
+Changes apply together with Apply; failed changes preserve the running output and preview
+routing. Discard restores saved selections. Successful Apply stops any active preview.
+A disconnected headphone output never falls back to master. These settings apply to Library,
+Studio Playlist and Mashups, Add tracks, and the Live browser and Automix queue.
 
 Previews have their own two private decks and conductor. They never stop or reuse the main
 Studio or Live decks. Headphone previews are added after Cue/Master blending, before the
@@ -136,8 +146,8 @@ track, at native tempo and key.
 ## Live headphone monitoring
 
 The headphone buttons beside each deck's filter select its pre-fader CUE signal; they do
-not change its master output. CUE?MIX blends selected CUE channels with the master. At the
+not change its master output. CUE/MIX blends selected CUE channels with the master. At the
 CUE end, headphones are silent when all deck headphone buttons are off (unless an independent
-headphone preview is playing). Master monitoring is enabled only by turning CUE?MIX towards
+headphone preview is playing). Master monitoring is enabled only by turning CUE/MIX towards
 MIX; it is never substituted automatically when no deck is selected. PHONES controls the
 combined headphone volume.

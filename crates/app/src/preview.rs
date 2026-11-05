@@ -30,19 +30,21 @@ pub struct PreviewItem {
 pub struct PreviewState {
     pub item: Option<PreviewItem>,
     pub output: PreviewOutput,
+    pub main_output: bool,
     pub loading: bool,
     pub mix_serial: u64,
     pub mashup_revision: u64,
 }
 
 impl PreviewState {
+    pub fn output_label(&self) -> &'static str { if self.main_output { "Main output" } else { self.output.label() } }
     pub fn playing(&self, source: PreviewSource, track: TrackId, row: usize) -> bool {
         self.item == Some(PreviewItem { source, track, row })
     }
 
     pub fn label(&self, ui: &mut egui::Ui) {
         ui.label(
-            egui::RichText::new(format!("Preview: {}", self.output.label()))
+            egui::RichText::new(format!("Preview: {}", self.output_label()))
                 .small()
                 .color(crate::theme::TEXT_DIM),
         );
@@ -60,10 +62,10 @@ impl PreviewState {
             } else if item.source == PreviewSource::Mashups {
                 format!(
                     "Preview vocals over this instrumental in {}",
-                    self.output.label()
+                    self.output_label()
                 )
             } else {
-                format!("Preview in {} from the first drop", self.output.label())
+                format!("Preview in {} from the first drop", self.output_label())
             })
     }
 }

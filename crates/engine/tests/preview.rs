@@ -336,3 +336,34 @@ fn main_transport_cannot_stop_the_preview() {
     assert!(core.snapshot().preview.playing);
     assert!(cue.iter().any(|v| v.abs() > 0.01));
 }
+
+#[test]
+fn main_output_preview_has_independent_volume_and_never_enters_recording() {
+    for gain in [-60.0, 0.0, 12.0] {
+        let mut core = EngineCore::new(SR, 2);
+        core.set_shared_output(true);
+        core.apply(Command::SetMasterGain(gain));
+        core.apply(Command::SetHeadphoneMix(1.0));
+        let t = audio();
+        // Also verifies migration of the old Master preview preference.
+        let _p = start(&mut core, PreviewOutput::Master, &t);
+        let (producer, mut recorded) = rtrb::RingBuffer::new(FRAMES * 4);
+        core.apply(Command::SetRecorder(Some(producer)));
+        let (master, cue) = block(&mut core);
+        assert!(master.iter().all(|v| *v == 0.0));
+        assert!(cue.iter().any(|v| v.abs() > 0.01));
+        while let Ok(sample) = recorded.pop() { assert_eq!(sample, 0.0); }
+    }
+    let t = audio();
+    let mut loud = EngineCore::new(SR, 2);
+    let mut quiet = EngineCore::new(SR, 2);
+    loud.set_shared_output(true);
+    quiet.set_shared_output(true);
+    quiet.apply(Command::SetHeadphoneGain(-20.0));
+    let _a = start(&mut loud, PreviewOutput::Master, &t);
+    let _b = start(&mut quiet, PreviewOutput::Master, &t);
+    let (_, a) = block(&mut loud);
+    let (_, b) = block(&mut quiet);
+    let energy = |x: &[f32]| x.iter().map(|v| v * v).sum::<f32>();
+    assert!((energy(&b) / energy(&a) - 0.01).abs() < 0.002);
+}
