@@ -189,6 +189,7 @@ impl App {
         let audio_cfg: clubcraft_engine::AudioConfig = cc.storage.and_then(|s| eframe::get_value(s, "audio")).unwrap_or_default();
         let midi_port: Option<String> = cc.storage.and_then(|s| eframe::get_value(s, "midi_port"));
         let mut app = App { lib, sh, jobs, view, library: LibraryView::default(), status: String::new(), devctl: crate::devctl::DevCtl::from_env(), live: Default::default(), decks: vec![Default::default(); 2], mixer: Default::default(), browser: LibraryView::default(), studio: Default::default(), mixes: Vec::new(), eng: crate::live::adapter::LiveEngine::start(audio_cfg.clone()), settings: crate::settings::Settings::new(audio_cfg, midi_port), home: Default::default(), prefs, applied_prefs: None, menu: crate::menu::AppMenu::install(&cc.egui_ctx), ui_ctx_cmd: None, mix_summaries: Vec::new(), prepared: (-1, 0), preview_serial: 0, stems_queued: Default::default(), full_stems_queued: Default::default(), pending_export: None, queued: Default::default(), external: (std::fs::metadata(crate::mcp::change_marker()).and_then(|m| m.modified()).ok(), 0.0) };
+        if let Some(config) = &app.eng.startup_audio_config { app.settings.sync_audio(config.clone()); }
         app.settings.connect_midi(app.eng.handle.as_ref());
         if let Some(e) = &app.eng.error {
             app.status = e.clone();
@@ -1436,6 +1437,15 @@ impl eframe::App for App {
         self.handle_home_actions(home_actions);
         let mut sa = Vec::new();
         self.settings.ui(&ctx, self.eng.handle.as_ref(), &mut sa, &mut self.prefs);
+        if std::mem::take(&mut self.settings.restart_audio) && self.eng.handle.is_none() {
+            self.eng = crate::live::adapter::LiveEngine::start(self.settings.audio.clone());
+            if self.eng.handle.is_some() {
+                if let Some(config) = &self.eng.startup_audio_config { self.settings.sync_audio(config.clone()); }
+                self.settings.connect_midi(self.eng.handle.as_ref());
+                self.applied_prefs = None;
+            }
+            self.settings.message = self.eng.error.clone().unwrap_or_else(|| "Audio output started".into());
+        }
         self.apply_prefs(&ctx);
         for a in sa {
             match a {

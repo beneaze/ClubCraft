@@ -369,7 +369,9 @@ fn cpu_budget_4_decks_keylock_stems_fx() {
     let mut m = vec![0f32; block * 2];
     let mut c = vec![0f32; block * 2];
     let blocks = (secs * 48000.0) as usize / block;
-    // thread CPU time (excludes time the OS spent running other processes)
+    // Unix supplies thread CPU time. Elsewhere use monotonic elapsed time for
+    // diagnostics, without enforcing a CPU threshold affected by other processes.
+    #[cfg(unix)]
     fn cpu_now() -> f64 {
         let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
         // SAFETY: clock_gettime only writes the timespec we pass.
@@ -378,6 +380,11 @@ fn cpu_budget_4_decks_keylock_stems_fx() {
             libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts)
         };
         ts.tv_sec as f64 + ts.tv_nsec as f64 * 1e-9
+    }
+    #[cfg(not(unix))]
+    fn cpu_now() -> f64 {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        START.get_or_init(std::time::Instant::now).elapsed().as_secs_f64()
     }
     let mut times = Vec::with_capacity(blocks);
     let wall = std::time::Instant::now();
@@ -388,7 +395,8 @@ fn cpu_budget_4_decks_keylock_stems_fx() {
         times.push(cpu_now() - tb);
     }
     let el = cpu_now() - t0;
-    eprintln!("wall clock {:.3} s (machine load affects this), thread CPU {:.3} s", wall.elapsed().as_secs_f64(), el);
+    let timing = if cfg!(unix) { "thread CPU" } else { "elapsed wall time" };
+    eprintln!("wall clock {:.3} s (machine load affects this), {timing} {:.3} s", wall.elapsed().as_secs_f64(), el);
     let first = times[0];
     let mut sorted: Vec<f64> = times[4..].to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -401,7 +409,7 @@ fn cpu_budget_4_decks_keylock_stems_fx() {
     let rt = el / secs;
     let block_budget = block as f64 / 48000.0;
     eprintln!(
-        "CPU: 10 s of 4 decks (keylock + stems + 2 FX each) in {:.3} s CPU → {:.2} % of one core total, {:.2} % per deck; worst block {:.3} ms of {:.3} ms budget ({:.1} %)",
+        "10 s of 4 decks (keylock + stems + 2 FX each) in {:.3} s {timing} → {:.2} % realtime factor total, {:.2} % per deck; worst block {:.3} ms of {:.3} ms budget ({:.1} %)",
         el,
         rt * 100.0,
         rt * 25.0,
@@ -409,7 +417,7 @@ fn cpu_budget_4_decks_keylock_stems_fx() {
         block_budget * 1000.0,
         worst_block / block_budget * 100.0
     );
-    if !cfg!(debug_assertions) {
+    if !cfg!(debug_assertions) && cfg!(unix) {
         assert!(rt < 0.25, "realtime factor {rt}");
     }
 }

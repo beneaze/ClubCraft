@@ -35,16 +35,17 @@ pub fn lock<T>(v: &[T]) -> bool {
 
 /// Undo [`lock`].
 pub fn unlock<T>(v: &[T]) {
-    if v.is_empty() {
-        return;
-    }
     #[cfg(unix)]
     {
-        // SAFETY: as in `lock`.
-        unsafe {
-            libc::munlock(v.as_ptr().cast(), std::mem::size_of_val(v));
+        if !v.is_empty() {
+            // SAFETY: as in `lock`.
+            unsafe {
+                libc::munlock(v.as_ptr().cast(), std::mem::size_of_val(v));
+            }
         }
     }
+    #[cfg(not(unix))]
+    let _ = v;
 }
 
 /// Give the calling thread a lower CPU priority, for background work (stem separation,
