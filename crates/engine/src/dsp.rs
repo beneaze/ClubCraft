@@ -244,6 +244,12 @@ impl Eq3 {
         Eq3 { ch: [c, c], gains: [Smoother::new(1.0, 0.01, sample_rate); 3] }
     }
 
+    pub(crate) fn clear_history(&mut self) {
+        for c in &mut self.ch {
+            for band in [&mut c.lp1a, &mut c.lp1b, &mut c.ap2, &mut c.hp1a, &mut c.hp1b, &mut c.lp2a, &mut c.lp2b, &mut c.hp2a, &mut c.hp2b] { band.reset(); }
+        }
+    }
+
     /// Knob positions 0..1 (0 = kill, 0.5 = unity, 1 = +6 dB).
     pub fn set_knobs(&mut self, low: f32, mid: f32, high: f32) {
         self.gains[0].set(eq_knob_gain(low));
@@ -332,6 +338,13 @@ pub struct DjFilter {
 impl DjFilter {
     pub fn new(sr: f32) -> Self {
         DjFilter { sr, knob: Smoother::new(0.5, 0.03, sr), resonance: 0.3, s1: Svf::default(), s2: Svf::default(), counter: 0, wet: 0.0, hp: false }
+    }
+
+    pub(crate) fn clear_history(&mut self) {
+        self.s1.reset();
+        self.s2.reset();
+        self.wet = 0.0;
+        self.counter = 0;
     }
 
     /// Jump to the knob without smoothing.

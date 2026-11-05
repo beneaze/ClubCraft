@@ -180,6 +180,10 @@ impl MixPlayer {
         }
     }
 
+    pub fn schedule_id(&self) -> u64 {
+        self.schedule_id
+    }
+
     pub fn timeline(&self) -> &MixTimeline {
         &self.timeline
     }
@@ -241,6 +245,7 @@ impl MixPlayer {
     /// Stop; the audio thread hands every resident track back for dropping.
     pub fn stop(&mut self, sink: &mut dyn CommandSink) -> Result<()> {
         self.schedule_id = 0;
+        if let Some(pf) = &self.prefetch { pf.want.lock().clear(); }
         self.target = None;
         self.sent.clear();
         sink.submit(Command::MixStop)
@@ -394,5 +399,27 @@ impl MixPlayer {
     /// Current mix time from an engine snapshot.
     pub fn position(state: &EngineState) -> f64 {
         state.mix.time
+    }
+}
+
+/// Routes an existing mix player exclusively to the browser preview renderer.
+pub struct PreviewSink<'a> {
+    pub sink: &'a mut dyn CommandSink,
+    pub output: crate::command::PreviewOutput,
+}
+
+impl CommandSink for PreviewSink<'_> {
+    fn submit(&mut self, cmd: Command) -> Result<()> {
+        let cmd = match cmd {
+            Command::PlayMix { schedule, start } => Command::PreviewPlay { schedule, start, output: self.output },
+            Command::MixStop => Command::PreviewStop,
+            Command::MixSeek(t) => Command::PreviewSeek(t),
+            Command::MixPause => Command::PreviewPause,
+            Command::MixResume => Command::PreviewResume,
+            Command::SetMixLanes(lanes) => Command::PreviewSetLanes(lanes),
+            Command::MixTrackReady { schedule, index, track } => Command::PreviewTrackReady { schedule, index, track },
+            _ => return Err(anyhow!("unsupported preview transport command")),
+        };
+        self.sink.submit(cmd)
     }
 }

@@ -21,7 +21,7 @@ pub enum Target {
 }
 
 pub enum MashupAction {
-    Preview(Match),
+    Preview(Match, usize),
     StopPreview,
     NewMix(Match),
     Insert(Match),
@@ -56,6 +56,7 @@ pub struct MashupView {
     transition_bars: Option<(i32, i32)>,
     job: Option<Job>,
     results: Vec<Match>,
+    pub revision: u64,
     message: String,
     pub previewing: Option<usize>,
     run_next_frame: bool,
@@ -81,6 +82,7 @@ impl Default for MashupView {
             transition_bars: None,
             job: None,
             results: Vec::new(),
+            revision: 0,
             message: String::new(),
             previewing: None,
             run_next_frame: false,
@@ -116,6 +118,7 @@ impl MashupView {
         self.inst_only = None;
         self.transition_bars = None;
         self.auto_phrase = true;
+        self.revision = self.revision.wrapping_add(1);
         self.results.clear();
         self.message.clear();
         self.vocal = vocal.filter(|id| sh.analyses.get(id).is_some_and(|a| a.stems_model.is_some()));
@@ -207,9 +210,14 @@ impl MashupView {
             })
             .ok();
         self.job = Some(Job { rx, progress, cancel });
+        self.revision = self.revision.wrapping_add(1);
         self.results.clear();
         self.previewing = None;
         self.message.clear();
+    }
+
+    pub fn has_preview_row(&self, row: usize, track: TrackId) -> bool {
+        self.results.get(row).is_some_and(|m| m.vocal_track == track)
     }
 
     /// Close the finder (cancels a running search and stops a preview).
@@ -243,13 +251,13 @@ impl MashupView {
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
             }
         }
-        if !preview_playing {
-            self.previewing = None;
-        }
+        self.previewing = sh.preview.item.filter(|p| p.source == crate::preview::PreviewSource::Mashups && sh.preview.mashup_revision == self.revision).map(|p| p.row);
+        if !preview_playing { self.previewing = None; }
         self.contents(ui, sh, mix, out);
     }
 
     fn contents(&mut self, ui: &mut Ui, sh: &Shared, mix: &Mix, out: &mut Vec<MashupAction>) {
+        sh.preview.label(ui);
         let with_stems: Vec<TrackId> = sh.tracks.iter().filter(|t| sh.analyses.get(&t.id).is_some_and(|a| a.stems_model.is_some() && a.grid.is_some())).map(|t| t.id).collect();
         // ------------------------------------------------ query
         let mut close = false;
@@ -411,12 +419,12 @@ impl MashupView {
                     ui.label(m.learned.map(|l| format!("{:.0}", l * 100.0)).unwrap_or_else(|| "–".into()));
                     ui.horizontal(|ui| {
                         let playing = self.previewing == Some(i);
-                        if ui.button(if playing { "■" } else { "▶" }).on_hover_text(if playing { "Stop" } else { "Preview: vocals over this instrumental" }).clicked() {
+                        if sh.preview.button(ui, crate::preview::PreviewItem { source: crate::preview::PreviewSource::Mashups, track: m.vocal_track, row: i }, true).on_hover_text(if playing { "Stop" } else { "Preview: vocals over this instrumental" }).clicked() {
                             if playing {
                                 out.push(MashupAction::StopPreview);
                                 self.previewing = None;
                             } else {
-                                out.push(MashupAction::Preview(m.clone()));
+                                out.push(MashupAction::Preview(m.clone(), i));
                                 self.previewing = Some(i);
                             }
                         }

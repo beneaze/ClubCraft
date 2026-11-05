@@ -22,6 +22,7 @@ mod menu;
 mod pipeline;
 mod platform;
 mod prefs;
+mod preview;
 mod settings;
 mod studio;
 mod studio_timeline;

@@ -124,6 +124,7 @@ impl AudioFormat {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Prefs {
+    pub preview_output: clubcraft_engine::command::PreviewOutput,
     // ------------------------------------------------------------ general / display
     pub key_notation: KeyNotation,
     /// UI zoom (1.0 = 100 %).
@@ -187,6 +188,7 @@ pub struct Prefs {
 impl Default for Prefs {
     fn default() -> Self {
         Prefs {
+            preview_output: Default::default(),
             key_notation: KeyNotation::Camelot,
             ui_scale: 1.0,
             start_on_home: true,
@@ -327,6 +329,17 @@ impl Prefs {
 #[cfg(test)]
 mod migration_tests {
     use super::*;
+
+    #[test]
+    fn preview_output_defaults_to_master_and_round_trips() {
+        use clubcraft_engine::command::PreviewOutput;
+        let old: Prefs = serde_json::from_str(r#"{"version": 3}"#).unwrap();
+        assert_eq!(old.preview_output, PreviewOutput::Master);
+        assert_eq!(Prefs::default().preview_output, PreviewOutput::Master);
+        let prefs = Prefs { preview_output: PreviewOutput::Headphones, ..Default::default() };
+        let loaded: Prefs = serde_json::from_str(&serde_json::to_string(&prefs).unwrap()).unwrap();
+        assert_eq!(loaded.preview_output, PreviewOutput::Headphones);
+    }
 
     #[test]
     fn old_files_get_the_white_accent() {

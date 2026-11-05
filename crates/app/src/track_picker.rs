@@ -88,9 +88,8 @@ impl TrackPicker {
         if !self.open {
             return;
         }
-        if !preview_playing {
-            self.previewing = None;
-        }
+        self.previewing = sh.preview.item.filter(|p| p.source == crate::preview::PreviewSource::AddTracks).map(|p| p.track);
+        if !preview_playing { self.previewing = None; }
         let last_a = last.and_then(|id| sh.analyses.get(&id));
         let q = self.query.to_lowercase();
         let mut rows: Vec<(&Track, Option<&Analysis>, Option<(f32, f64)>)> = sh
@@ -162,6 +161,7 @@ impl TrackPicker {
                 });
             });
             ui.add_space(10.0);
+            sh.preview.label(ui);
             self.preview_strip(ui, sh, preview_pos, out);
             ui.add_space(10.0);
             // the track table
@@ -209,7 +209,7 @@ impl TrackPicker {
                         row.set_selected(sel || playing);
                         let mut preview_click = false;
                         row.col(|ui| {
-                            preview_click = crate::widgets::play_button(ui, playing, a.is_some(), 24.0).on_hover_text(if playing { "Stop" } else { "Listen from the drop" }).clicked();
+                            preview_click = sh.preview.button(ui, crate::preview::PreviewItem { source: crate::preview::PreviewSource::AddTracks, track: t.id, row: 0 }, true).on_hover_text(if playing { "Stop" } else { "Listen from the drop" }).clicked();
                         });
                         row.col(|ui| {
                             if tick_box(ui, sel).clicked() {

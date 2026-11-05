@@ -562,7 +562,7 @@ impl LiveView {
             if widgets::knob(ui, &mut f, 0.0..=1.0, 0.5, "FILTER", Color32::from_rgb(120, 220, 255), 31.0).changed() {
                 out.push(LiveAction::Filter(i, f));
             }
-            if widgets::toggle(ui, d.pfl, "🎧", accent, vec2(40.0, 20.0)).on_hover_text("Headphone cue").clicked() {
+            if widgets::toggle(ui, d.pfl, "🎧", accent, vec2(40.0, 20.0)).on_hover_text("Monitor this deck before its fader. CUE·MIX controls how much master is heard.").clicked() {
                 out.push(LiveAction::Pfl(i, !d.pfl));
             }
             ui.add_space(8.0);
@@ -599,9 +599,11 @@ impl LiveView {
             ui.horizontal(|ui| {
                 ui.add_space((ui.available_width() - 72.0).max(0.0) / 2.0);
                 let mut hm = m.headphone_mix;
-                if widgets::knob(ui, &mut hm, 0.0..=1.0, 0.0, "CUE·MIX", theme::TEXT, 32.0).changed() {
+                ui.add_enabled_ui(!m.shared_output, |ui| {
+                if widgets::knob(ui, &mut hm, 0.0..=1.0, 0.0, "CUE·MIX", theme::TEXT, 32.0).on_hover_text("CUE: selected decks only; MIX: master. With no CUE selected, the CUE end is silent.").changed() {
                     out.push(LiveAction::HeadphoneMix(hm));
                 }
+                }).response.on_disabled_hover_text("Master already plays through Main output.");
                 let mut hv = m.headphone_vol;
                 if widgets::knob(ui, &mut hv, 0.0..=1.0, 0.7, "PHONES", theme::TEXT, 32.0).changed() {
                     out.push(LiveAction::HeadphoneVol(hv));

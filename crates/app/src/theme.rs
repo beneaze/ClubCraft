@@ -1,6 +1,9 @@
 use eframe::egui::{self, Color32, CornerRadius, FontFamily, FontId, Stroke, TextStyle, Visuals};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
+/// Compact Play/Stop control shared by browser preview lists.
+pub const PREVIEW_BUTTON_SIZE: f32 = 18.0;
+
 pub const BG: Color32 = Color32::from_rgb(14, 15, 18);
 pub const PANEL: Color32 = Color32::from_rgb(24, 26, 31);
 pub const PANEL_HI: Color32 = Color32::from_rgb(34, 37, 44);

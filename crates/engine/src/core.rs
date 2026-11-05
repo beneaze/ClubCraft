@@ -39,6 +39,7 @@ pub struct EngineCore {
     master: Option<DeckId>,
     quantize_beats: f64,
     conductor: Conductor,
+    preview: crate::preview::PreviewRenderer,
     garbage: Option<rtrb::Producer<Garbage>>,
     recorder: Option<rtrb::Producer<f32>>,
     rec_frames: u64,
@@ -74,6 +75,7 @@ impl EngineCore {
             master: None,
             quantize_beats: 1.0,
             conductor: Conductor::default(),
+            preview: crate::preview::PreviewRenderer::new(sample_rate),
             garbage: None,
             recorder: None,
             rec_frames: 0,
@@ -107,6 +109,10 @@ impl EngineCore {
 
     /// Change the output rate. Rebuilds the mixer and FX (allocates) — not for the audio thread.
     /// Deck state (tracks, positions, cues, loops) is preserved.
+    pub fn set_shared_output(&mut self, shared: bool) {
+        self.mixer.shared_output = shared;
+    }
+
     pub fn set_sample_rate(&mut self, sr: u32) {
         if sr == self.sr {
             return;
@@ -129,12 +135,15 @@ impl EngineCore {
         self.mixer.headphone_mix = old.headphone_mix;
         self.mixer.headphone_gain_db = old.headphone_gain_db;
         self.mixer.auto_gain = old.auto_gain;
+        self.mixer.preview_output = old.preview_output;
+        self.mixer.shared_output = old.shared_output;
         self.mixer.limiter.enabled = old.limiter.enabled;
         self.mixer.limiter.set_ceiling_db(crate::dsp::gain_to_db(old.limiter.ceiling()));
         for d in self.decks.iter_mut() {
             d.set_output_rate(sr);
         }
         self.ctxs = [FxCtx::free(sr as f32); MAX_DECKS];
+        self.preview.set_sample_rate(sr);
         self.sr = sr;
     }
 
@@ -388,6 +397,30 @@ impl EngineCore {
                     }
                 }
             }
+            PreviewPlay { schedule, start, output } => {
+                if schedule.decks == [0, 1] && !schedule.is_empty() {
+                    self.mixer.preview_output = output;
+                    let garbage = &mut self.garbage;
+                    let old = self.preview.start(schedule, start, &mut |t| Self::dispose(garbage, Garbage::Track(t)));
+                    if let Some(old) = old { Self::dispose(&mut self.garbage, Garbage::Schedule(old)); }
+                } else { Self::dispose(&mut self.garbage, Garbage::Schedule(schedule)); }
+            }
+            PreviewStop => {
+                let garbage = &mut self.garbage;
+                let old = self.preview.stop(&mut |t| Self::dispose(garbage, Garbage::Track(t)));
+                if let Some(old) = old { Self::dispose(&mut self.garbage, Garbage::Schedule(old)); }
+            }
+            PreviewSeek(t) => self.preview.conductor.seek(t),
+            PreviewPause => self.preview.conductor.pause(&mut self.preview.decks, &mut self.preview.mixer),
+            PreviewResume => {
+                if self.preview.conductor.sched.is_some() { self.preview.conductor.playing = true; }
+            }
+            PreviewSetLanes(lanes) => self.preview.conductor.set_lanes(lanes),
+            PreviewTrackReady { schedule, index, track } => {
+                if let Some(t) = self.preview.conductor.set_track(schedule, index, track) {
+                    Self::dispose(&mut self.garbage, Garbage::Track(t));
+                }
+            }
             PlayMix { schedule, start } => {
                 let mut ok = schedule.decks.iter().all(|d| *d < MAX_DECKS) && schedule.decks[0] != schedule.decks[1];
                 ok &= !schedule.is_empty();
@@ -565,6 +598,10 @@ impl EngineCore {
             }
         }
         let tm = std::time::Instant::now();
+        {
+            let garbage = &mut self.garbage;
+            self.preview.process(self.sr, n, &mut self.mixer.preview, &mut |t| Self::dispose(garbage, Garbage::Track(t)));
+        }
         self.mixer.process(&mut self.deck_bufs, &self.ctxs, active, n, &mut self.master_buf, &mut self.cue_buf);
         self.prof[6] += tm.elapsed().as_micros() as u32;
         if let Some(rec) = &mut self.recorder {
@@ -644,6 +681,7 @@ impl EngineCore {
         st.quantize_beats = self.quantize_beats;
         st.auto_gain = m.auto_gain;
         st.mix = self.conductor.state();
+        st.preview = self.preview.state();
         st.recording.active = self.recorder.is_some();
         st.recording.seconds = self.rec_frames as f64 / self.sr as f64;
         st.recording.dropped = self.rec_dropped;

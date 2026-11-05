@@ -24,6 +24,34 @@ fn device_label(devices: &[DeviceInfo], selected: Option<&str>, empty: &str) -> 
     }
 }
 
+fn output_channels(devices: &[DeviceInfo], id: Option<&str>) -> u16 {
+    devices.iter().find(|d| id.map_or(d.is_default, |id| d.id == id || d.name == id))
+        .map_or(4, |d| d.max_channels)
+}
+
+fn master_pair(cfg: &AudioConfig) -> [u16; 2] {
+    match cfg.headphones { HeadphoneRouting::Channels { master, .. } => master, _ => cfg.master_pair }
+}
+
+fn cue_pair(cfg: &AudioConfig) -> [u16; 2] {
+    match cfg.headphones {
+        HeadphoneRouting::Channels { cue, .. } => cue,
+        HeadphoneRouting::Auto => [2, 3],
+        _ => cfg.headphone_pair,
+    }
+}
+
+fn channel_pair(ui: &mut Ui, id: &str, pair: &mut [u16; 2], channels: u16, blocked: Option<[u16; 2]>) {
+    if channels == 2 && *pair == [0, 1] { ui.label("1/2 (stereo)"); return; }
+    egui::ComboBox::from_id_salt(id).selected_text(format!("{}/{}", pair[0] + 1, pair[1] + 1)).show_ui(ui, |ui| {
+        for left in (0..channels.saturating_sub(1)).step_by(2) {
+            let candidate = [left, left + 1];
+            let overlap = blocked.is_some_and(|other| candidate.iter().any(|c| other.contains(c)));
+            ui.add_enabled_ui(!overlap, |ui| { ui.selectable_value(pair, candidate, format!("{}/{}", left + 1, left + 2)); });
+        }
+    });
+}
+
 pub fn mapping_path() -> std::path::PathBuf {
     clubcraft_core::paths::data_dir().join("midi-mapping.json")
 }
@@ -74,7 +102,9 @@ pub struct Settings {
     pub open: bool,
     pub audio: AudioConfig,
     audio_draft: AudioConfig,
+    preview_draft: Option<clubcraft_engine::command::PreviewOutput>,
     pub restart_audio: bool,
+    pub stop_preview: bool,
     devices: Vec<DeviceInfo>,
     midi_ports: Vec<String>,
     pub midi_port: Option<String>,
@@ -122,8 +152,10 @@ impl Settings {
         Settings {
             open: false,
             audio_draft: audio.clone(),
+            preview_draft: None,
             audio,
             restart_audio: false,
+            stop_preview: false,
             devices: vec![],
             midi_ports: vec![],
             midi_port,
@@ -213,7 +245,7 @@ impl Settings {
                             Tab::General => general_ui(ui, prefs),
                             Tab::Decks => decks_ui(ui, prefs),
                             Tab::Mixer => mixer_ui(ui, prefs),
-                            Tab::Audio => self.audio_ui(ui, handle),
+                            Tab::Audio => self.audio_ui(ui, handle, prefs),
                             Tab::Waveforms => waveforms_ui(ui, prefs),
                             Tab::Analysis => analysis_ui(ui, prefs, actions),
                             Tab::Studio => studio_ui(ui, prefs),
@@ -233,82 +265,102 @@ impl Settings {
         }
     }
 
-    fn audio_ui(&mut self, ui: &mut egui::Ui, handle: Option<&EngineHandle>) {
-        section(ui, "Audio output");
+    fn audio_ui(&mut self, ui: &mut egui::Ui, handle: Option<&EngineHandle>, prefs: &mut Prefs) {
+        use clubcraft_engine::command::PreviewOutput;
         if self.devices.is_empty() {
             self.devices = clubcraft_engine::devices().unwrap_or_default();
         }
         let mut cfg = self.audio_draft.clone();
-        egui::Grid::new("audio").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
-            ui.label("Master device");
-            ui.horizontal(|ui| {
-                let label = device_label(&self.devices, cfg.device.as_deref(), "System default");
-                egui::ComboBox::from_id_salt("dev").width(300.0).selected_text(label).show_ui(ui, |ui| {
-                    ui.selectable_value(&mut cfg.device, None, "System default");
-                    for d in &self.devices {
-                        ui.add_enabled_ui(!d.id.is_empty(), |ui| {
-                            ui.selectable_value(&mut cfg.device, Some(d.id.clone()), device_choice(d, &self.devices));
-                        });
-                    }
-                });
-                if ui.small_button("↻").on_hover_text("Rescan devices").clicked() {
-                    self.devices = clubcraft_engine::devices().unwrap_or_default();
+        let mut preview = *self.preview_draft.get_or_insert(prefs.preview_output);
+        section(ui, "Master");
+        let mut master = master_pair(&cfg);
+        let mut cue = cue_pair(&cfg);
+        egui::Grid::new("master_output").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+            ui.label("Device");
+            egui::ComboBox::from_id_salt("dev").width(300.0).selected_text(device_label(&self.devices, cfg.device.as_deref(), "System default")).show_ui(ui, |ui| {
+                ui.selectable_value(&mut cfg.device, None, "System default");
+                for d in &self.devices {
+                    ui.add_enabled_ui(!d.id.is_empty(), |ui| { ui.selectable_value(&mut cfg.device, Some(d.id.clone()), device_choice(d, &self.devices)); });
                 }
             });
             ui.end_row();
-            ui.label("Sample rate");
-            egui::ComboBox::from_id_salt("sr").selected_text(cfg.sample_rate.map(|r| format!("{r} Hz")).unwrap_or("Auto".into())).show_ui(ui, |ui| {
-                ui.selectable_value(&mut cfg.sample_rate, None, "Auto");
-                ui.selectable_value(&mut cfg.sample_rate, Some(44100), "44100 Hz");
-                ui.selectable_value(&mut cfg.sample_rate, Some(48000), "48000 Hz");
-            });
+            ui.label("Channels");
+            channel_pair(ui, "master_channels", &mut master, output_channels(&self.devices, cfg.device.as_deref()), None);
             ui.end_row();
-            ui.label("Buffer");
-            egui::ComboBox::from_id_salt("buf").selected_text(cfg.buffer_frames.map(|b| format!("{b} frames")).unwrap_or("Device default".into())).show_ui(ui, |ui| {
-                for b in [128u32, 256, 512, 1024] {
-                    let sr = cfg.sample_rate.or_else(|| handle.map(|h| h.stream_info().sample_rate)).unwrap_or(44100);
-                    ui.selectable_value(&mut cfg.buffer_frames, Some(b), format!("{b} frames ({:.1} ms)", b as f64 * 1000.0 / sr as f64));
-                }
-                ui.selectable_value(&mut cfg.buffer_frames, None, "Device default");
-            });
-            ui.end_row();
-            ui.label("Headphones");
+        });
+        section(ui, "Preview / headphones");
+        // Legacy Master preferences are displayed as Main output and converted only on Apply.
+        let legacy_main = preview == PreviewOutput::Master;
+        if legacy_main { cfg.headphones = HeadphoneRouting::MainOutput; }
+        egui::Grid::new("preview_output").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+            ui.label("Device");
             let label = match cfg.headphones {
-                HeadphoneRouting::Auto => "Auto (outputs 3/4 if available)".to_string(),
-                HeadphoneRouting::Off => "Off".into(),
-                HeadphoneRouting::Split => "Split cable (master L / cue R)".into(),
-                HeadphoneRouting::Channels { master, cue } => format!("Master {}/{} · Cue {}/{}", master[0] + 1, master[1] + 1, cue[0] + 1, cue[1] + 1),
-                HeadphoneRouting::SeparateDevice => "Separate device (stereo cue)".into(),
+                HeadphoneRouting::MainOutput | HeadphoneRouting::Off => "Main output".into(),
+                HeadphoneRouting::SeparateDevice => device_label(&self.devices, cfg.headphone_device.as_deref(), "Select device..."),
+                HeadphoneRouting::Split => "Split cable (saved configuration)".into(),
+                _ => device_label(&self.devices, cfg.device.as_deref(), "System default"),
             };
-            egui::ComboBox::from_id_salt("hp").width(300.0).selected_text(label).show_ui(ui, |ui| {
-                ui.selectable_value(&mut cfg.headphones, HeadphoneRouting::Auto, "Auto (outputs 3/4 if available)");
-                ui.selectable_value(&mut cfg.headphones, HeadphoneRouting::Off, "Off");
-                ui.selectable_value(&mut cfg.headphones, HeadphoneRouting::Split, "Split cable (master L / cue R)");
-                ui.selectable_value(&mut cfg.headphones, HeadphoneRouting::Channels { master: [0, 1], cue: [2, 3] }, "Master 1/2 · Cue 3/4");
-                ui.selectable_value(&mut cfg.headphones, HeadphoneRouting::Channels { master: [2, 3], cue: [0, 1] }, "Master 3/4 · Cue 1/2");
-                ui.selectable_value(&mut cfg.headphones, HeadphoneRouting::SeparateDevice, "Separate device (stereo cue)");
+            egui::ComboBox::from_id_salt("preview_device").width(300.0).selected_text(label).show_ui(ui, |ui| {
+                if ui.selectable_label(matches!(cfg.headphones, HeadphoneRouting::MainOutput | HeadphoneRouting::Off), "Main output").clicked() {
+                    cfg.headphones = HeadphoneRouting::MainOutput;
+                    preview = PreviewOutput::Headphones;
+                }
+                for d in &self.devices {
+                    let same = cfg.device.as_deref().map_or(d.is_default, |id| d.id == id || d.name == id);
+                    let selected = if same { matches!(cfg.headphones, HeadphoneRouting::Channels { .. } | HeadphoneRouting::Auto | HeadphoneRouting::Split) }
+                        else { cfg.headphones == HeadphoneRouting::SeparateDevice && cfg.headphone_device.as_deref() == Some(&d.id) };
+                    if ui.add_enabled(!d.id.is_empty() && (!same || d.max_channels >= 4), egui::Button::selectable(selected, device_choice(d, &self.devices))).clicked() {
+                        preview = PreviewOutput::Headphones;
+                        if same { cfg.headphones = HeadphoneRouting::Channels { master, cue: [2, 3] }; cue = [2, 3]; }
+                        else { cfg.headphones = HeadphoneRouting::SeparateDevice; cfg.headphone_device = Some(d.id.clone()); cue = [0, 1]; }
+                    }
+                }
             });
             ui.end_row();
-            if cfg.headphones == HeadphoneRouting::SeparateDevice {
-                ui.label("Headphone device");
-                let label = device_label(&self.devices, cfg.headphone_device.as_deref(), "Select device…");
-                egui::ComboBox::from_id_salt("cue_device").width(300.0).selected_text(label).show_ui(ui, |ui| {
-                    for d in &self.devices {
-                        ui.add_enabled_ui(!d.id.is_empty(), |ui| {
-                            ui.selectable_value(&mut cfg.headphone_device, Some(d.id.clone()), device_choice(d, &self.devices));
-                        });
-                    }
-                });
-                ui.end_row();
-                ui.label("Alignment correction");
-                ui.add(egui::DragValue::new(&mut cfg.alignment_ms).range(-500.0..=500.0).speed(0.1).suffix(" ms"))
-                    .on_hover_text("Positive: headphones lag further, so delay master. Negative: delay headphones. Saved for this device pair, rate and buffer.");
+            if !matches!(cfg.headphones, HeadphoneRouting::MainOutput | HeadphoneRouting::Off | HeadphoneRouting::Split) {
+                ui.label("Channels");
+                let separate = cfg.headphones == HeadphoneRouting::SeparateDevice;
+                let channels = output_channels(&self.devices, if separate { cfg.headphone_device.as_deref() } else { cfg.device.as_deref() });
+                channel_pair(ui, "cue_channels", &mut cue, channels, if separate { None } else { Some(master) });
                 ui.end_row();
             }
         });
+        if let HeadphoneRouting::Channels { .. } | HeadphoneRouting::Auto = cfg.headphones {
+            cfg.headphones = HeadphoneRouting::Channels { master, cue };
+        }
+        cfg.master_pair = master;
+        cfg.headphone_pair = cue;
+        if matches!(cfg.headphones, HeadphoneRouting::MainOutput | HeadphoneRouting::Off) {
+            hint(ui, "MASTER controls the main mix; PHONES controls previews and headphone cue. Only the main mix is recorded.");
+        } else {
+            hint(ui, "Shared output for list previews and deck headphone buttons. A disconnected output never falls back to master.");
+        }
+        if ui.small_button("Rescan devices").clicked() { self.devices = clubcraft_engine::devices().unwrap_or_default(); }
+        ui.collapsing("Advanced audio settings", |ui| {
+            egui::Grid::new("audio_advanced").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+                ui.label("Sample rate");
+                egui::ComboBox::from_id_salt("sr").selected_text(cfg.sample_rate.map(|r| format!("{r} Hz")).unwrap_or("Auto".into())).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut cfg.sample_rate, None, "Auto");
+                    for r in [44100, 48000] { ui.selectable_value(&mut cfg.sample_rate, Some(r), format!("{r} Hz")); }
+                });
+                ui.end_row();
+                ui.label("Buffer");
+                egui::ComboBox::from_id_salt("buf").selected_text(cfg.buffer_frames.map(|b| format!("{b} frames")).unwrap_or("Device default".into())).show_ui(ui, |ui| {
+                    for b in [128u32, 256, 512, 1024] { ui.selectable_value(&mut cfg.buffer_frames, Some(b), format!("{b} frames")); }
+                    ui.selectable_value(&mut cfg.buffer_frames, None, "Device default");
+                });
+                ui.end_row();
+                if cfg.headphones == HeadphoneRouting::SeparateDevice {
+                    ui.label("Alignment correction");
+                    ui.add(egui::DragValue::new(&mut cfg.alignment_ms).range(-500.0..=500.0).speed(0.1).suffix(" ms"));
+                    ui.end_row();
+                }
+            });
+        });
+        self.preview_draft = Some(preview);
         let before = &self.audio_draft;
         if cfg.device != before.device || cfg.headphone_device != before.headphone_device || cfg.headphones != before.headphones
-            || cfg.sample_rate != before.sample_rate || cfg.buffer_frames != before.buffer_frames {
+            || cfg.sample_rate != before.sample_rate || cfg.buffer_frames != before.buffer_frames || cfg.master_pair != before.master_pair || cfg.headphone_pair != before.headphone_pair {
             cfg.alignment_ms = 0.0;
             cfg.alignment_key = None;
         }
@@ -339,21 +391,33 @@ impl Settings {
         self.audio_draft = cfg.clone();
         ui.horizontal(|ui| {
             if ui.button("Apply").clicked() {
-                if let Some(h) = handle {
+                if cfg == self.audio {
+                    self.stop_preview = true;
+                    prefs.preview_output = PreviewOutput::Headphones;
+                    self.preview_draft = Some(PreviewOutput::Headphones);
+                    self.message = "Audio output changed".into();
+                } else if let Some(h) = handle {
                     match h.set_audio_config(cfg) {
                         Ok(()) => {
                             self.sync_audio(h.audio_config());
+                            self.stop_preview = true;
+                            prefs.preview_output = PreviewOutput::Headphones;
+                            self.preview_draft = Some(PreviewOutput::Headphones);
                             self.message = "Audio output changed".into();
                         }
                         Err(e) => self.message = format!("Audio: {e:#}"),
                     }
                 } else {
                     self.audio = cfg;
+                    self.stop_preview = true;
+                    prefs.preview_output = PreviewOutput::Headphones;
+                    self.preview_draft = Some(PreviewOutput::Headphones);
                     self.restart_audio = true;
                 }
             }
-            if ui.add_enabled(self.audio_draft != self.audio, egui::Button::new("Discard changes")).clicked() {
+            if ui.add_enabled(self.audio_draft != self.audio || preview != prefs.preview_output, egui::Button::new("Discard changes")).clicked() {
                 self.audio_draft = self.audio.clone();
+                self.preview_draft = Some(prefs.preview_output);
             }
         });
     }

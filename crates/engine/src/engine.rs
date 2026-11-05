@@ -25,6 +25,8 @@ use std::time::{Duration, Instant};
 /// Where the headphone (cue) bus goes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HeadphoneRouting {
+    /// Independent cue/preview volume summed into the physical master output.
+    MainOutput,
     /// Channels 3/4 when the device has ≥ 4 outputs, otherwise no headphone output.
     #[default]
     Auto,
@@ -51,6 +53,10 @@ pub struct AudioConfig {
     pub headphones: HeadphoneRouting,
     #[serde(default)]
     pub headphone_device: Option<String>,
+    #[serde(default = "stereo_pair")]
+    pub master_pair: [u16; 2],
+    #[serde(default = "stereo_pair")]
+    pub headphone_pair: [u16; 2],
     /// Positive values mean the headphones lag further: delay the master.
     #[serde(default)]
     pub alignment_ms: f64,
@@ -61,10 +67,12 @@ pub struct AudioConfig {
     pub decks: usize,
 }
 
+fn stereo_pair() -> [u16; 2] { [0, 1] }
+
 impl Default for AudioConfig {
     fn default() -> Self {
-        AudioConfig { device: None, sample_rate: None, buffer_frames: Some(256), headphones: HeadphoneRouting::Auto,
-            headphone_device: None, alignment_ms: 0.0, alignment_key: None, decks: 4 }
+        AudioConfig { device: None, sample_rate: None, buffer_frames: Some(256), headphones: HeadphoneRouting::MainOutput,
+            headphone_device: None, master_pair: [0, 1], headphone_pair: [0, 1], alignment_ms: 0.0, alignment_key: None, decks: 4 }
     }
 }
 
@@ -364,7 +372,7 @@ struct Prepared {
 fn bind_config(config: &mut AudioConfig, p: &Prepared) {
     let master = p.device.id().map(|i| i.to_string()).unwrap_or_default();
     let cue = p.cue_device.as_ref().and_then(|d| d.id().ok()).map(|i| i.to_string());
-    let key = format!("{:?}", (&master, &cue, p.sr, p.channels, config.buffer_frames));
+    let key = format!("{:?}", (&master, &cue, p.sr, p.channels, config.buffer_frames, config.master_pair, config.headphone_pair));
     bind_alignment(config, key);
     // Keep None as the explicit system-default choice. Resolve legacy names once.
     if config.device.is_some() && !master.is_empty() { config.device = Some(master); }
@@ -393,7 +401,14 @@ fn prepare(config: &AudioConfig) -> Result<Prepared> {
     let max_ch = ranges.iter().map(|r| r.channels()).max().unwrap_or(2);
     let (want_ch, master_ch, cue_ch, split) = match config.headphones {
         HeadphoneRouting::Auto if max_ch >= 4 => (4u16, [0u16, 1], Some([2u16, 3]), false),
-        HeadphoneRouting::Auto | HeadphoneRouting::Off | HeadphoneRouting::SeparateDevice => (2, [0, 1], None, false),
+        HeadphoneRouting::Auto => (2, [0, 1], None, false),
+        HeadphoneRouting::MainOutput | HeadphoneRouting::Off | HeadphoneRouting::SeparateDevice => {
+            let master = config.master_pair;
+            if master[0] == master[1] { bail!("select distinct left and right master channels"); }
+            let need = master.iter().copied().max().unwrap_or(1).checked_add(1).ok_or_else(|| anyhow!("invalid master channels"))?;
+            if need > max_ch { bail!("master device has only {max_ch} outputs"); }
+            (need.max(2), master, if config.headphones == HeadphoneRouting::MainOutput { Some(master) } else { None }, false)
+        },
         HeadphoneRouting::Channels { master, cue } => {
             let need = master.iter().chain(cue.iter()).copied().max().unwrap_or(1).checked_add(1)
                 .ok_or_else(|| anyhow!("invalid output channel"))?;
@@ -429,7 +444,7 @@ fn prepare(config: &AudioConfig) -> Result<Prepared> {
 fn choose_format(ranges: &[cpal::SupportedStreamConfigRange], cue_ranges: Option<&[cpal::SupportedStreamConfigRange]>, config: &AudioConfig, want_ch: u16) -> Result<(u16, u32)> {
     let strict = config.headphones == HeadphoneRouting::SeparateDevice || cue_ranges.is_some();
     let master_ok = |c: &cpal::SupportedStreamConfigRange, sr| c.sample_format() == cpal::SampleFormat::F32
-        && c.channels() >= want_ch && (!strict || c.channels() == 2) && c.contains_rate(sr)
+        && c.channels() >= want_ch && c.contains_rate(sr)
         && (!strict || supports_buffer(c, config.buffer_frames));
     let preferred: Vec<u32> = match config.sample_rate {
         Some(r) if strict => vec![r],
@@ -439,7 +454,7 @@ fn choose_format(ranges: &[cpal::SupportedStreamConfigRange], cue_ranges: Option
     let chosen = preferred
         .iter()
         .find(|r| ranges.iter().any(|c| master_ok(c, **r))
-            && cue_ranges.is_none_or(|rs| rs.iter().any(|c| c.channels() == 2 && c.sample_format() == cpal::SampleFormat::F32
+            && cue_ranges.is_none_or(|rs| rs.iter().any(|c| c.channels() >= config.headphone_pair.iter().copied().max().unwrap_or(1).saturating_add(1) && c.sample_format() == cpal::SampleFormat::F32
                 && c.contains_rate(**r) && supports_buffer(c, config.buffer_frames))))
         .copied();
     let sr = chosen.ok_or_else(|| anyhow!("no common F32 output format for the selected rate, channels and buffer"))?;
@@ -482,7 +497,14 @@ fn open_stream(
     let Prepared { device, cue_device, channels, sr, master_ch, cue_ch, split } = prepared;
     let name = device_name(&device);
     let master_info = endpoint(&device, sr, channels, config.buffer_frames);
-    let cue_info = cue_device.as_ref().map(|d| endpoint(d, sr, 2, config.buffer_frames));
+    let cue_channels = if let Some(d) = &cue_device {
+        if config.headphone_pair[0] == config.headphone_pair[1] { bail!("select distinct left and right headphone channels"); }
+        d.supported_output_configs()?.filter(|c| c.sample_format() == cpal::SampleFormat::F32 && c.contains_rate(sr)
+            && c.channels() >= config.headphone_pair.iter().copied().max().unwrap_or(1).saturating_add(1)
+            && supports_buffer(c, config.buffer_frames)).map(|c| c.channels()).min()
+            .ok_or_else(|| anyhow!("headphone channels unavailable at the selected rate and buffer"))?
+    } else { 2 };
+    let cue_info = cue_device.as_ref().map(|d| endpoint(d, sr, cue_channels, config.buffer_frames));
     let buffer_size = match config.buffer_frames {
         Some(f) => cpal::BufferSize::Fixed(f),
         None => cpal::BufferSize::Default,
@@ -503,13 +525,14 @@ fn open_stream(
         let cue_errors = errors.clone();
         let halted = stop.clone();
         let failed = health.clone();
+        let cue_pair = config.headphone_pair;
         let stream = d.build_output_stream::<f32, _, _>(
-            cpal::StreamConfig { channels: 2, sample_rate: sr, buffer_size },
+            cpal::StreamConfig { channels: cue_channels, sample_rate: sr, buffer_size },
             move |data, info| {
-                failed.cue.heartbeat(data.len() / 2);
+                failed.cue.heartbeat(data.len() / cue_channels as usize);
                 if halted.load(Ordering::Acquire) || failed.cue.failed.load(Ordering::Relaxed) || failed.master.failed.load(Ordering::Relaxed) {
                     data.fill(0.0);
-                } else { output.render(data, info); }
+                } else { output.render_channels(data, info, cue_channels as usize, cue_pair); }
             },
             move |error| {
                 err_health.cue.report_error(error.kind());
@@ -523,7 +546,10 @@ fn open_stream(
     let mut last_start: Option<Instant> = None;
     let mut window = (0f32, 0f32); // (peak in the current ~2 s window, seconds in it)
     let mc = master_ch;
+    let shared = config.headphones == HeadphoneRouting::MainOutput;
     let cc = cue_ch;
+    let mut shared_limiter = crate::dsp::Limiter::new(sr as f32);
+    let mut shared_buffer = vec![0.0; SCRATCH_FRAMES * 2];
     let err2 = errors.clone();
     let data_cb = move |data: &mut [f32], callback: &cpal::OutputCallbackInfo| {
         let t0 = Instant::now();
@@ -554,6 +580,9 @@ fn open_stream(
             let n = (frames - done).min(SCRATCH_FRAMES);
             let (m, c) = (&mut side.master[..n * 2], &mut side.cue[..n * 2]);
             side.core.process(m, c);
+            if shared {
+                output::mix_shared_output(m, c, &mut shared_buffer[..n * 2], &mut shared_limiter);
+            }
             let out = &mut data[done * ch..(done + n) * ch];
             out.fill(0.0);
             for f in 0..n {
@@ -569,9 +598,9 @@ fn open_stream(
                 } else {
                     let sample = if separate { delay.process([m[f * 2], m[f * 2 + 1]], master_delay) }
                         else { [m[f * 2], m[f * 2 + 1]] };
-                    o[mc[0] as usize] = sample[0];
-                    o[mc[1] as usize] = sample[1];
-                    if let Some(cc) = cc {
+                    o[mc[0] as usize] = if shared { shared_buffer[f * 2] } else { sample[0] };
+                    o[mc[1] as usize] = if shared { shared_buffer[f * 2 + 1] } else { sample[1] };
+                    if let Some(cc) = cc.filter(|_| !shared) {
                         o[cc[0] as usize] = c[f * 2];
                         o[cc[1] as usize] = c[f * 2 + 1];
                     }
@@ -639,6 +668,7 @@ fn open_stream(
     if separate { opening_health.cue.arm(); }
     let core = side.as_mut().ok_or_else(|| anyhow!("audio core has not returned from previous stream"))?;
     core.core.set_sample_rate(sr);
+    core.core.set_shared_output(config.headphones == HeadphoneRouting::MainOutput);
     core.core.apply(Command::SetDeckCount(config.decks));
     if let Some(s) = side.take() {
         if let Err(rtrb::PushError::Full(s)) = lend.push(s) {
@@ -652,7 +682,7 @@ fn open_stream(
         channels,
         buffer_frames: config.buffer_frames,
         master_channels: master_ch,
-        cue_channels: if separate { Some([0, 1]) } else { cue_ch },
+        cue_channels: if separate { Some(config.headphone_pair) } else { cue_ch },
         split,
         master: master_info,
         headphones: cue_info,
@@ -907,7 +937,11 @@ mod tests {
         config.buffer_frames = Some(64);
         assert!(choose_format(&master, Some(&cue), &config, 2).is_err());
         config.buffer_frames = None;
-        assert!(choose_format(&[range(4, 44100, 48000)], Some(&cue), &config, 2).is_err());
+        assert_eq!(choose_format(&[range(4, 44100, 48000)], Some(&cue), &config, 2).unwrap(), (4, 48000));
+        config.headphone_pair = [2, 3];
+        assert!(choose_format(&master, Some(&cue), &config, 2).is_err());
+        assert_eq!(choose_format(&master, Some(&[range(4, 48000, 48000)]), &config, 2).unwrap(), (2, 48000));
+        config.headphone_pair = [0, 1];
         let integer_cue = [cpal::SupportedStreamConfigRange::new(2, 44100, 48000,
             cpal::SupportedBufferSize::Unknown, cpal::SampleFormat::I16)];
         assert!(choose_format(&master, Some(&integer_cue), &config, 2).is_err());

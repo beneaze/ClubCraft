@@ -144,6 +144,15 @@ impl Channel {
         self.lane_fx.reset();
     }
 
+    pub(crate) fn clear_preview_history(&mut self) {
+        self.reset_automation();
+        self.eq.clear_history();
+        self.filter.clear_history();
+        self.send.clear();
+        self.send_amt.reset(0.0);
+        self.lane_fx.clear_history();
+    }
+
     /// `buf`: deck audio in; on return holds the pre-fader (post-FX) signal for PFL.
     /// `post` receives the post-fader signal (crossfader gain `xf` applied) plus the echo send.
     pub fn process(&mut self, buf: &mut [f32], post: &mut [f32], ctx: &FxCtx, curve: FaderCurve, xf: f32, auto_gain_on: bool) {
@@ -218,6 +227,7 @@ pub struct Mixer {
     pub limiter: crate::dsp::Limiter,
     master_meter: Meter,
     pub headphone_mix: f32,
+    pub shared_output: bool,
     pub headphone_gain_db: f32,
     hp_meter: Meter,
     pub auto_gain: bool,
@@ -225,6 +235,10 @@ pub struct Mixer {
     /// Extra signal added to the master before its gain and limiter (sample lanes), `n` frames.
     pub extra: Vec<f32>,
     pub extra_on: bool,
+    /// Independent preview, inserted before master gain or after Cue/Master blending.
+    pub preview: Vec<f32>,
+    pub preview_output: crate::command::PreviewOutput,
+
     /// One channel strip per sample lane, driven by its clips' curves.
     pub sample_channels: Vec<Channel>,
     /// Each sample lane's audio of the block, and its channel output.
@@ -246,12 +260,15 @@ impl Mixer {
             limiter: crate::dsp::Limiter::new(sr),
             master_meter: Meter::new(sr),
             headphone_mix: 0.0,
+            shared_output: false,
             headphone_gain_db: 0.0,
             hp_meter: Meter::new(sr),
             auto_gain: true,
             post: vec![0.0; MAX_BLOCK * 2],
             extra: vec![0.0; MAX_BLOCK * 2],
             extra_on: false,
+            preview: vec![0.0; MAX_BLOCK * 2],
+            preview_output: Default::default(),
             sample_channels: (0..clubcraft_core::SAMPLE_LANES).map(|_| Channel::new(sr)).collect(),
             sample_bufs: (0..clubcraft_core::SAMPLE_LANES).map(|_| vec![0.0; MAX_BLOCK * 2]).collect(),
             sample_post: vec![0.0; MAX_BLOCK * 2],
@@ -270,9 +287,8 @@ impl Mixer {
         Levels { peak: self.hp_meter.peak, rms: self.hp_meter.rms() }
     }
 
-    /// Mix `active` deck buffers (each `n` frames interleaved, modified in place) into `master`
-    /// and `cue` (headphones, already blended with the master per `headphone_mix`).
-    pub fn process(&mut self, decks: &mut [Vec<f32>], ctxs: &[FxCtx], active: usize, n: usize, master: &mut [f32], cue: &mut [f32]) {
+    /// Channel strips and sample lanes, before either output bus applies gain or limiting.
+    pub(crate) fn process_channels(&mut self, decks: &mut [Vec<f32>], ctxs: &[FxCtx], active: usize, n: usize, master: &mut [f32], cue: &mut [f32]) {
         let master = &mut master[..n * 2];
         let cue = &mut cue[..n * 2];
         master.fill(0.0);
@@ -284,7 +300,6 @@ impl Mixer {
         let (b0, b1) = self.xf_gain[1].advance(n);
         let fc = self.fader_curve;
         let ag = self.auto_gain;
-        let mut any_pfl = false;
         for (i, ch) in self.channels.iter_mut().enumerate().take(active) {
             let buf = &mut decks[i][..n * 2];
             let xf = match ch.assign {
@@ -298,7 +313,6 @@ impl Mixer {
                 *m += *p;
             }
             if ch.pfl {
-                any_pfl = true;
                 for (c, b) in cue.iter_mut().zip(buf.iter()) {
                     *c += *b;
                 }
@@ -309,6 +323,16 @@ impl Mixer {
                 *m += *e;
             }
         }
+    }
+
+    /// Mix channels and preview into the final master and headphone output buses.
+    pub fn process(&mut self, decks: &mut [Vec<f32>], ctxs: &[FxCtx], active: usize, n: usize, master: &mut [f32], cue: &mut [f32]) {
+        self.process_channels(decks, ctxs, active, n, master, cue);
+        let master = &mut master[..n * 2];
+        let cue = &mut cue[..n * 2];
+        if !self.shared_output && self.preview_output == crate::command::PreviewOutput::Master {
+            for (m, p) in master.iter_mut().zip(&self.preview[..n * 2]) { *m += *p; }
+        }
         self.master_gain.set(db_to_gain(self.master_gain_db));
         for f in master.as_chunks_mut::<2>().0 {
             let g = self.master_gain.next();
@@ -317,11 +341,12 @@ impl Mixer {
         }
         self.limiter.process(master);
         self.master_meter.process(master);
-        // headphones: cue bus blended with master (master only when nothing is cued)
-        let mix = if any_pfl { self.headphone_mix.clamp(0.0, 1.0) } else { 1.0 };
+        // Only the Cue/Master control determines master monitoring, even with no PFL selected.
+        let mix = if self.shared_output { 0.0 } else { self.headphone_mix.clamp(0.0, 1.0) };
         let hg = db_to_gain(self.headphone_gain_db);
-        for (c, m) in cue.iter_mut().zip(master.iter()) {
-            *c = soft_clip((*c * (1.0 - mix) + *m * mix) * hg);
+        for ((c, m), p) in cue.iter_mut().zip(master.iter()).zip(&self.preview[..n * 2]) {
+            let preview = if self.shared_output || self.preview_output == crate::command::PreviewOutput::Headphones { *p } else { 0.0 };
+            *c = soft_clip((*c * (1.0 - mix) + *m * mix + preview) * hg);
         }
         self.hp_meter.process(cue);
     }
@@ -330,6 +355,60 @@ impl Mixer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn render(mixer: &mut Mixer) -> (Vec<f32>, Vec<f32>) {
+        let mut decks = vec![vec![0.1; MAX_BLOCK * 2]];
+        let mut master = vec![0.0; MAX_BLOCK * 2];
+        let mut cue = master.clone();
+        mixer.process(&mut decks, &[FxCtx::free(44100.0)], 1, MAX_BLOCK, &mut master, &mut cue);
+        (master, cue)
+    }
+
+    #[test]
+    fn no_pfl_is_silent_at_cue_and_master_monitoring_requires_the_mix_control() {
+        let mut mixer = Mixer::new(44100.0, 1);
+        let (master, cue) = render(&mut mixer);
+        assert!(master.iter().any(|v| v.abs() > 0.01));
+        assert!(cue.iter().all(|v| *v == 0.0));
+        for blend in [0.5, 1.0, 0.0] {
+            mixer.headphone_mix = blend;
+            let (master, cue) = render(&mut mixer);
+            assert!(master.iter().any(|v| v.abs() > 0.01));
+            assert!(master.iter().zip(cue).all(|(m, c)| (c - m * blend).abs() < 1e-6));
+        }
+    }
+
+    #[test]
+    fn pfl_selection_controls_cue_before_the_channel_fader() {
+        let mut mixer = Mixer::new(44100.0, 1);
+        mixer.channels[0].fader = 0.0;
+        for _ in 0..20 { render(&mut mixer); }
+        mixer.channels[0].pfl = true;
+        let (master, cue) = render(&mut mixer);
+        assert!(master.iter().all(|v| v.abs() < 1e-6));
+        assert!(cue.iter().any(|v| v.abs() > 0.01));
+        mixer.channels[0].pfl = false;
+        let (_, cue) = render(&mut mixer);
+        assert!(cue.iter().all(|v| *v == 0.0));
+    }
+
+    #[test]
+    fn shared_output_never_duplicates_master_and_keeps_pfl_independent() {
+        let mut mixer = Mixer::new(44100.0, 1);
+        mixer.shared_output = true;
+        for blend in [0.0, 0.5, 1.0] {
+            mixer.headphone_mix = blend;
+            let (master, cue) = render(&mut mixer);
+            assert!(master.iter().any(|v| v.abs() > 0.01));
+            assert!(cue.iter().all(|v| *v == 0.0));
+        }
+        mixer.channels[0].fader = 0.0;
+        for _ in 0..20 { render(&mut mixer); }
+        mixer.channels[0].pfl = true;
+        let (master, cue) = render(&mut mixer);
+        assert!(master.iter().all(|v| v.abs() < 1e-6));
+        assert!(cue.iter().any(|v| v.abs() > 0.01));
+    }
 
     #[test]
     fn crossfader_curves() {

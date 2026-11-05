@@ -474,6 +474,14 @@ impl Deck {
         self.src.track.replace(track)
     }
 
+    /// Independent auditions never crossfade audio from a previous session/output.
+    pub(crate) fn clear_preview_history(&mut self) {
+        self.cur_path = Path::Silent;
+        self.xf_active = false;
+        self.stretch_live = false;
+        self.stem_echo.clear();
+    }
+
     /// Eject the track. Returns it for deferred dropping.
     pub fn unload(&mut self) -> Option<Arc<LoadedTrack>> {
         self.capture_tail();
