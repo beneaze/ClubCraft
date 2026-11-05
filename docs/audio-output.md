@@ -116,3 +116,28 @@ Hardware acceptance still requires checking both outputs, disconnect/reconnect,
 and analog alignment on Windows, macOS and Linux. Any hardware test must keep
 master volume at zero. Software timing estimates alone cannot establish analog
 alignment accuracy.
+
+## Browser previews
+
+Settings > Audio output > Preview output selects Master (the default, including older
+preferences) or Headphones. Headphone preview is an explicit opt-in. Changing this preference stops the current preview and does not
+restart the output device. It applies to Library, Studio Playlist and Mashups, Add tracks,
+and the Live browser and Automix queue.
+
+Previews have their own two private decks and conductor. They never stop or reuse the main
+Studio or Live decks. Headphone previews are added after Cue/Master blending, before the
+headphone gain and overload protection; they never enter the master or its recording.
+Master previews are summed before master gain and limiting, and are included in recordings.
+Offline project exports do not include previews. A missing or failed headphone output stops
+or rejects the preview without falling back to master. Leaving the source screen/list stops
+its preview. Track previews start at the first analysed drop, otherwise a third into the
+track, at native tempo and key.
+
+## Live headphone monitoring
+
+The headphone buttons beside each deck's filter select its pre-fader CUE signal; they do
+not change its master output. CUE?MIX blends selected CUE channels with the master. At the
+CUE end, headphones are silent when all deck headphone buttons are off (unless an independent
+headphone preview is playing). Master monitoring is enabled only by turning CUE?MIX towards
+MIX; it is never substituted automatically when no deck is selected. PHONES controls the
+combined headphone volume.

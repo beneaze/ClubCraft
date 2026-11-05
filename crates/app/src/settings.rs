@@ -213,7 +213,7 @@ impl Settings {
                             Tab::General => general_ui(ui, prefs),
                             Tab::Decks => decks_ui(ui, prefs),
                             Tab::Mixer => mixer_ui(ui, prefs),
-                            Tab::Audio => self.audio_ui(ui, handle),
+                            Tab::Audio => self.audio_ui(ui, handle, prefs),
                             Tab::Waveforms => waveforms_ui(ui, prefs),
                             Tab::Analysis => analysis_ui(ui, prefs, actions),
                             Tab::Studio => studio_ui(ui, prefs),
@@ -233,7 +233,19 @@ impl Settings {
         }
     }
 
-    fn audio_ui(&mut self, ui: &mut egui::Ui, handle: Option<&EngineHandle>) {
+    fn audio_ui(&mut self, ui: &mut egui::Ui, handle: Option<&EngineHandle>, prefs: &mut Prefs) {
+        use clubcraft_engine::command::PreviewOutput;
+        section(ui, "Preview");
+        ui.horizontal(|ui| {
+            ui.label("Preview output");
+            ui.selectable_value(&mut prefs.preview_output, PreviewOutput::Headphones, "Headphones");
+            ui.selectable_value(&mut prefs.preview_output, PreviewOutput::Master, "Master");
+        });
+        hint(ui, "Applies immediately to track and mashup previews. Changing the output stops the current preview.");
+        if prefs.preview_output == PreviewOutput::Headphones && handle.is_none_or(|h| !crate::preview::headphones_available(&h.stream_info())) {
+            ui.colored_label(theme::WARN, "Headphone output is unavailable. Configure and Apply an output below to preview in headphones.");
+        }
+        ui.add_space(8.0);
         section(ui, "Audio output");
         if self.devices.is_empty() {
             self.devices = clubcraft_engine::devices().unwrap_or_default();

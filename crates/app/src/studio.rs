@@ -34,6 +34,7 @@ pub enum StudioAction {
     DeleteSavepoint(i64),
     /// Listen to a library track from this many seconds (the "Add tracks" dialog).
     PreviewTrack(TrackId, f64),
+    PreviewPlaylist(usize),
     StopPreview,
 }
 
@@ -777,6 +778,7 @@ impl StudioView {
             }
             ui.label(RichText::new(format!("{} tracks · {} · drag ☰ to reorder", self.mix.tracks.len(), theme::fmt_time_short(self.timeline.total_secs))).size(11.0).color(theme::TEXT_DIM));
         });
+        sh.preview.label(ui);
         ui.add_space(4.0);
         if self.mix.tracks.is_empty() {
             ui.label(RichText::new("No tracks yet: use + Add tracks, or drag tracks here from the Library.").color(theme::TEXT_DIM));
@@ -805,6 +807,7 @@ impl StudioView {
                     .striped(true)
                     .sense(Sense::click())
                     .cell_layout(Layout::left_to_right(Align::Center))
+                    .column(egui_extras::Column::exact(28.0))
                     .column(egui_extras::Column::exact(22.0))
                     .column(egui_extras::Column::exact(14.0))
                     .column(egui_extras::Column::exact(30.0))
@@ -819,7 +822,7 @@ impl StudioView {
                     .column(egui_extras::Column::exact(70.0))
                     .column(egui_extras::Column::exact(28.0))
                     .header(20.0, |mut h| {
-                        for t in ["", "", "#", "TITLE", "ARTIST", "GENRE", "TRANSITION IN", "TIME", "KEY", "MATCH", "NRG", "BPM", ""] {
+                        for t in ["", "", "", "#", "TITLE", "ARTIST", "GENRE", "TRANSITION IN", "TIME", "KEY", "MATCH", "NRG", "BPM", ""] {
                             h.col(|ui| {
                                 ui.label(RichText::new(t).size(10.5).color(theme::TEXT_DIM));
                             });
@@ -842,6 +845,13 @@ impl StudioView {
                                     egui::Painter::new(ui.ctx().clone(), ui.layer_id(), r).rect_filled(r, 0.0, c);
                                 }
                             };
+                            let mut preview_click = false;
+                            row.col(|ui| {
+                                tint(ui);
+                                let item = crate::preview::PreviewItem { source: crate::preview::PreviewSource::Playlist, track: mt.track_id, row: i };
+                                preview_click = sh.preview.button(ui, item, t.is_some()).clicked();
+                                if preview_click { self.pending.push(StudioAction::PreviewPlaylist(i)); }
+                            });
                             row.col(|ui| {
                                 tint(ui);
                                 let tip = if linked.is_some() { "Drag to reorder (with the tracks linked to it)" } else { "Drag to reorder" };
@@ -982,7 +992,7 @@ impl StudioView {
                             if r.dnd_hover_payload::<RowDrag>().is_some() {
                                 ui_line(&r);
                             }
-                            if r.clicked() {
+                            if r.clicked() && !preview_click {
                                 select = Some(Selection::Track(i));
                             }
                         });
@@ -2024,5 +2034,25 @@ mod tests {
         assert_eq!((s.mix.samples[0].offset, s.mix.samples[0].length), (2.0, Some(4.0)));
         assert_eq!((s.mix.samples[1].offset, s.mix.samples[1].length), (0.0, Some(4.0)));
         assert!(s.recutting.is_empty(), "cut again: {:?}", s.recutting);
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+
+    #[test]
+    fn playlist_preview_click_does_not_select_edit_or_start_the_mix() {
+        let mut sh = Shared { tracks: vec![clubcraft_core::Track { id: 1, title: "First".into(), duration: 120.0, ..Default::default() }], ..Default::default() };
+        sh.by_id.insert(1, 0);
+        let mut studio = StudioView::default();
+        studio.mix.tracks.push(MixTrack { track_id: 1, mix_in: 0.0, mix_out: 120.0, key_shift: 0, gain_db: 0.0, stems: Vec::new() });
+        studio.selection = Selection::None;
+        let before = studio.mix.clone();
+        crate::preview::test_ui::click_preview(|ui| studio.playlist_panel(ui, &sh));
+        assert_eq!(studio.pending, vec![StudioAction::PreviewPlaylist(0)]);
+        assert_eq!(studio.selection, Selection::None);
+        assert_eq!(studio.mix, before);
+        assert!(!studio.playing);
     }
 }
