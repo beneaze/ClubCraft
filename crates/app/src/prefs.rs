@@ -124,6 +124,7 @@ impl AudioFormat {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Prefs {
+    pub preview_output: clubcraft_engine::command::PreviewOutput,
     // ------------------------------------------------------------ general / display
     pub key_notation: KeyNotation,
     /// UI zoom (1.0 = 100 %).
@@ -131,7 +132,7 @@ pub struct Prefs {
     /// Open the home page on start (otherwise the last view).
     pub start_on_home: bool,
     pub accent: Accent,
-    /// Preferences format; files older than 2 used the pink accent by default. Missing in old
+    /// Preferences format; version 4 migrates unsafe preview routing to Auto. Missing in old
     /// files, so it defaults to 0 there (not to `Prefs::default()`).
     #[serde(default)]
     pub version: u32,
@@ -187,11 +188,12 @@ pub struct Prefs {
 impl Default for Prefs {
     fn default() -> Self {
         Prefs {
+            preview_output: Default::default(),
             key_notation: KeyNotation::Camelot,
             ui_scale: 1.0,
             start_on_home: true,
             accent: Accent::White,
-            version: 3,
+            version: 4,
             cue_button: CueButton::Cdj,
             hot_cue_press: HotCuePress::Preview,
             load_position: LoadPosition::FirstBeat,
@@ -235,6 +237,12 @@ impl Prefs {
 
     pub fn load() -> Prefs {
         let mut p: Prefs = std::fs::read_to_string(Self::path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        p.migrate();
+        p
+    }
+
+    fn migrate(&mut self) {
+        let p = self;
         if p.version < 2 {
             // white is the new default accent (it used to be pink)
             p.accent = Accent::White;
@@ -244,8 +252,11 @@ impl Prefs {
             // the background: that kept the machine busy for hours
             p.separate_stems = false;
         }
-        p.version = p.version.max(3);
-        p
+        if p.version < 4 {
+            // Old preview preferences could send previews to the recorded master bus.
+            p.preview_output = clubcraft_engine::command::PreviewOutput::Auto;
+        }
+        p.version = p.version.max(4);
     }
 
     pub fn save(&self) {
@@ -327,6 +338,31 @@ impl Prefs {
 #[cfg(test)]
 mod migration_tests {
     use super::*;
+
+    #[test]
+    fn preview_output_defaults_to_auto_and_round_trips() {
+        use clubcraft_engine::command::PreviewOutput;
+        let old: Prefs = serde_json::from_str(r#"{"version": 3}"#).unwrap();
+        assert_eq!(old.preview_output, PreviewOutput::Auto);
+        assert_eq!(Prefs::default().preview_output, PreviewOutput::Auto);
+        let prefs = Prefs { preview_output: PreviewOutput::Headphones, ..Default::default() };
+        let loaded: Prefs = serde_json::from_str(&serde_json::to_string(&prefs).unwrap()).unwrap();
+        assert_eq!(loaded.preview_output, PreviewOutput::Headphones);
+    }
+
+    #[test]
+    fn old_preview_choices_migrate_once_without_changing_other_preferences() {
+        use clubcraft_engine::command::PreviewOutput;
+        for choice in ["Master", "Headphones"] {
+            let mut prefs: Prefs = serde_json::from_str(&format!(r#"{{"version":3,"preview_output":"{choice}","ui_scale":1.25}}"#)).unwrap();
+            prefs.migrate();
+            assert_eq!(prefs.preview_output, PreviewOutput::Auto);
+            assert_eq!(prefs.ui_scale, 1.25);
+            prefs.preview_output = PreviewOutput::Master;
+            prefs.migrate();
+            assert_eq!(prefs.preview_output, PreviewOutput::Master);
+        }
+    }
 
     #[test]
     fn old_files_get_the_white_accent() {

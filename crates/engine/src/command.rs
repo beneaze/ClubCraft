@@ -22,6 +22,22 @@ pub enum EqBand {
     High = 2,
 }
 
+/// Destination of the independent browser preview.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum PreviewOutput {
+    #[default]
+    Auto,
+    Headphones,
+    /// Physical main output only, downstream of the recorded master bus.
+    Master,
+}
+
+impl PreviewOutput {
+    pub fn label(self) -> &'static str {
+        match self { Self::Auto => "Auto", Self::Headphones => "Headphones", Self::Master => "Main output" }
+    }
+}
+
 /// Every action the engine understands.
 #[derive(Debug)]
 pub enum Command {
@@ -176,6 +192,15 @@ pub enum Command {
     /// Update the studio lane mixer (gain, mute/solo, EQ, filter) of the playing mix. Cheap and
     /// allocation free: send it on every knob movement.
     SetMixLanes([clubcraft_core::LaneSettings; clubcraft_core::MIX_LANES]),
+
+    // Independent preview commands never address the main mix or its decks.
+    PreviewPlay { schedule: Box<MixSchedule>, start: f64, output: PreviewOutput },
+    PreviewStop,
+    PreviewSeek(f64),
+    PreviewPause,
+    PreviewResume,
+    PreviewSetLanes([clubcraft_core::LaneSettings; clubcraft_core::MIX_LANES]),
+    PreviewTrackReady { schedule: u64, index: usize, track: Arc<LoadedTrack> },
 
     // ---------------------------------------------------------------- engine
     /// 2 or 4 decks.

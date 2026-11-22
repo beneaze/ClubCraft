@@ -296,6 +296,9 @@ pub struct EngineState {
     pub quantize_beats: f64,
     pub auto_gain: bool,
     pub mix: MixPlaybackState,
+    /// Independent browser/mashup preview; never owns the main decks.
+    #[serde(default)]
+    pub preview: MixPlaybackState,
     pub recording: RecordingState,
     /// Audio callback time / buffer duration (0..1+), smoothed.
     pub cpu_load: f32,

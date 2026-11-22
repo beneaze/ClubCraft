@@ -177,6 +177,8 @@ impl Echo {
 
     pub fn clear(&mut self) {
         self.line.clear();
+        self.lp = [0.0; 2];
+        self.hp = [0.0; 2];
         self.energy = 0.0;
     }
 
@@ -273,6 +275,12 @@ impl Reverb {
         let (cl, al) = mk(0);
         let (cr, ar) = mk(23);
         Reverb { combs: [cl, cr], aps: [al, ar], energy: 0.0 }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        for comb in self.combs.iter_mut().flatten() { comb.buf.fill(0.0); comb.i = 0; comb.store = 0.0; }
+        for ap in self.aps.iter_mut().flatten() { ap.buf.fill(0.0); ap.i = 0; }
+        self.energy = 0.0;
     }
 
     pub fn is_silent(&self) -> bool {
@@ -659,6 +667,24 @@ impl LaneFx {
             resume: 1.0,
             pump_env: 1.0,
         }
+    }
+
+    /// A new preview must not inherit audio from the previous audition.
+    pub(crate) fn clear_history(&mut self) {
+        self.reset();
+        self.reverb_fx.clear();
+        self.reverb_amt.reset(0.0);
+        self.noise_amt.reset(0.0);
+        self.brake_amt.reset(0.0);
+        self.noise_svf.reset();
+        self.lp.state = LoopState::Idle;
+        self.lp.rec = 0;
+        self.lp.play = 0;
+        self.tape.fill([0.0; 2]);
+        self.tape_w = 0;
+        self.lag = 0.0;
+        self.resume = 1.0;
+        self.pump_env = 1.0;
     }
 
     /// All lane values back to neutral (tails keep ringing).

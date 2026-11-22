@@ -219,6 +219,15 @@ pub(crate) fn alignment(offset_ns: f64, correction_ms: f64, sr: u32) -> (f64, f6
     (frames.clamp(0.0, sr as f64 * 2.0), (-frames).clamp(0.0, sr as f64 * 2.0))
 }
 
+/// Physical-output protection is deliberately downstream of the recorded master bus.
+pub(crate) fn mix_speaker_preview(master: &[f32], preview: &[f32], output: &mut [f32], limiter: &mut crate::dsp::Limiter, master_limiter: &crate::dsp::Limiter) {
+    // Read the audio core directly: no UI snapshot, lock or callback allocation.
+    limiter.enabled = master_limiter.enabled;
+    limiter.set_ceiling_db(crate::dsp::gain_to_db(master_limiter.ceiling()));
+    for ((out, master), preview) in output.iter_mut().zip(master).zip(preview) { *out = master + preview; }
+    limiter.process(output);
+}
+
 pub(crate) struct CueOutput {
     input: rtrb::Consumer<CueFrame>,
     health: Arc<OutputHealth>,
@@ -286,15 +295,21 @@ impl CueOutput {
         }
     }
 
-    pub fn render(&mut self, data: &mut [f32], info: &cpal::OutputCallbackInfo) {
-        let frames = data.len() / 2;
+    pub fn render_channels(&mut self, data: &mut [f32], info: &cpal::OutputCallbackInfo, channels: usize, pair: [u16; 2]) {
+        let frames = data.len() / channels;
         let latency = observe(info, frames, &self.health.cue);
         let now_ns = self.epoch.elapsed().as_nanos() as u64;
-        self.render_at(data, latency.map(|ns| now_ns + ns));
+        self.render_at_channels(data, latency.map(|ns| now_ns + ns), channels, pair);
     }
 
+    #[cfg(test)]
     fn render_at(&mut self, data: &mut [f32], playback_ns: Option<u64>) {
-        let frames = data.len() / 2;
+        self.render_at_channels(data, playback_ns, 2, [0, 1]);
+    }
+
+    fn render_at_channels(&mut self, data: &mut [f32], playback_ns: Option<u64>, channels: usize, pair: [u16; 2]) {
+        let frames = data.len() / channels;
+        data.fill(0.0);
         let block = frames.max(self.health.master.frames.load(Ordering::Relaxed) as usize);
         let target = (self.sr as usize / 50).max(block * 2);
         if target + frames + TAPS > self.sr as usize * 2 {
@@ -329,7 +344,7 @@ impl CueOutput {
             .servo
             .update(self.input.slots() as f64 - frames as f64 - target as f64, frames as f64 / self.sr as f64);
         let mut measured = false;
-        for (f, out) in data.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+        for (f, out) in data.chunks_exact_mut(channels).enumerate() {
             if self.started {
                 while self.phase >= 1.0 {
                     if let Ok(h) = self.input.pop() {
@@ -374,7 +389,8 @@ impl CueOutput {
             let want = if self.started { 1.0 } else { 0.0 };
             self.gain += (want - self.gain).clamp(-1.0 / 128.0, 1.0 / 128.0);
             let delayed = self.delay.process(self.last, self.health.cue_delay.load(Ordering::Relaxed) as f64);
-            *out = delayed.map(|s| s * self.gain);
+            out[pair[0] as usize] = delayed[0] * self.gain;
+            out[pair[1] as usize] = delayed[1] * self.gain;
         }
     }
 
@@ -660,6 +676,66 @@ mod tests {
         // 17 frames of sinc history ahead. The -10 ms correction removes 480.
         assert_eq!(health.master_delay.load(Ordering::Relaxed), 2368 + 17 - 480);
         assert_eq!(health.cue_delay.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn speaker_preview_is_limited_after_the_recorded_master_bus() {
+        let master = vec![0.7; 512];
+        let cue = vec![0.6; 512];
+        let mut output = vec![0.0; 512];
+        let mut limiter = crate::dsp::Limiter::new(44100.0);
+        let settings = crate::dsp::Limiter::new(44100.0);
+        for _ in 0..10 { mix_speaker_preview(&master, &cue, &mut output, &mut limiter, &settings); }
+        assert!(output.iter().all(|v| v.is_finite() && v.abs() <= 1.0));
+        assert!(output.iter().any(|v| *v > 0.7));
+        assert!(master.iter().all(|v| *v == 0.7));
+        assert!(cue.iter().all(|v| *v == 0.6));
+    }
+
+    #[test]
+    fn physical_limiter_follows_live_master_settings_with_and_without_preview() {
+        use crate::{Command, EngineCore};
+        for preview_gain in [0.0, 0.2] {
+            let mut core = EngineCore::new(44100, 2);
+            let master = vec![0.99; 512];
+            let preview = vec![preview_gain; 512];
+            let mut output = vec![0.0; 512];
+            let mut limiter = crate::dsp::Limiter::new(44100.0);
+            let latency = limiter.latency();
+            for (enabled, ceiling_db) in [(true, -6.0), (false, -6.0), (true, 0.0), (true, -12.0)] {
+                core.apply(Command::SetLimiter { enabled, ceiling_db });
+                for _ in 0..100 {
+                    mix_speaker_preview(&master, &preview, &mut output, &mut limiter, &core.mixer().limiter);
+                }
+                assert_eq!(limiter.enabled, enabled);
+                assert_eq!(limiter.latency(), latency);
+                let peak = output.iter().copied().fold(0.0_f32, f32::max);
+                if enabled {
+                    let ceiling = crate::dsp::db_to_gain(ceiling_db);
+                    assert!(peak <= ceiling + 1e-6);
+                    if ceiling_db == 0.0 { assert!(peak > 0.97, "old fixed -0.3 dB ceiling must not remain"); }
+                } else {
+                    assert!(peak >= 0.99, "disabled limiter must not apply its gain reduction");
+                    assert!(peak <= 1.0, "retain the existing digital safety clamp");
+                }
+                assert!(master.iter().all(|v| *v == 0.99));
+                assert!(preview.iter().all(|v| *v == preview_gain));
+            }
+        }
+    }
+
+    #[test]
+    fn cue_can_use_an_arbitrary_stereo_pair_without_touching_other_channels() {
+        let health = Arc::new(OutputHealth::default());
+        health.master.frames.store(256, Ordering::Relaxed);
+        let (mut tx, rx) = rtrb::RingBuffer::new(96000);
+        for _ in 0..2400 { tx.push(CueFrame { samples: [0.25, -0.5], master_ns: 0 }).unwrap(); }
+        let mut cue = CueOutput::new(rx, health, Instant::now(), 48000, 0.0);
+        let mut data = vec![9.0; 256 * 6];
+        cue.render_at_channels(&mut data, None, 6, [4, 5]);
+        assert!(data.as_chunks::<6>().0.iter().all(|f| f[..4].iter().all(|s| *s == 0.0)));
+        assert!((data[data.len() - 2] - 0.25).abs() < 1e-4);
+        assert!((data[data.len() - 1] + 0.5).abs() < 1e-4);
     }
 
     #[test]

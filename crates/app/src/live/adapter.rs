@@ -379,8 +379,9 @@ pub struct LiveEngine {
     /// Mix player per deck pair (studio preview on C/D, live mix on A/B).
     pub studio_player: Option<MixPlayer>,
     pub live_player: Option<MixPlayer>,
-    /// Mashup finder preview (on the studio decks, independent of the studio mix).
+    /// Independent browser/mashup preview (private decks, separate transport).
     pub preview_player: Option<MixPlayer>,
+    pub preview_output: clubcraft_engine::command::PreviewOutput,
     pub loading_mix: Option<u64>,
     pub export: Option<Export>,
     pub automix_queue: Vec<TrackId>,
@@ -526,6 +527,7 @@ impl LiveEngine {
             studio_player: None,
             live_player: None,
             preview_player: None,
+            preview_output: clubcraft_engine::command::PreviewOutput::Headphones,
             loading_mix: None,
             export: None,
             automix_queue: Vec::new(),
@@ -563,7 +565,6 @@ impl LiveEngine {
     /// Start playing `mix` on `decks`. Tracks are loaded just in time (only the current and the
     /// next couple of tracks are kept in memory).
     pub fn play_mix(&mut self, mix: &Mix, decks: [usize; 2], from: f64, sh: &Shared) {
-        self.stop_preview();
         self.stop_mix(STUDIO_DECKS);
         self.stop_mix(LIVE_DECKS);
         let mut p = MixPlayer::lazy(mix, &|id| sh.analyses.get(&id).cloned(), decks);
@@ -579,23 +580,29 @@ impl LiveEngine {
         }
     }
 
-    /// Play a short mix (a mashup preview) on the studio decks from `from` seconds.
-    pub fn play_preview(&mut self, mix: &Mix, from: f64, sh: &Shared) {
+    /// Play a browser/mashup preview on its private decks from `from` seconds.
+    pub fn play_preview(&mut self, mix: &Mix, from: f64, sh: &Shared, expected_output: clubcraft_engine::command::PreviewOutput) -> Result<()> {
+        use clubcraft_engine::player::PreviewSink;
+        let h = self.handle.as_ref().context("Audio output is unavailable")?;
+        let output = crate::preview::resolve_output(self.prefs.preview_output, &h.audio_config(), &h.stream_info())?;
+        if output != expected_output { anyhow::bail!("Preview output changed; try preview again."); }
         self.stop_preview();
-        self.stop_mix(STUDIO_DECKS);
-        self.stop_mix(LIVE_DECKS);
-        let mut p = MixPlayer::lazy(mix, &|id| sh.analyses.get(&id).cloned(), STUDIO_DECKS);
+        self.preview_output = output;
+        let mut p = MixPlayer::lazy(mix, &|id| {
+            let mut a = sh.analyses.get(&id).cloned().unwrap_or_default();
+            if a.duration <= 0.0 { a.duration = sh.track(id).map(|t| t.duration).unwrap_or(0.0); }
+            Some(a)
+        }, [0, 1]);
         if let Some(h) = self.handle.as_mut() {
-            if let Err(e) = p.play(h, from) {
-                log::warn!("preview: {e:#}");
-            }
+            p.play(&mut PreviewSink { sink: h, output }, from)?;
         }
         self.preview_player = Some(p);
+        Ok(())
     }
 
     pub fn stop_preview(&mut self) {
         if let (Some(mut p), Some(h)) = (self.preview_player.take(), self.handle.as_mut()) {
-            let _ = p.stop(h);
+            let _ = p.stop(&mut clubcraft_engine::player::PreviewSink { sink: h, output: self.preview_output });
         }
     }
 
@@ -702,11 +709,10 @@ impl LiveEngine {
         // Prefetch upcoming tracks of a playing mix.
         let st = self.state();
         let loader = self.loader();
-        for which in 0..3 {
+        for which in 0..2 {
             let player = match which {
                 0 => self.studio_player.as_mut(),
-                1 => self.live_player.as_mut(),
-                _ => self.preview_player.as_mut(),
+                _ => self.live_player.as_mut(),
             };
             let h = self.handle.as_mut();
             if let (Some(p), Some(h)) = (player, h) {
@@ -721,6 +727,29 @@ impl LiveEngine {
                 }
             }
         }
+        let mut stop_preview = false;
+        let output = self.preview_output;
+        if let (Some(p), Some(h)) = (self.preview_player.as_mut(), self.handle.as_mut()) {
+            let mut preview_state = st;
+            preview_state.mix = st.preview;
+            if !crate::preview::output_available(output, &h.stream_info()) {
+                messages.push(format!("{} is unavailable; preview stopped", output.label()));
+                stop_preview = true;
+            } else if st.preview.schedule_id == p.schedule_id() && st.preview.finished {
+                stop_preview = true;
+            } else {
+                let mut sink = clubcraft_engine::player::PreviewSink { sink: h, output };
+                match p.poll(&mut sink, &preview_state, &loader) {
+                    Ok(status) if !status.failed.is_empty() => {
+                        messages.push("Preview could not be loaded".into());
+                        stop_preview = true;
+                    }
+                    Err(e) => { messages.push(format!("Preview: {e:#}")); stop_preview = true; }
+                    _ => {}
+                }
+            }
+        }
+        if stop_preview { self.stop_preview(); }
         // Persist hot cues the user set or moved.
         for d in 0..2 {
             let ds = &st.decks[d];
@@ -999,6 +1028,7 @@ pub fn mixer_ui(st: &EngineState, eng: &LiveEngine) -> MixerUi {
         crossfader: st.master.crossfader * 2.0 - 1.0,
         master: db_knob(st.master.gain_db, 0.8),
         headphone_mix: st.master.headphone_mix,
+        cue_available: eng.handle.as_ref().is_some_and(|h| h.stream_info().cue_channels.is_some()),
         headphone_vol: db_knob(st.master.headphone_gain_db, 0.7),
         master_vu: st.master.level.peak,
         recording: st.recording.active,

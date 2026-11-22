@@ -41,6 +41,7 @@ pub mod fx;
 pub mod midi;
 pub mod mixer;
 pub mod player;
+mod preview;
 pub mod render;
 pub mod samples;
 pub mod state;

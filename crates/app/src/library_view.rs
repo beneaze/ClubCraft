@@ -40,6 +40,7 @@ impl Default for LibraryView {
 /// What the user asked to do with tracks from the table.
 #[derive(Debug, Clone)]
 pub enum LibraryAction {
+    Preview(crate::preview::PreviewItem),
     LoadDeck(TrackId, usize),
     AddToMix(Vec<TrackId>),
     Process(Vec<TrackId>),
@@ -136,6 +137,10 @@ impl LibraryView {
             let n = if self.mix.is_some() || self.playlist.is_some() || !self.search.is_empty() { self.visible(sh).len() } else { sh.tracks.len() };
             ui.label(RichText::new(format!("{n} tracks")).color(theme::TEXT_DIM));
         });
+        sh.preview.label(ui);
+        let source = if compact {
+            crate::preview::PreviewSource::LiveBrowser { playlist: self.playlist, mix: self.mix }
+        } else { crate::preview::PreviewSource::Library { playlist: self.playlist, mix: self.mix } };
         let rows = self.visible(sh);
         let row_ids: Vec<TrackId> = rows.iter().map(|t| t.id).collect();
         let mut table = TableBuilder::new(ui)
@@ -143,6 +148,7 @@ impl LibraryView {
             .resizable(true)
             .sense(egui::Sense::click_and_drag())
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+            .column(Column::exact(24.0))
             .column(Column::exact(18.0))
             .column(Column::initial(if compact { 260.0 } else { 300.0 }).at_least(80.0).clip(true))
             .column(Column::initial(if compact { 180.0 } else { 220.0 }).at_least(60.0).clip(true))
@@ -173,6 +179,7 @@ impl LibraryView {
         table
             .header(20.0, |mut h| {
                 h.col(|ui| header(ui, "", None));
+                h.col(|ui| header(ui, "", None));
                 h.col(|ui| header(ui, "Title", Some(SortBy::Title)));
                 h.col(|ui| header(ui, "Artist", Some(SortBy::Artist)));
                 h.col(|ui| header(ui, "BPM", Some(SortBy::Bpm)));
@@ -190,6 +197,12 @@ impl LibraryView {
                     let a: Option<&Analysis> = sh.analyses.get(&t.id);
                     let sel = self.selected.contains(&t.id);
                     row.set_selected(sel);
+                    let mut preview_click = false;
+                    row.col(|ui| {
+                        let item = crate::preview::PreviewItem { source, track: t.id, row: 0 };
+                        preview_click = sh.preview.button(ui, item, true).clicked();
+                        if preview_click { actions.push(LibraryAction::Preview(item)); }
+                    });
                     row.col(|ui| {
                         let has_stems = a.and_then(|a| a.stems_model.as_ref()).is_some();
                         let c = if has_stems { theme::OK } else if a.is_some_and(|a| a.version > 0) { theme::TEXT_DIM } else { theme::LINE };
@@ -238,7 +251,7 @@ impl LibraryView {
                         }
                     });
                     let resp = row.response();
-                    if resp.clicked() {
+                    if resp.clicked() && !preview_click {
                         let (cmd, shift) = ui_mods(&resp.ctx);
                         if shift {
                             if let Some(last) = self.last_clicked {
@@ -258,7 +271,7 @@ impl LibraryView {
                         }
                         self.last_clicked = Some(t.id);
                     }
-                    if resp.double_clicked() {
+                    if resp.double_clicked() && !preview_click {
                         actions.push(LibraryAction::LoadDeck(t.id, usize::MAX));
                     }
                     if resp.drag_started() {
@@ -313,4 +326,26 @@ impl LibraryView {
 
 fn ui_mods(ctx: &egui::Context) -> (bool, bool) {
     ctx.input(|i| (i.modifiers.command, i.modifiers.shift))
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+
+    #[test]
+    fn preview_click_in_library_and_live_does_not_select_or_load_a_deck() {
+        for compact in [false, true] {
+            let sh = Shared { tracks: vec![Track { id: 1, title: "First".into(), duration: 120.0, ..Default::default() }, Track { id: 2, title: "Second".into(), duration: 120.0, ..Default::default() }], ..Default::default() };
+            let mut view = LibraryView::default();
+            view.selected.insert(2);
+            let mut actions = Vec::new();
+            crate::preview::test_ui::click_preview(|ui| view.ui(ui, &sh, compact, &mut actions));
+            assert_eq!(view.selected, HashSet::from([2]));
+            assert_eq!(actions.len(), 1);
+            let LibraryAction::Preview(item) = &actions[0] else { panic!("only preview should run") };
+            assert_eq!(item.track, 1);
+            let expected = if compact { crate::preview::PreviewSource::LiveBrowser { playlist: None, mix: None } } else { crate::preview::PreviewSource::Library { playlist: None, mix: None } };
+            assert_eq!(item.source, expected);
+        }
+    }
 }

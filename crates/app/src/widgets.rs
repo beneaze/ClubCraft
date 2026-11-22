@@ -239,6 +239,15 @@ pub fn vu(ui: &mut Ui, l: f32, r: f32, size: egui::Vec2) {
 
 /// Round play / pause button with a drawn (optically centred) symbol.
 pub fn play_button(ui: &mut Ui, playing: bool, enabled: bool, d: f32) -> Response {
+    transport_button(ui, playing, enabled, d, false)
+}
+
+/// Browser preview uses Stop, while the main transport uses Pause.
+pub fn preview_button(ui: &mut Ui, playing: bool, enabled: bool, d: f32) -> Response {
+    transport_button(ui, playing, enabled, d, true)
+}
+
+fn transport_button(ui: &mut Ui, playing: bool, enabled: bool, d: f32, stop: bool) -> Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(d, d), if enabled { Sense::click() } else { Sense::hover() });
     let p = ui.painter();
     let c = rect.center();
@@ -246,7 +255,9 @@ pub fn play_button(ui: &mut Ui, playing: bool, enabled: bool, d: f32) -> Respons
     p.circle_filled(c, d * 0.5, fill);
     let ink = Color32::from_gray(16);
     let s = d * 0.36;
-    if playing {
+    if playing && stop {
+        p.rect_filled(egui::Rect::from_center_size(c, egui::vec2(s, s)), 1.5, ink);
+    } else if playing {
         let (w, h) = (s * 0.3, s * 0.95);
         for dx in [-s * 0.27, s * 0.27] {
             p.rect_filled(egui::Rect::from_center_size(c + egui::vec2(dx, 0.0), egui::vec2(w, h)), 1.5, ink);

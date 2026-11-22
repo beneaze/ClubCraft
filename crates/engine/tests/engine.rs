@@ -339,9 +339,19 @@ fn noise(n: usize, seed: u32, amp: f32) -> Vec<f32> {
 /// `cargo test --release -p clubcraft-engine --test engine cpu_budget -- --nocapture`.
 #[test]
 fn cpu_budget_4_decks_keylock_stems_fx() {
+    run_cpu_budget(false);
+}
+
+#[test]
+fn cpu_budget_4_decks_plus_2_mashup_preview_decks() {
+    run_cpu_budget(true);
+}
+
+fn run_cpu_budget(with_preview: bool) {
     let secs = 10.0;
     let n = (SR as f64 * 40.0) as usize;
     let mut core = EngineCore::new(48000, 4);
+    let mut preview_track = None;
     for d in 0..4 {
         let tone: Vec<f32> = (0..n).map(|i| (i as f32 * 0.031 * (d + 1) as f32).sin() * 0.3).collect();
         let nz = noise(n, d as u32 + 1, 0.1);
@@ -349,7 +359,9 @@ fn cpu_budget_4_decks_keylock_stems_fx() {
         let stems: [(Vec<f32>, Vec<f32>); 4] = std::array::from_fn(|s| (noise(n, 10 + s as u32, 0.1), noise(n, 20 + s as u32, 0.1)));
         let st = Arc::new(StemTrack::from_planar("bench", &stems));
         let t = LoadedTrack::new("bench", Arc::new(AudioBuffer::new(SR, l.clone(), l))).with_grid(BeatGrid::new(124.0, 0.0)).with_stems(st);
-        core.apply(Command::LoadTrack(d, Arc::new(t)));
+        let t = Arc::new(t);
+        if d == 0 { preview_track = Some(t.clone()); }
+        core.apply(Command::LoadTrack(d, t));
         core.apply(Command::SetKeylock(d, true));
         core.apply(Command::SetTempo(d, 1.03));
         if d % 2 == 1 {
@@ -365,6 +377,24 @@ fn cpu_budget_4_decks_keylock_stems_fx() {
         core.apply(Command::SetFilter(d, 0.35));
         core.apply(Command::Play(d));
     }
+    let preview_player = if with_preview {
+        let track = preview_track.unwrap();
+        let mut mix = Mix { tempo: TempoMode::Fixed(128.0), keylock: true, ..Default::default() };
+        for track_id in [100, 101] {
+            mix.tracks.push(MixTrack { track_id, mix_in: 0.0, mix_out: 4.0, key_shift: 1,
+                gain_db: 0.0, stems: Vec::new() });
+        }
+        mix.transitions.push(Transition::new(TransitionStyle::Mashup, 64));
+        mix.normalize();
+        let mut player = MixPlayer::new(&mix, &|_| Some(track.clone()), [0, 1]).unwrap();
+        // The entire measured interval is inside the overlap, so both private decks render.
+        let overlap = &player.timeline().transitions[0];
+        let from = overlap.start_sec + 1.0;
+        assert!(from + secs < overlap.end_sec);
+        player.play(&mut clubcraft_engine::player::PreviewSink { sink: &mut core,
+            output: clubcraft_engine::command::PreviewOutput::Headphones }, from).unwrap();
+        Some(player)
+    } else { None };
     let block = 256usize;
     let mut m = vec![0f32; block * 2];
     let mut c = vec![0f32; block * 2];
@@ -386,12 +416,13 @@ fn cpu_budget_4_decks_keylock_stems_fx() {
         static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
         START.get_or_init(std::time::Instant::now).elapsed().as_secs_f64()
     }
+    let mut preview = vec![0.0; block * 2];
     let mut times = Vec::with_capacity(blocks);
     let wall = std::time::Instant::now();
     let t0 = cpu_now();
     for _ in 0..blocks {
         let tb = cpu_now();
-        core.process(&mut m, &mut c);
+        core.process_outputs(&mut m, &mut c, &mut preview);
         times.push(cpu_now() - tb);
     }
     let el = cpu_now() - t0;
@@ -406,19 +437,27 @@ fn cpu_budget_4_decks_keylock_stems_fx() {
     eprintln!("block times: first {:.3} ms, p99 {:.3} ms, p99.9 {:.3} ms, max(after start) {:.3} ms", first * 1e3, p99 * 1e3, p999 * 1e3, worst_block * 1e3);
     let st = core.snapshot();
     assert!(st.decks.iter().all(|d| d.playing && d.stretching));
+    if let Some(player) = preview_player {
+        assert_eq!(st.preview.schedule_id, player.schedule_id());
+        assert!(st.preview.playing && st.preview.transition.is_some());
+        assert_eq!(st.preview.resident_count(), 2);
+        assert!(c.iter().any(|v| v.abs() > 1e-5));
+    }
+    let deck_count = if with_preview { 6 } else { 4 };
     let rt = el / secs;
     let block_budget = block as f64 / 48000.0;
     eprintln!(
-        "10 s of 4 decks (keylock + stems + 2 FX each) in {:.3} s {timing} → {:.2} % realtime factor total, {:.2} % per deck; worst block {:.3} ms of {:.3} ms budget ({:.1} %)",
+        "10 s of {deck_count} decks (4 live with keylock/stems/FX, optional 2-deck mashup) in {:.3} s {timing} → {:.2} % realtime factor total, {:.2} % per deck; worst block {:.3} ms of {:.3} ms budget ({:.1} %)",
         el,
         rt * 100.0,
-        rt * 25.0,
+        rt * 100.0 / deck_count as f64,
         worst_block * 1000.0,
         block_budget * 1000.0,
         worst_block / block_budget * 100.0
     );
     if !cfg!(debug_assertions) && cfg!(unix) {
-        assert!(rt < 0.25, "realtime factor {rt}");
+        let limit = if with_preview { 0.4 } else { 0.25 };
+        assert!(rt < limit, "realtime factor {rt}, limit {limit}");
     }
 }
 

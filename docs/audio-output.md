@@ -116,3 +116,62 @@ Hardware acceptance still requires checking both outputs, disconnect/reconnect,
 and analog alignment on Windows, macOS and Linux. Any hardware test must keep
 master volume at zero. Software timing estimates alone cannot establish analog
 alignment accuracy.
+
+## Browser previews
+
+Settings > Audio output keeps Master and Headphones routing separate from Preview output.
+Headphones offers Auto (the default: master 1/2 and cue 3/4 when available), Off, Split cable,
+channel pairs on the master device, and a separate device. Channel pairs must not overlap.
+The legacy MainOutput routing remains readable but has no physical deck CUE output.
+Sample rate, buffer and alignment correction are under Advanced audio settings.
+
+Preview output offers Auto / Headphones / Main output. Auto selects the running headphone
+route when configured, otherwise the physical main output. A configured but unavailable
+headphone route rejects playback, including a separate-device startup with master only.
+An active preview's destination is fixed; headphone failure stops it without speaker fallback.
+A new preview after a system-default startup fallback uses that running configuration.
+Preferences older than version 4 migrate the preview choice once to Auto, without changing
+the saved device configuration. Later explicit preview choices are preserved.
+
+Changes apply together with Apply; failed changes preserve the running configuration and
+preview preference. Discard restores saved selections. Successful Apply stops any preview.
+List labels show the resolved destination rather than a draft setting.
+
+Previews use two private decks and a conductor and never stop Studio, Automix or Live decks.
+Headphone previews are added after CUE/MIX and before PHONES and headphone protection.
+Main output previews use an isolated third bus, summed only in the device callback after
+the master recording tap, before physical-output limiting. The final limiter's latency is
+included in separate-device alignment estimates. PHONES controls either preview destination,
+independently of MASTER. The final physical-output limiter follows the master limiter's
+on/off state and ceiling, including changes during playback. Disabling limiting preserves
+the existing digital safety clamp and fixed processing latency.
+
+Main output previews are audible to the audience; deck CUE is never summed into that output.
+The resolved main output is highlighted even when selected by Auto. Starting a speaker preview
+while a deck, Studio mix or Automix is playing (or a mix is loading) requires confirmation for
+that request. Cancel, Escape or dismissing the dialog leaves playback unchanged. Leaving its
+source or changing the output invalidates the request. Confirmation is not remembered for
+another track or destination. Neither preview destination enters the master recording or offline
+project exports.
+
+These settings apply to Library, Studio Playlist and Mashups, Add tracks, and the Live browser
+and Automix queue. Leaving the source screen/list stops its preview. Track previews start
+at the first analysed drop, otherwise a third into the track, at native tempo and key.
+
+## Live headphone monitoring
+
+The headphone buttons beside each deck's filter select its pre-fader CUE signal; they do
+not change its master output. CUE/MIX blends selected CUE channels with the master. At the
+CUE end, headphones are silent when all deck headphone buttons are off (unless an independent
+headphone preview is playing). Master monitoring is enabled only by turning CUE/MIX towards
+MIX; it is never substituted automatically when no deck is selected. PHONES controls the
+combined headphone volume.
+
+## Preview CPU budget
+
+`cargo test -p clubcraft-engine --test engine cpu_budget_4_decks_plus_2_mashup_preview_decks -j 4 -- --nocapture`
+measures ten seconds of four live decks with keylock, stems and FX while two private preview
+decks play a stem mashup throughout the overlap. It reports first-block, p99, p99.9 and worst
+block times. Release builds on Unix enforce a thread-CPU realtime factor below 0.4; Windows
+reports elapsed timing without a machine-load-dependent hard threshold. Run these memory-heavy
+tests one at a time. No output device is opened.
