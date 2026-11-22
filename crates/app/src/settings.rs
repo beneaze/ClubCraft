@@ -113,6 +113,7 @@ pub struct Settings {
     learn_deck: usize,
     pub message: String,
     pub tab: Tab,
+    pub models: crate::models::Installer,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -164,6 +165,7 @@ impl Settings {
             learn_deck: 0,
             message: String::new(),
             tab: Tab::General,
+            models: Default::default(),
         }
     }
 
@@ -247,7 +249,10 @@ impl Settings {
                             Tab::Mixer => mixer_ui(ui, prefs),
                             Tab::Audio => self.audio_ui(ui, handle, prefs),
                             Tab::Waveforms => waveforms_ui(ui, prefs),
-                            Tab::Analysis => analysis_ui(ui, prefs, actions),
+                            Tab::Analysis => {
+                                self.models_ui(ui);
+                                analysis_ui(ui, prefs, actions);
+                            }
                             Tab::Studio => studio_ui(ui, prefs),
                             Tab::Export => export_ui(ui, prefs),
                             Tab::Controllers => self.midi_ui(ui, handle),
@@ -449,6 +454,67 @@ impl Settings {
                 self.discard_audio_draft(prefs);
             }
         });
+    }
+
+    fn models_ui(&mut self, ui: &mut egui::Ui) {
+        use crate::models::{Phase, Source};
+        use clubcraft_core::paths;
+        section(ui, "Models");
+        let dir = paths::models_dir();
+        let installed = paths::has_models(&dir);
+        let pack = crate::models::platform_pack();
+        let user_dir = paths::user_models_dir();
+        // A pack this module installed that differs from the one this build was released with.
+        let outdated = installed && dir == user_dir
+            && matches!((crate::models::installed_pack(&dir), &pack), (Some(have), Some(want)) if have.id != want.id || have.sha256 != want.sha256);
+        if installed {
+            row(ui, "Installed", |ui| {
+                ui.label(RichText::new(dir.display().to_string()).color(theme::TEXT_DIM));
+            });
+        } else {
+            ui.colored_label(theme::WARN, "Not installed: stem separation, deep structure analysis and mashup re-ranking need the models.");
+        }
+        let phase = self.models.progress().phase();
+        if phase == Phase::Running {
+            ui.horizontal(|ui| {
+                let p = self.models.progress();
+                let gb = |b: u64| b as f64 / 1e9;
+                let (done, total) = (p.done.load(std::sync::atomic::Ordering::Relaxed), p.total.load(std::sync::atomic::Ordering::Relaxed));
+                ui.add(egui::ProgressBar::new(p.fraction()).desired_width(theme::MODEL_PROGRESS_WIDTH).text(format!("{:.2} of {:.2} GB", gb(done), gb(total))));
+                if ui.button("Cancel").clicked() {
+                    self.models.cancel();
+                }
+            });
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+        } else if let Some(pack) = pack.filter(|_| !installed || outdated) {
+            let size = format!("{:.1} GB", pack.size as f64 / 1e9);
+            ui.horizontal(|ui| {
+                let label = if outdated { format!("Update models ({size})") } else { format!("Download models ({size})") };
+                if ui.button(label).clicked() {
+                    self.models.start(pack.clone(), Source::Download);
+                }
+                if ui.button("Install from file…").on_hover_text(format!("A downloaded copy of {}", pack.url.rsplit('/').next().unwrap_or_default())).clicked() {
+                    if let Some(file) = rfd::FileDialog::new().set_title("Model pack").add_filter("Model pack", &["tar"]).pick_file() {
+                        self.models.start(pack.clone(), Source::File(file));
+                    }
+                }
+            });
+            hint(ui, "Downloaded once from the ClubCraft releases on GitHub and checked against the checksum this version was released with. App updates keep them.");
+        } else if !installed {
+            hint(ui, "This build has no model download. Export the models from the checkpoints (see models/README.md) or set CLUBCRAFT_MODELS to their folder.");
+        }
+        match phase {
+            Phase::Done => { ui.colored_label(theme::OK, "Models installed."); }
+            Phase::Cancelled => { ui.label(RichText::new("Download cancelled.").color(theme::TEXT_DIM)); }
+            Phase::Failed(e) => { ui.colored_label(theme::WARN, format!("Model download failed: {e}")); }
+            Phase::Idle | Phase::Running => {}
+        }
+        if ui.button("Open models folder").clicked() {
+            let open = if installed { dir } else { user_dir };
+            let _ = std::fs::create_dir_all(&open);
+            crate::platform::open(&open);
+        }
+        ui.add_space(6.0);
     }
 
     fn midi_ui(&mut self, ui: &mut egui::Ui, handle: Option<&EngineHandle>) {

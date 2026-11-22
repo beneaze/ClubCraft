@@ -46,6 +46,9 @@ impl WorkerContext {
     pub fn separator(&mut self, q: Quality) -> Result<&Separator> {
         if self.separator.as_ref().map(|s| s.0) != Some(q) {
             self.separator = None; // free the old models first
+            if !clubcraft_core::paths::models_installed() {
+                bail!("{}", crate::models::MISSING);
+            }
             let mut s = Separator::new(q).context("loading stem models")?;
             // Without GPU acceleration (CoreML / DirectML) the large models take many minutes per
             // track; fall back to the fast model.

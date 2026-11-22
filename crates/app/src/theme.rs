@@ -23,6 +23,8 @@ pub const TEXT_DIM: Color32 = Color32::from_rgb(130, 136, 148);
 pub const SELECT: Color32 = Color32::from_rgb(66, 71, 83);
 pub const OK: Color32 = Color32::from_rgb(90, 220, 130);
 pub const WARN: Color32 = Color32::from_rgb(255, 190, 60);
+/// Model pack download bar in Settings.
+pub const MODEL_PROGRESS_WIDTH: f32 = 320.0;
 /// The flag on a transition that still needs work.
 pub const FLAG: Color32 = WARN;
 /// Transition effects in the transition editor: echo, reverb, noise, loop, brake, side-chain.

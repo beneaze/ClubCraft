@@ -12,6 +12,33 @@ uv pip install --python .venv/bin/python torch==2.5.1 torchaudio==2.5.1 demucs==
 for m in htdemucs htdemucs_ft htdemucs_6s; do TORCH_HOME=$PWD/cache .venv/bin/python export_htdemucs.py --model $m --out ../../models; done
 ```
 
+## Model packs (downloads)
+
+The release packages don't contain the models: they change far less often than the app, and
+bundling them made every update a 1–1.4 GB download (issue #12). `tools/package-models.sh <N>`
+puts the files the app uses into two plain tar files, and writes their URLs, sizes and SHA-256
+checksums into [`crates/app/model-packs.json`](../crates/app/model-packs.json), which the app
+embeds:
+
+| pack | for | contents |
+|---|---|---|
+| `ClubCraft-models-v<N>-coreml.tar` | macOS | `htdemucs`, `htdemucs_ft_0..3`, `melroformer_fp16` (`.mlmodelc`), `allin1.onnx`, COCOLA |
+| `ClubCraft-models-v<N>-onnx.tar` | Windows, Linux | the same models as `.onnx` (RoFormer in fp32) |
+
+Both go on a GitHub release tagged `models-v<N>`. Settings › Analysis & stems › Download models
+streams the pack for its platform into a staging folder, checks size and checksum, and only then
+moves it to the user's models folder (`~/Library/Application Support/ClubCraft/Models`,
+`%LOCALAPPDATA%\ClubCraft\Models` or `~/.local/share/ClubCraft/Models`; `$CLUBCRAFT_HOME/Models`
+if that is set), where it stays across app updates. *Install from file…* does the same with a
+pack downloaded by hand. A new pack version is only needed when the model files change: run the
+script with the next number, upload both files, and commit `model-packs.json`.
+
+The app looks for models in this order: `CLUBCRAFT_MODELS`, the user's models folder, the app
+bundle (`Contents/Resources/models`), `<exe dir>/models`, then `models/` in the source checkout;
+the first folder that has weights wins. The packaging scripts still build an offline package with
+the models inside: `tools/bundle-macos.sh --with-models`, `tools/package-linux.sh --with-models`,
+`.\tools\package-windows.ps1 -WithModels`.
+
 ## Runtime (crates/stems)
 
 `clubcraft-stems` loads `<name>.json` and then either `<name>[_i].mlmodelc` (CoreML, macOS,

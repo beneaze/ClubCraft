@@ -8,8 +8,9 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 
 fn models() -> Option<PathBuf> {
+    // The JSON manifests are in git; the weights are not.
     let d = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models");
-    d.join("htdemucs.json").exists().then_some(d)
+    clubcraft_core::paths::has_models(&d).then_some(d)
 }
 
 /// ~31 s of a synthetic "track": kick-like pulses, a bass line, a chord pad and noise hats.

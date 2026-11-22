@@ -31,6 +31,10 @@ clubcraft-analysis.workspace = true
 clubcraft-engine.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 dirs = "6"
+# Model pack download (see src/models.rs).
+ureq = "2"
+sha2 = "0.10"
+tar = "0.4"
 
 # winit needs a display backend on Linux; both are loaded at run time, so one binary runs on X11 and Wayland.
 [target.'cfg(target_os = "linux")'.dependencies]

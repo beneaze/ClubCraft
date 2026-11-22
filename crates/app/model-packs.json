@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "packs": [
+    {
+      "id": "models-v1-coreml",
+      "backend": "coreml",
+      "url": "https://github.com/beneaze/ClubCraft/releases/download/models-v1/ClubCraft-models-v1-coreml.tar",
+      "size": 1574990336,
+      "sha256": "402509a193f97773ac9cbdf7313427fdda93d2fa026a79689406488e63011a09"
+    },
+    {
+      "id": "models-v1-onnx",
+      "backend": "onnx",
+      "url": "https://github.com/beneaze/ClubCraft/releases/download/models-v1/ClubCraft-models-v1-onnx.tar",
+      "size": 1830677504,
+      "sha256": "9024362f34ae0c168f40a77808e8f2b76d7320001d0376c6c9b5dd39ca745430"
+    }
+  ]
+}
