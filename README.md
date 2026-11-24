@@ -265,11 +265,11 @@ git clone https://github.com/beneaze/ClubCraft
 cd ClubCraft
 cargo run --release -p clubcraft          # the app
 cargo test -p clubcraft-core -p clubcraft-engine
-tools/bundle-macos.sh                     # target/ClubCraft.app, models included
-tools/package-linux.sh                    # dist/ClubCraft on Linux, models included
+tools/bundle-macos.sh --with-models       # target/ClubCraft.app with the models from ./models
+tools/package-linux.sh --with-models      # dist/ClubCraft on Linux, the same
 ```
 
-The separation models (≈ 3 GB) aren't in git. Export them once from the official checkpoints with the script in [`tools/model-export`](tools/model-export); [`models/README.md`](models/README.md) has the commands. On Windows, use `.\tools\package-windows.ps1`. On Linux, install the ALSA headers and cmake first (`sudo apt install libasound2-dev pkg-config cmake` on Debian/Ubuntu), then `tools/package-linux.sh` builds `dist/ClubCraft`.
+The separation models (≈ 3 GB) aren't in git. Export them once from the official checkpoints with the script in [`tools/model-export`](tools/model-export); [`models/README.md`](models/README.md) has the commands. Without `--with-models` the packages contain only the app, which downloads the models in Settings. On Windows, use `.\tools\package-windows.ps1`. On Linux, install the ALSA headers and cmake first (`sudo apt install libasound2-dev pkg-config cmake` on Debian/Ubuntu), then `tools/package-linux.sh` builds `dist/ClubCraft`.
 
 Your library, stems, waveforms, exports and recordings live in `~/Music/ClubCraft` (`CLUBCRAFT_HOME` changes that).
 
@@ -286,7 +286,9 @@ Your library, stems, waveforms, exports and recordings live in `~/Music/ClubCraf
 | Windows 10/11 (x64) | `ClubCraft-0.3.4-windows-x64.zip` | `ClubCraft.exe`, `DirectML.dll`, the ONNX stem models and the COCOLA mashup model |
 | Linux (x64, glibc 2.35+) | `ClubCraft-0.3.4-linux-x64.tar.gz` | X11 or Wayland, ALSA (PipeWire and PulseAudio through their ALSA plugins), the ONNX stem models and the COCOLA mashup model. Separation runs on the CPU |
 
-Development builds: `tools/bundle-macos.sh` (macOS), and the `ClubCraft-windows-x64` and `ClubCraft-linux-x64` artifacts of every [CI run](../../actions) (without models).
+After v0.3.4 the app packages no longer contain the models. ClubCraft downloads them once (Settings › Analysis & stems › Download models, about 1.5 GB from the [`models-v1`](../../releases/tag/models-v1) release), checks them against the checksum it was released with, and keeps them across updates.
+
+Development builds: `tools/bundle-macos.sh` (macOS), and the `ClubCraft-windows-x64` and `ClubCraft-linux-x64` artifacts of every [CI run](../../actions) (without models; they download the same way).
 
 ## License
 

@@ -8,7 +8,8 @@ its own licence.
 
 The model weights are not in git. They are exported from the official checkpoints with the
 scripts in [`tools/model-export`](tools/model-export) (see [`models/README.md`](models/README.md))
-and ship in the release packages.
+and ship as model packs on the `models-v<N>` releases, apart from the app, which downloads them on
+request.
 
 | Model | Used for | Authors | Licence |
 |---|---|---|---|
@@ -67,6 +68,16 @@ licences (almost all MIT and/or Apache-2.0). To print the full list with licence
 ```sh
 cargo install cargo-license && cargo license
 ```
+
+The model pack download uses these directly:
+
+| Crate | Used for | Licence |
+|---|---|---|
+| [ureq](https://github.com/algesten/ureq) | HTTPS download | MIT or Apache-2.0 |
+| [rustls](https://github.com/rustls/rustls) and [ring](https://github.com/briansmith/ring), via ureq | TLS | Apache-2.0 or ISC or MIT (rustls); Apache-2.0 and ISC (ring) |
+| [webpki-roots](https://github.com/rustls/webpki-roots), via ureq | Mozilla's CA certificates | CDLA-Permissive-2.0 |
+| [sha2](https://github.com/RustCrypto/hashes) | Checksum of the pack | MIT or Apache-2.0 |
+| [tar](https://github.com/alexcrichton/tar-rs) | Unpacking the pack | MIT or Apache-2.0 |
 
 ## Own work
 

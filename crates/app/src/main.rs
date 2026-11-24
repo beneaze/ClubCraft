@@ -19,6 +19,7 @@ mod mashup;
 mod mashup_view;
 mod mcp;
 mod menu;
+mod models;
 mod pipeline;
 mod platform;
 mod prefs;

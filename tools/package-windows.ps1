@@ -1,8 +1,9 @@
-# Build and package ClubCraft for Windows into dist\ClubCraft (exe, ONNX Runtime/DirectML DLLs,
-# and the ONNX separation models if they exist in .\models).
-#   .\tools\package-windows.ps1            # build + package
-#   .\tools\package-windows.ps1 -NoBuild   # package an existing release build
-param([switch]$NoBuild)
+# Build and package ClubCraft for Windows into dist\ClubCraft (exe, ONNX Runtime/DirectML DLLs).
+# The separation models ship apart (tools/package-models.sh) and the app downloads them on request.
+#   .\tools\package-windows.ps1               # build + package
+#   .\tools\package-windows.ps1 -NoBuild      # package an existing release build
+#   .\tools\package-windows.ps1 -WithModels   # also copy the ONNX models from .\models (offline package)
+param([switch]$NoBuild, [switch]$WithModels)
 $ErrorActionPreference = "Stop"
 Set-Location (Join-Path $PSScriptRoot "..")
 
@@ -10,7 +11,7 @@ if (-not $NoBuild) { cargo build --release -p clubcraft }
 
 $dist = "dist\ClubCraft"
 if (Test-Path $dist) { Remove-Item $dist -Recurse -Force }
-New-Item -ItemType Directory -Force -Path "$dist\models" | Out-Null
+New-Item -ItemType Directory -Force -Path $dist | Out-Null
 
 Copy-Item "target\release\ClubCraft.exe" "$dist\ClubCraft.exe"
 # ONNX Runtime / DirectML runtime libraries copied next to the build output by the ort crate.
@@ -30,12 +31,17 @@ if (-not (Test-Path "$dist\DirectML.dll")) {
   Copy-Item "$tmp\LICENSE.txt" "$dist\DirectML-LICENSE.txt" -ErrorAction SilentlyContinue
 }
 
-# Models: ONNX files + manifests (CoreML packages are macOS-only).
-if (Test-Path "models") {
+# Models (offline package only): ONNX files + manifests (CoreML packages are macOS-only).
+if ($WithModels -and (Test-Path "models")) {
+  New-Item -ItemType Directory -Force -Path "$dist\models" | Out-Null
+  Copy-Item "models\README.md" "$dist\models\README.md" -ErrorAction SilentlyContinue
   Get-ChildItem "models" -Include *.json, *.onnx, *.onnx.data, cocola_w.bin -File -Recurse | Where-Object { $_.Name -notlike "*_ref_*" -and $_.Name -notlike "htdemucs_6s*" } | ForEach-Object { Copy-Item $_.FullName "$dist\models" }
 }
 Copy-Item "README.md" $dist
-Copy-Item "models\README.md" "$dist\models\README.md" -ErrorAction SilentlyContinue
 
-$n = (Get-ChildItem "$dist\models" -Filter *.onnx -ErrorAction SilentlyContinue).Count
-Write-Host "Packaged $dist ($n ONNX models). Without models, ClubCraft runs but cannot separate stems; see models\README.md."
+if ($WithModels) {
+  $n = (Get-ChildItem "$dist\models" -Filter *.onnx -ErrorAction SilentlyContinue).Count
+  Write-Host "Packaged $dist ($n ONNX models)."
+} else {
+  Write-Host "Packaged $dist without models (Settings > Analysis & stems > Download models)."
+}

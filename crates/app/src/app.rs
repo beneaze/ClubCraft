@@ -195,6 +195,8 @@ impl App {
         app.settings.connect_midi(app.eng.handle.as_ref());
         if let Some(e) = &app.eng.error {
             app.status = e.clone();
+        } else if !clubcraft_core::paths::models_installed() {
+            app.status = crate::models::MISSING.into();
         }
         app.refresh_mixes();
         let last_mix = cc.storage.and_then(|s| eframe::get_value::<i64>(s, "mix"));

@@ -1,16 +1,29 @@
 #!/bin/sh
-# Build ClubCraft.app (release) with the CoreML stem models bundled.
-# usage: tools/bundle-macos.sh [--with-onnx]   → target/ClubCraft.app
+# Build ClubCraft.app (release). The separation models ship apart (tools/package-models.sh) and
+# the app downloads them on request; --with-models bundles the CoreML models (offline package),
+# --with-onnx the ONNX ones as well.
+# usage: tools/bundle-macos.sh [--with-models] [--with-onnx]   → target/ClubCraft.app
 set -e
+MODELS=0
+ONNX=0
+for a in "$@"; do
+  case "$a" in
+    --with-models) MODELS=1 ;;
+    --with-onnx) MODELS=1; ONNX=1 ;;
+    *) echo "unknown option: $a" >&2; exit 2 ;;
+  esac
+done
 cd "$(dirname "$0")/.."
 . "$HOME/.cargo/env" 2>/dev/null || true
 cargo build --release -j 4 -p clubcraft
 APP=target/ClubCraft.app
 VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/models"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp target/release/ClubCraft "$APP/Contents/MacOS/ClubCraft"
 cp crates/app/assets/ClubCraft.icns "$APP/Contents/Resources/ClubCraft.icns"
+if [ $MODELS = 1 ]; then
+mkdir -p "$APP/Contents/Resources/models"
 # Models used by the app: htdemucs (fast/live), htdemucs_ft (high), melroformer (best vocals),
 # allin1 (optional deep structure analysis, ONNX only). htdemucs_6s is not bundled.
 for m in htdemucs htdemucs_ft melroformer allin1; do
@@ -28,8 +41,9 @@ fi
 [ -f models/allin1.onnx ] && cp models/allin1.onnx "$APP/Contents/Resources/models/"
 # COCOLA (mashup finder re-ranking, ONNX, 19 MB)
 [ -f models/cocola.onnx ] && cp models/cocola.onnx models/cocola_w.bin models/cocola.json "$APP/Contents/Resources/models/"
-if [ "$1" = "--with-onnx" ]; then cp models/htdemucs*.onnx models/melroformer.onnx "$APP/Contents/Resources/models/" 2>/dev/null || true; fi
+if [ $ONNX = 1 ]; then cp models/htdemucs*.onnx models/melroformer.onnx "$APP/Contents/Resources/models/" 2>/dev/null || true; fi
 rm -f "$APP"/Contents/Resources/models/*_ref_*
+fi
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
