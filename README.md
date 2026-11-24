@@ -278,15 +278,15 @@ Your library, stems, waveforms, exports and recordings live in `~/Music/ClubCraf
 
 ## Downloads
 
-**[Latest release: v0.3.4](../../releases/tag/v0.3.4)**
+**[Latest release: v0.3.5](../../releases/tag/v0.3.5)**
 
 | Platform | File | Notes |
 |---|---|---|
-| macOS 13+ (Apple Silicon) | `ClubCraft-0.3.4-macos-arm64.dmg` | All CoreML stem models and the COCOLA mashup model bundled. Ad-hoc signed: right-click › Open the first time |
-| Windows 10/11 (x64) | `ClubCraft-0.3.4-windows-x64.zip` | `ClubCraft.exe`, `DirectML.dll`, the ONNX stem models and the COCOLA mashup model |
-| Linux (x64, glibc 2.35+) | `ClubCraft-0.3.4-linux-x64.tar.gz` | X11 or Wayland, ALSA (PipeWire and PulseAudio through their ALSA plugins), the ONNX stem models and the COCOLA mashup model. Separation runs on the CPU |
+| macOS 13+ (Apple Silicon) | `ClubCraft-0.3.5-macos-arm64.dmg` | Ad-hoc signed: right-click › Open the first time |
+| Windows 10/11 (x64) | `ClubCraft-0.3.5-windows-x64.zip` | `ClubCraft.exe` and `DirectML.dll` |
+| Linux (x64, glibc 2.35+) | `ClubCraft-0.3.5-linux-x64.tar.gz` | X11 or Wayland, ALSA (PipeWire and PulseAudio through their ALSA plugins). Separation runs on the CPU |
 
-After v0.3.4 the app packages no longer contain the models. ClubCraft downloads them once (Settings › Analysis & stems › Download models, about 1.5 GB from the [`models-v1`](../../releases/tag/models-v1) release), checks them against the checksum it was released with, and keeps them across updates.
+The app packages don't contain the models. ClubCraft downloads them once (Settings › Analysis & stems › Download models: 1.6 GB on macOS, 1.8 GB on Windows and Linux, from the [`models-v1`](../../releases/tag/models-v1) release), checks them against the checksum it was released with, and keeps them across updates. **Install from file…** in the same place installs a pack you downloaded yourself.
 
 Development builds: `tools/bundle-macos.sh` (macOS), and the `ClubCraft-windows-x64` and `ClubCraft-linux-x64` artifacts of every [CI run](../../actions) (without models; they download the same way).
 
